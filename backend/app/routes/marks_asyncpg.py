@@ -114,17 +114,22 @@ async def get_marks(
     # - timestamp column: "time" (timestamp)
     # - timeframe: '15min'/'5min' (text)
     # - symbol: 'NIFTY'
+    # Convert IST timestamps to UTC epochs for TradingView
+    # Database stores naive timestamps representing IST (UTC+5:30)
+    # We need to subtract 19800 seconds (5.5 hours) from the epoch
     sql = f"""
         SELECT
           symbol,
           timeframe,
-          EXTRACT(EPOCH FROM "time")::bigint AS time_s,
+          (EXTRACT(EPOCH FROM "time")::bigint - 19800) AS time_s,
           label,
-          label_confidence
+          label_confidence,
+          "time" as db_time
         FROM ml_labeled_data
         WHERE symbol = $1
           AND timeframe = $2
-          AND "time" BETWEEN to_timestamp($3) AND to_timestamp($4)
+          AND "time" BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes') 
+                         AND (to_timestamp($4) + interval '5 hours 30 minutes')
           {label_pred}
         ORDER BY time_s DESC
         LIMIT 2000
@@ -138,6 +143,11 @@ async def get_marks(
     logger = logging.getLogger(__name__)
     logger.info(f"Marks query: symbol={payload.symbol}, timeframe={timeframe}, from={from_s}, to={to_s}, found {len(rows)} rows, raw={raw}")
     logger.info(f"Debug: SQL query with label_pred='{label_pred}' - filtering for user labels only")
+    
+    # Debug timezone conversion
+    if rows:
+        sample = rows[0]
+        logger.info(f"Debug first row - time_s: {sample['time_s']}, db_time: {sample.get('db_time', 'N/A')}")
 
     # Return raw data if requested (for frontend processing)
     if raw:
@@ -205,17 +215,22 @@ async def get_marks_raw(
     if not include_neutral:
         label_pred += " AND label <> 'Neutral'"
 
+    # Convert IST timestamps to UTC epochs for TradingView
+    # Database stores naive timestamps representing IST (UTC+5:30)
+    # We need to subtract 19800 seconds (5.5 hours) from the epoch
     sql = f"""
         SELECT
           symbol,
           timeframe,
-          EXTRACT(EPOCH FROM "time")::bigint AS time_s,
+          (EXTRACT(EPOCH FROM "time")::bigint - 19800) AS time_s,
           label,
-          label_confidence
+          label_confidence,
+          "time" as db_time
         FROM ml_labeled_data
         WHERE symbol = $1
           AND timeframe = $2
-          AND "time" BETWEEN to_timestamp($3) AND to_timestamp($4)
+          AND "time" BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes') 
+                         AND (to_timestamp($4) + interval '5 hours 30 minutes')
           {label_pred}
         ORDER BY time_s DESC
         LIMIT 2000

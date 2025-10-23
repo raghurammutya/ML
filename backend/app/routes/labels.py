@@ -63,11 +63,34 @@ async def create_label(
         }
         symbol_normalized = symbol_aliases.get(symbol_normalized, symbol_normalized)
         
-        # Normalize timeframe to match DB format ('5' -> '5min')
-        timeframe = f"{label_data.timeframe}min" if label_data.timeframe.isdigit() else label_data.timeframe
+        # Normalize timeframe to match DB format (same logic as database.py)
+        def normalize_timeframe(resolution: str) -> str:
+            r = str(resolution).strip().lower()
+            if r in {"60", "1h", "60min", "1hour"}:
+                return "1hour"
+            if r in {"1d", "d", "day", "1day"}:
+                return "1day"
+            if r.isdigit():
+                minutes = int(r)
+                if minutes <= 30:
+                    return f"{minutes}min"
+                elif minutes == 60:
+                    return "1hour"
+                else:
+                    return f"{minutes}min"
+            return f"{resolution}min" if resolution.isdigit() else resolution
         
-        # Convert unix timestamp to PostgreSQL timestamp
-        timestamp = datetime.fromtimestamp(label_data.timestamp)
+        timeframe = normalize_timeframe(label_data.timeframe)
+        
+        # Convert unix timestamp to PostgreSQL timestamp (as IST naive datetime)
+        # TradingView sends UTC epoch, but database expects IST naive timestamps
+        from datetime import timezone, timedelta
+        utc_dt = datetime.fromtimestamp(label_data.timestamp, tz=timezone.utc)
+        ist_offset = timedelta(hours=5, minutes=30)
+        ist_tz = timezone(ist_offset)
+        ist_dt = utc_dt.astimezone(ist_tz)
+        # Store as naive datetime (database expects IST naive)
+        timestamp = ist_dt.replace(tzinfo=None)
         
         async with pool.acquire() as conn:
             # First check if a label already exists
@@ -119,11 +142,34 @@ async def delete_label(
         }
         symbol_normalized = symbol_aliases.get(symbol_normalized, symbol_normalized)
         
-        # Normalize timeframe
-        timeframe = f"{label_data.timeframe}min" if label_data.timeframe.isdigit() else label_data.timeframe
+        # Normalize timeframe to match DB format (same logic as database.py)
+        def normalize_timeframe(resolution: str) -> str:
+            r = str(resolution).strip().lower()
+            if r in {"60", "1h", "60min", "1hour"}:
+                return "1hour"
+            if r in {"1d", "d", "day", "1day"}:
+                return "1day"
+            if r.isdigit():
+                minutes = int(r)
+                if minutes <= 30:
+                    return f"{minutes}min"
+                elif minutes == 60:
+                    return "1hour"
+                else:
+                    return f"{minutes}min"
+            return f"{resolution}min" if resolution.isdigit() else resolution
         
-        # Convert unix timestamp to PostgreSQL timestamp
-        timestamp = datetime.fromtimestamp(label_data.timestamp)
+        timeframe = normalize_timeframe(label_data.timeframe)
+        
+        # Convert unix timestamp to PostgreSQL timestamp (as IST naive datetime)
+        # TradingView sends UTC epoch, but database expects IST naive timestamps
+        from datetime import timezone, timedelta
+        utc_dt = datetime.fromtimestamp(label_data.timestamp, tz=timezone.utc)
+        ist_offset = timedelta(hours=5, minutes=30)
+        ist_tz = timezone(ist_offset)
+        ist_dt = utc_dt.astimezone(ist_tz)
+        # Store as naive datetime (database expects IST naive)
+        timestamp = ist_dt.replace(tzinfo=None)
         
         async with pool.acquire() as conn:
             result = await conn.execute("""
