@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Development Database
+  postgres-dev:
+    image: timescale/timescaledb:latest-pg15
+    container_name: tv-postgres-dev
+    environment:
+      POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_dev}
+      POSTGRES_USER: ${DB_USER:-stocksblitz}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"  # Non-conflicting port
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Development Redis
+  redis-dev:
+    image: redis:7-alpine
+    container_name: tv-redis-dev
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_pass}
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6382:6379"  # Non-conflicting port
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Development Backend
+  backend-dev:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: tv-backend-dev
+    environment:
+      DB_HOST: postgres-dev
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-stocksblitz_unified_dev}
+      DB_USER: ${DB_USER:-stocksblitz}
+      DB_PASSWORD: ${DB_PASSWORD:-dev_password}
+      REDIS_URL: redis://redis-dev:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-dev_redis_pass}
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ../../backend:/app  # Mount for hot reload
+    ports:
+      - "8001:8000"  # Port 8001 for dev backend
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      redis-dev:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Development Frontend
+  frontend-dev:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: tv-frontend-dev
+    environment:
+      - VITE_API_URL=http://5.223.52.98:8001
+      - VITE_ENVIRONMENT=development
+    volumes:
+      - ../../frontend/src:/app/src  # Mount for hot reload
+    ports:
+      - "3001:3000"  # Port 3001 for dev frontend
+    depends_on:
+      - backend-dev
+    restart: unless-stopped
+
+volumes:
+  postgres_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+
+networks:
+  default:
+    name: tradingview-dev-network

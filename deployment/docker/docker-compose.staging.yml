@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # Staging Database
+  postgres-staging:
+    image: timescale/timescaledb:latest-pg15
+    container_name: tv-postgres-staging
+    environment:
+      POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_staging}
+      POSTGRES_USER: ${DB_USER:-stocksblitz}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    ports:
+      - "5436:5432"  # Non-conflicting port
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Staging Redis
+  redis-staging:
+    image: redis:7-alpine
+    container_name: tv-redis-staging
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_staging_data:/data
+    ports:
+      - "6383:6379"  # Non-conflicting port
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Staging Backend
+  backend-staging:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: tv-backend-staging
+    environment:
+      DB_HOST: postgres-staging
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-stocksblitz_unified_staging}
+      DB_USER: ${DB_USER:-stocksblitz}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_URL: redis://redis-staging:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      ENVIRONMENT: staging
+      DEBUG: "false"
+      LOG_LEVEL: INFO
+    ports:
+      - "8002:8000"  # Port 8002 for staging backend
+    depends_on:
+      postgres-staging:
+        condition: service_healthy
+      redis-staging:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Staging Frontend
+  frontend-staging:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: tv-frontend-staging
+    environment:
+      - VITE_API_URL=http://5.223.52.98:8002
+      - VITE_ENVIRONMENT=staging
+    ports:
+      - "3002:3000"  # Port 3002 for staging frontend
+    depends_on:
+      - backend-staging
+    restart: unless-stopped
+
+volumes:
+  postgres_staging_data:
+    driver: local
+  redis_staging_data:
+    driver: local
+
+networks:
+  default:
+    name: tradingview-staging-network
