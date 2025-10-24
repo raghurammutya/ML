@@ -1,0 +1,205 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches: [develop, dev, development]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  PROJECT_PATH: /home/stocksadmin/Quantagro/tradingview-viz
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+
+    - name: Lint frontend code
+      run: |
+        cd frontend
+        npx tsc --noEmit --skipLibCheck
+        echo "✓ TypeScript compilation successful"
+
+    - name: Lint backend code
+      run: |
+        cd backend
+        python -m py_compile $(find . -name "*.py")
+        echo "✓ Python syntax validation successful"
+
+    - name: Test frontend build
+      run: |
+        cd frontend
+        npm run build
+        echo "✓ Frontend build successful"
+
+    - name: Validate Docker configuration
+      run: |
+        # Check if docker-compose files are valid
+        docker-compose -f docker-compose.unified.yml config > /dev/null
+        echo "✓ Docker compose configuration valid"
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+    
+    environment:
+      name: development
+      url: http://${{ secrets.DEV_SERVER || secrets.PRODUCTION_SERVER }}:3080
+    
+    steps:
+    - name: Deploy to development environment
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.DEV_SERVER || secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 300s
+        script: |
+          set -e
+          
+          cd ${{ env.PROJECT_PATH }}
+          
+          echo "=== Development Deployment ==="
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          # Pull latest changes
+          git fetch origin
+          git reset --hard ${{ github.sha }}
+          
+          # Use development environment
+          if [[ -f ".env.dev" ]]; then
+            export $(cat .env.dev | grep -v '^#' | xargs)
+          fi
+          
+          # Deploy using secure script
+          if [[ -x "./scripts/secure-deploy.sh" ]]; then
+            ./scripts/secure-deploy.sh development
+          else
+            # Fallback manual deployment
+            echo "Using fallback deployment method..."
+            
+            # Stop services
+            docker-compose -f docker-compose.unified.yml down || true
+            
+            # Build and start
+            docker-compose -f docker-compose.unified.yml build
+            docker-compose -f docker-compose.unified.yml up -d
+            
+            # Wait and verify
+            sleep 20
+            
+            # Simple health check
+            if curl -sf "http://localhost:${BACKEND_PORT:-8888}/health" > /dev/null; then
+              echo "✓ Development deployment successful"
+            else
+              echo "✗ Development deployment health check failed"
+              exit 1
+            fi
+          fi
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: success()
+    
+    steps:
+    - name: Run integration tests
+      run: |
+        echo "Running integration tests against development environment..."
+        
+        # Wait for services to fully start
+        sleep 30
+        
+        # Test API endpoints
+        server="${{ secrets.DEV_SERVER || secrets.PRODUCTION_SERVER }}"
+        
+        # Health check
+        if curl -sf "http://$server:8888/health"; then
+          echo "✓ API health check passed"
+        else
+          echo "✗ API health check failed"
+          exit 1
+        fi
+        
+        # Test frontend
+        if curl -sf "http://$server:3080"; then
+          echo "✓ Frontend accessibility check passed"
+        else
+          echo "✗ Frontend accessibility check failed"
+          exit 1
+        fi
+        
+        # Test specific endpoints
+        echo "Testing chart data endpoint..."
+        if curl -sf "http://$server:8888/history?symbol=NIFTY50&resolution=5&from=1640995200&to=1672531200" > /dev/null; then
+          echo "✓ Chart data endpoint responding"
+        else
+          echo "✗ Chart data endpoint failed"
+          exit 1
+        fi
+        
+        echo "✓ All integration tests passed"
+
+  notify-dev:
+    name: Development Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [test, deploy-dev, integration-test]
+    if: always()
+    
+    steps:
+    - name: Create deployment summary
+      run: |
+        echo "## 🛠️ Development Deployment Summary" > dev-summary.md
+        echo "" >> dev-summary.md
+        echo "**Environment:** Development" >> dev-summary.md
+        echo "**Status:** ${{ job.status }}" >> dev-summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> dev-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> dev-summary.md
+        echo "**Author:** ${{ github.actor }}" >> dev-summary.md
+        echo "**Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> dev-summary.md
+        echo "" >> dev-summary.md
+        
+        if [[ "${{ needs.test.result }}" == "failure" ]]; then
+          echo "**Result:** ❌ Tests failed" >> dev-summary.md
+        elif [[ "${{ needs.deploy-dev.result }}" == "failure" ]]; then
+          echo "**Result:** ❌ Deployment failed" >> dev-summary.md
+        elif [[ "${{ needs.integration-test.result }}" == "failure" ]]; then
+          echo "**Result:** ⚠️ Deployment succeeded but integration tests failed" >> dev-summary.md
+        else
+          echo "**Result:** ✅ Development deployment successful" >> dev-summary.md
+          echo "**URL:** http://${{ secrets.DEV_SERVER || secrets.PRODUCTION_SERVER }}:3080" >> dev-summary.md
+        fi
+        
+        cat dev-summary.md

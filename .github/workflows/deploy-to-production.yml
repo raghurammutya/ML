@@ -1,0 +1,338 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment (bypass some checks)'
+        required: false
+        default: 'false'
+        type: boolean
+      backup_before_deploy:
+        description: 'Create backup before deployment'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  PRODUCTION_SERVER: ${{ secrets.PRODUCTION_SERVER }}
+  SSH_USER: ${{ secrets.SSH_USER }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  PROJECT_PATH: /home/stocksadmin/Quantagro/tradingview-viz
+  DEPLOYMENT_TIMEOUT: 600  # 10 minutes
+
+jobs:
+  validate:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+      commit_message: ${{ steps.commit.outputs.message }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    - name: Get commit information
+      id: commit
+      run: |
+        echo "message=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
+        echo "author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+        echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Check for deployment markers
+      id: check
+      run: |
+        commit_msg="${{ steps.commit.outputs.message }}"
+        
+        # Skip deployment for certain commit messages
+        if echo "$commit_msg" | grep -iE "(skip deploy|no deploy|wip|draft)"; then
+          echo "should_deploy=false" >> $GITHUB_OUTPUT
+          echo "Deployment skipped due to commit message"
+          exit 0
+        fi
+        
+        # Deploy for production-ready changes
+        if echo "$commit_msg" | grep -iE "(deploy|release|production|hotfix)"; then
+          echo "should_deploy=true" >> $GITHUB_OUTPUT
+          echo "Deployment triggered by commit message"
+          exit 0
+        fi
+        
+        # Default behavior for main/master branch
+        echo "should_deploy=true" >> $GITHUB_OUTPUT
+
+    - name: Validate critical files
+      run: |
+        echo "Validating critical files exist..."
+        
+        critical_files=(
+          "docker-compose.unified.yml"
+          "frontend/package.json"
+          "backend/requirements.txt" 
+          "deployment/nginx.conf.template"
+          ".env.prod"
+        )
+        
+        for file in "${critical_files[@]}"; do
+          if [[ ! -f "$file" ]]; then
+            echo "ERROR: Critical file missing: $file"
+            exit 1
+          fi
+          echo "✓ $file exists"
+        done
+
+    - name: Check TypeScript compilation
+      run: |
+        cd frontend
+        npm ci
+        npx tsc --noEmit --skipLibCheck
+        echo "✓ TypeScript validation passed"
+
+    - name: Check Python syntax
+      run: |
+        cd backend
+        python3 -m py_compile $(find . -name "*.py")
+        echo "✓ Python syntax validation passed"
+
+  backup:
+    name: Create Pre-deployment Backup
+    runs-on: ubuntu-latest
+    needs: validate
+    if: needs.validate.outputs.should_deploy == 'true' && (github.event.inputs.backup_before_deploy == 'true' || github.event.inputs.backup_before_deploy == '')
+    
+    steps:
+    - name: Create deployment backup
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 120s
+        script: |
+          cd ${{ env.PROJECT_PATH }}
+          
+          # Create pre-deployment backup
+          backup_dir="/opt/tradingview-backups"
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          backup_path="$backup_dir/pre_deploy_$timestamp"
+          
+          sudo mkdir -p "$backup_dir"
+          sudo cp -r "${{ env.PROJECT_PATH }}" "$backup_path"
+          
+          # Create backup metadata
+          sudo tee "$backup_path/backup_info.txt" > /dev/null << EOF
+          Backup Type: Pre-deployment
+          Created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Git Commit: ${{ github.sha }}
+          Commit Message: ${{ needs.validate.outputs.commit_message }}
+          Triggered By: ${{ github.actor }}
+          Workflow: ${{ github.workflow }}
+          EOF
+          
+          echo "✓ Pre-deployment backup created: $backup_path"
+          
+          # Keep only last 5 deployment backups
+          sudo ls -t "$backup_dir"/pre_deploy_* | tail -n +6 | sudo xargs rm -rf 2>/dev/null || true
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate, backup]
+    if: needs.validate.outputs.should_deploy == 'true'
+    
+    environment:
+      name: production
+      url: http://${{ secrets.PRODUCTION_SERVER }}:3080
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to production server
+      uses: appleboy/ssh-action@v1.0.0
+      timeout-minutes: 10
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: ${{ env.DEPLOYMENT_TIMEOUT }}s
+        script: |
+          set -e
+          
+          cd ${{ env.PROJECT_PATH }}
+          
+          echo "=== Starting Production Deployment ==="
+          echo "Commit: ${{ github.sha }}"
+          echo "Author: ${{ github.actor }}"
+          echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          # Check if production is locked
+          if [[ -f "/tmp/tradingview-production.lock" ]]; then
+            source "/tmp/tradingview-production.lock"
+            if [[ "$PRODUCTION_LOCKED" == "true" ]] && [[ "${{ github.event.inputs.force_deploy }}" != "true" ]]; then
+              echo "ERROR: Production environment is locked!"
+              echo "Locked at: $LOCKED_AT by $LOCKED_BY"
+              echo "Use force_deploy option or unlock production first"
+              exit 1
+            fi
+          fi
+          
+          # Pull latest changes
+          echo "Pulling latest changes..."
+          git fetch origin
+          git reset --hard ${{ github.sha }}
+          
+          # Load environment
+          if [[ -f ".env.prod" ]]; then
+            export $(cat .env.prod | grep -v '^#' | xargs)
+          fi
+          
+          # Pre-deployment validation
+          echo "Running pre-deployment validation..."
+          if [[ -x "./scripts/validate-deployment.sh" ]]; then
+            ./scripts/validate-deployment.sh
+          fi
+          
+          # Stop services
+          echo "Stopping services..."
+          docker-compose -f docker-compose.unified.yml down
+          
+          # Build new images
+          echo "Building new images..."
+          docker-compose -f docker-compose.unified.yml build
+          
+          # Start services
+          echo "Starting services..."
+          docker-compose -f docker-compose.unified.yml up -d
+          
+          # Wait for services to be ready
+          echo "Waiting for services to start..."
+          sleep 30
+          
+          # Health check
+          echo "Performing health checks..."
+          max_attempts=10
+          attempt=1
+          
+          while [[ $attempt -le $max_attempts ]]; do
+            echo "Health check attempt $attempt/$max_attempts"
+            
+            # Check API health
+            if curl -sf "http://localhost:${BACKEND_PORT:-8888}/health" > /dev/null; then
+              echo "✓ Backend health check passed"
+              
+              # Check frontend
+              if curl -sf "http://localhost:${FRONTEND_PORT:-3080}" > /dev/null; then
+                echo "✓ Frontend health check passed"
+                echo "=== Deployment Successful ==="
+                exit 0
+              fi
+            fi
+            
+            echo "Health check failed, waiting..."
+            sleep 10
+            ((attempt++))
+          done
+          
+          echo "ERROR: Health checks failed after $max_attempts attempts"
+          
+          # Rollback on failure
+          echo "Rolling back deployment..."
+          docker-compose -f docker-compose.unified.yml down
+          
+          # Restore from backup if available
+          latest_backup=$(ls -t /opt/tradingview-backups/pre_deploy_* 2>/dev/null | head -1)
+          if [[ -n "$latest_backup" ]]; then
+            echo "Restoring from backup: $latest_backup"
+            sudo rsync -av --delete "$latest_backup/" "${{ env.PROJECT_PATH }}/"
+            docker-compose -f docker-compose.unified.yml up -d
+          fi
+          
+          exit 1
+
+  verify:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    
+    steps:
+    - name: Verify deployment health
+      run: |
+        echo "Waiting for deployment to stabilize..."
+        sleep 60
+        
+        # Test API endpoints
+        echo "Testing API endpoints..."
+        
+        # Health endpoint
+        response=$(curl -s -w "%{http_code}" "http://${{ secrets.PRODUCTION_SERVER }}:8888/health")
+        if [[ "${response: -3}" == "200" ]]; then
+          echo "✓ API health endpoint responding"
+        else
+          echo "✗ API health endpoint failed"
+          exit 1
+        fi
+        
+        # Frontend
+        response=$(curl -s -w "%{http_code}" "http://${{ secrets.PRODUCTION_SERVER }}:3080/")
+        if [[ "${response: -3}" == "200" ]]; then
+          echo "✓ Frontend responding"
+        else
+          echo "✗ Frontend failed"
+          exit 1
+        fi
+        
+        echo "✓ All deployment verification tests passed"
+
+  notify:
+    name: Notification
+    runs-on: ubuntu-latest
+    needs: [validate, backup, deploy, verify]
+    if: always()
+    
+    steps:
+    - name: Create deployment summary
+      run: |
+        echo "## 🚀 Production Deployment Summary" > deployment-summary.md
+        echo "" >> deployment-summary.md
+        echo "**Status:** ${{ job.status }}" >> deployment-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> deployment-summary.md
+        echo "**Author:** ${{ github.actor }}" >> deployment-summary.md
+        echo "**Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> deployment-summary.md
+        echo "**Message:** ${{ needs.validate.outputs.commit_message }}" >> deployment-summary.md
+        echo "" >> deployment-summary.md
+        
+        if [[ "${{ needs.validate.outputs.should_deploy }}" == "false" ]]; then
+          echo "**Result:** Deployment skipped" >> deployment-summary.md
+        elif [[ "${{ needs.deploy.result }}" == "success" ]]; then
+          echo "**Result:** ✅ Deployment successful" >> deployment-summary.md
+          echo "**URL:** http://${{ secrets.PRODUCTION_SERVER }}:3080" >> deployment-summary.md
+        else
+          echo "**Result:** ❌ Deployment failed" >> deployment-summary.md
+          echo "**Action:** Automatic rollback attempted" >> deployment-summary.md
+        fi
+        
+        cat deployment-summary.md
+
+    - name: Log deployment result
+      uses: appleboy/ssh-action@v1.0.0
+      if: needs.validate.outputs.should_deploy == 'true'
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 30s
+        script: |
+          # Log deployment to production logs
+          deployment_log="/var/log/tradingview-deployments.log"
+          
+          status="${{ needs.deploy.result }}"
+          timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          echo "[$timestamp] GitHub Actions Deployment - Status: $status, Commit: ${{ github.sha }}, Actor: ${{ github.actor }}" | sudo tee -a "$deployment_log"

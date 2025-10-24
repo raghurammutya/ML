@@ -1,0 +1,481 @@
+name: Manual Production Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type "DEPLOY_TO_PRODUCTION" to confirm'
+        required: true
+        type: string
+      backup_database:
+        description: 'Backup database before deployment'
+        required: false
+        default: true
+        type: boolean
+      force_unlock:
+        description: 'Force unlock production (use with caution)'
+        required: false
+        default: false
+        type: boolean
+      rollback_on_failure:
+        description: 'Automatically rollback on failure'
+        required: false
+        default: true
+        type: boolean
+      maintenance_window:
+        description: 'Estimated maintenance window (minutes)'
+        required: false
+        default: '15'
+        type: string
+
+env:
+  PRODUCTION_SERVER: ${{ secrets.PRODUCTION_SERVER }}
+  SSH_USER: ${{ secrets.SSH_USER }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  PROJECT_PATH: /home/stocksadmin/Quantagro/tradingview-viz
+
+jobs:
+  validate-input:
+    name: Validate Deployment Request
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.validate.outputs.proceed }}
+    
+    steps:
+    - name: Validate confirmation
+      id: validate
+      run: |
+        if [[ "${{ github.event.inputs.confirmation }}" != "DEPLOY_TO_PRODUCTION" ]]; then
+          echo "ERROR: Invalid confirmation. Must type exactly 'DEPLOY_TO_PRODUCTION'"
+          echo "proceed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        echo "✓ Deployment confirmation validated"
+        echo "proceed=true" >> $GITHUB_OUTPUT
+
+    - name: Log deployment request
+      run: |
+        echo "🚨 PRODUCTION DEPLOYMENT REQUESTED"
+        echo "Requested by: ${{ github.actor }}"
+        echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "Commit: ${{ github.sha }}"
+        echo "Maintenance Window: ${{ github.event.inputs.maintenance_window }} minutes"
+        echo "Backup Database: ${{ github.event.inputs.backup_database }}"
+        echo "Force Unlock: ${{ github.event.inputs.force_unlock }}"
+        echo "Auto Rollback: ${{ github.event.inputs.rollback_on_failure }}"
+
+  pre-deployment-checks:
+    name: Pre-deployment Checks
+    runs-on: ubuntu-latest
+    needs: validate-input
+    if: needs.validate-input.outputs.proceed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Comprehensive validation
+      run: |
+        echo "=== Pre-deployment Validation ==="
+        
+        # Check critical files
+        critical_files=(
+          "docker-compose.unified.yml"
+          ".env.prod"
+          "frontend/src/App.tsx"
+          "frontend/src/components/CustomChartWithMLLabels.tsx"
+          "backend/app/main.py"
+          "deployment/nginx.conf.template"
+        )
+        
+        for file in "${critical_files[@]}"; do
+          if [[ ! -f "$file" ]]; then
+            echo "❌ Critical file missing: $file"
+            exit 1
+          fi
+          echo "✅ $file exists"
+        done
+        
+        # Validate Docker composition
+        if docker-compose -f docker-compose.unified.yml config > /dev/null 2>&1; then
+          echo "✅ Docker compose configuration valid"
+        else
+          echo "❌ Docker compose configuration invalid"
+          exit 1
+        fi
+        
+        # Check for security vulnerabilities in dependencies
+        echo "Checking for known vulnerabilities..."
+        
+        # Frontend security check
+        cd frontend
+        if command -v npm > /dev/null; then
+          npm audit --audit-level=high || echo "⚠️ Frontend security warnings found"
+        fi
+        
+        cd ../backend
+        # Backend security check would go here
+        
+        echo "✅ Pre-deployment checks completed"
+
+    - name: Check production server status
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 60s
+        script: |
+          echo "=== Production Server Status Check ==="
+          
+          # Check disk space
+          df -h | grep -E "(/$|/opt)" | while read line; do
+            usage=$(echo "$line" | awk '{print $5}' | sed 's/%//')
+            if [[ $usage -gt 85 ]]; then
+              echo "⚠️ High disk usage: $line"
+            else
+              echo "✅ Disk space OK: $line"
+            fi
+          done
+          
+          # Check memory
+          free -h
+          
+          # Check current services
+          cd ${{ env.PROJECT_PATH }}
+          if docker-compose -f docker-compose.unified.yml ps | grep -q "Up"; then
+            echo "✅ Current services are running"
+          else
+            echo "⚠️ Some services may not be running"
+          fi
+          
+          # Check production lock status
+          if [[ -f "/tmp/tradingview-production.lock" ]]; then
+            echo "🔒 Production environment is currently locked"
+            cat /tmp/tradingview-production.lock
+          else
+            echo "🔓 Production environment is unlocked"
+          fi
+
+  database-backup:
+    name: Database Backup
+    runs-on: ubuntu-latest
+    needs: [validate-input, pre-deployment-checks]
+    if: needs.validate-input.outputs.proceed == 'true' && github.event.inputs.backup_database == 'true'
+    
+    steps:
+    - name: Create database backup
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 300s
+        script: |
+          echo "=== Creating Database Backup ==="
+          
+          cd ${{ env.PROJECT_PATH }}
+          
+          # Run database backup
+          if [[ -x "./database-backup.sh" ]]; then
+            echo "Running critical tables backup..."
+            ./database-backup.sh
+            echo "✅ Database backup completed"
+          else
+            echo "⚠️ Database backup script not found"
+          fi
+          
+          # Create additional full database backup for deployment
+          if [[ -f ".env.prod" ]]; then
+            export $(cat .env.prod | grep -v '^#' | xargs)
+            
+            backup_file="/opt/tradingview-db-backups/full_backup_$(date +%Y%m%d_%H%M%S).sql"
+            
+            # Parse database URL for full backup
+            if [[ $DATABASE_URL =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/(.+) ]]; then
+              DB_USER="${BASH_REMATCH[1]}"
+              DB_PASSWORD="${BASH_REMATCH[2]}"
+              DB_HOST="${BASH_REMATCH[3]}"
+              DB_PORT="${BASH_REMATCH[4]}"
+              DB_NAME="${BASH_REMATCH[5]}"
+              
+              export PGPASSWORD="$DB_PASSWORD"
+              
+              if pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                  --compress=9 -f "$backup_file"; then
+                echo "✅ Full database backup created: $backup_file"
+              else
+                echo "⚠️ Full database backup failed"
+              fi
+            fi
+          fi
+
+  production-deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [validate-input, pre-deployment-checks, database-backup]
+    if: always() && needs.validate-input.outputs.proceed == 'true' && (needs.database-backup.result == 'success' || needs.database-backup.result == 'skipped')
+    
+    environment:
+      name: production
+      url: http://${{ secrets.PRODUCTION_SERVER }}:3080
+    
+    steps:
+    - name: Execute production deployment
+      uses: appleboy/ssh-action@v1.0.0
+      timeout-minutes: 20
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 1200s
+        script: |
+          set -e
+          
+          cd ${{ env.PROJECT_PATH }}
+          
+          echo "🚀 STARTING PRODUCTION DEPLOYMENT"
+          echo "======================================="
+          echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Operator: ${{ github.actor }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Maintenance Window: ${{ github.event.inputs.maintenance_window }} minutes"
+          echo ""
+          
+          # Unlock production if requested
+          if [[ "${{ github.event.inputs.force_unlock }}" == "true" ]]; then
+            echo "🔓 Force unlocking production environment..."
+            if [[ -x "./scripts/unlock-production.sh" ]]; then
+              echo "GitHub Actions Deployment - ${{ github.actor }}" | sudo ./scripts/unlock-production.sh
+            else
+              sudo rm -f /tmp/tradingview-production.lock
+            fi
+          fi
+          
+          # Pull latest changes
+          echo "📥 Pulling latest changes..."
+          git fetch origin
+          git reset --hard ${{ github.sha }}
+          
+          # Load production environment
+          if [[ -f ".env.prod" ]]; then
+            export $(cat .env.prod | grep -v '^#' | xargs)
+          fi
+          
+          # Create deployment backup
+          echo "💾 Creating deployment backup..."
+          backup_dir="/opt/tradingview-backups"
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          backup_path="$backup_dir/github_deploy_$timestamp"
+          
+          sudo mkdir -p "$backup_dir"
+          sudo cp -r "${{ env.PROJECT_PATH }}" "$backup_path"
+          
+          # Execute secure deployment
+          echo "🚀 Executing deployment..."
+          if [[ -x "./scripts/secure-deploy.sh" ]]; then
+            if [[ "${{ github.event.inputs.force_unlock }}" == "true" ]]; then
+              ./scripts/secure-deploy.sh production --force
+            else
+              ./scripts/secure-deploy.sh production
+            fi
+          else
+            echo "⚠️ Using manual deployment process..."
+            
+            # Manual deployment fallback
+            echo "Stopping services..."
+            docker-compose -f docker-compose.unified.yml down
+            
+            echo "Building images..."
+            docker-compose -f docker-compose.unified.yml build
+            
+            echo "Starting services..."
+            docker-compose -f docker-compose.unified.yml up -d
+            
+            # Extended health check for production
+            echo "Performing health checks..."
+            max_attempts=20
+            attempt=1
+            
+            while [[ $attempt -le $max_attempts ]]; do
+              echo "Health check $attempt/$max_attempts"
+              
+              if curl -sf "http://localhost:${BACKEND_PORT:-8888}/health" > /dev/null && \
+                 curl -sf "http://localhost:${FRONTEND_PORT:-3080}" > /dev/null; then
+                echo "✅ Health checks passed"
+                break
+              fi
+              
+              if [[ $attempt -eq $max_attempts ]]; then
+                echo "❌ Health checks failed"
+                
+                if [[ "${{ github.event.inputs.rollback_on_failure }}" == "true" ]]; then
+                  echo "🔄 Rolling back..."
+                  docker-compose -f docker-compose.unified.yml down
+                  sudo rsync -av --delete "$backup_path/" "${{ env.PROJECT_PATH }}/"
+                  docker-compose -f docker-compose.unified.yml up -d
+                fi
+                
+                exit 1
+              fi
+              
+              sleep 15
+              ((attempt++))
+            done
+          fi
+          
+          echo "✅ PRODUCTION DEPLOYMENT COMPLETED SUCCESSFULLY"
+
+  post-deployment:
+    name: Post-deployment Verification
+    runs-on: ubuntu-latest
+    needs: production-deploy
+    if: success()
+    
+    steps:
+    - name: Extended verification
+      run: |
+        echo "🔍 Post-deployment Verification"
+        
+        server="${{ secrets.PRODUCTION_SERVER }}"
+        
+        # Wait for services to stabilize
+        echo "Waiting for services to stabilize..."
+        sleep 120
+        
+        # Comprehensive health checks
+        echo "Running comprehensive health checks..."
+        
+        # API health
+        if curl -sf "http://$server:8888/health"; then
+          echo "✅ API health check passed"
+        else
+          echo "❌ API health check failed"
+          exit 1
+        fi
+        
+        # Frontend
+        if curl -sf "http://$server:3080"; then
+          echo "✅ Frontend health check passed"
+        else
+          echo "❌ Frontend health check failed"
+          exit 1
+        fi
+        
+        # Data endpoints
+        if curl -sf "http://$server:8888/history?symbol=NIFTY50&resolution=5&from=1640995200&to=1672531200" > /dev/null; then
+          echo "✅ Chart data endpoint responding"
+        else
+          echo "❌ Chart data endpoint failed"
+          exit 1
+        fi
+        
+        # Labels endpoint
+        if curl -sf "http://$server:8888/marks?symbol=NIFTY50&resolution=5&from=1640995200&to=1672531200" > /dev/null; then
+          echo "✅ Labels endpoint responding"
+        else
+          echo "❌ Labels endpoint failed"
+          exit 1
+        fi
+        
+        echo "✅ All post-deployment verifications passed"
+
+    - name: Re-lock production
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 60s
+        script: |
+          cd ${{ env.PROJECT_PATH }}
+          
+          # Re-lock production environment
+          if [[ -x "./scripts/lock-production.sh" ]]; then
+            echo "🔒 Re-locking production environment..."
+            sudo ./scripts/lock-production.sh
+            echo "✅ Production environment secured"
+          fi
+
+  deployment-report:
+    name: Deployment Report
+    runs-on: ubuntu-latest
+    needs: [validate-input, pre-deployment-checks, database-backup, production-deploy, post-deployment]
+    if: always() && needs.validate-input.outputs.proceed == 'true'
+    
+    steps:
+    - name: Generate deployment report
+      run: |
+        echo "# 🚀 Production Deployment Report" > deployment-report.md
+        echo "" >> deployment-report.md
+        echo "**Deployment Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> deployment-report.md
+        echo "**Operator:** ${{ github.actor }}" >> deployment-report.md
+        echo "**Commit:** ${{ github.sha }}" >> deployment-report.md
+        echo "**Maintenance Window:** ${{ github.event.inputs.maintenance_window }} minutes" >> deployment-report.md
+        echo "" >> deployment-report.md
+        
+        echo "## Deployment Steps Status" >> deployment-report.md
+        echo "" >> deployment-report.md
+        
+        if [[ "${{ needs.pre-deployment-checks.result }}" == "success" ]]; then
+          echo "✅ Pre-deployment Checks: Passed" >> deployment-report.md
+        else
+          echo "❌ Pre-deployment Checks: Failed" >> deployment-report.md
+        fi
+        
+        if [[ "${{ needs.database-backup.result }}" == "success" ]]; then
+          echo "✅ Database Backup: Completed" >> deployment-report.md
+        elif [[ "${{ needs.database-backup.result }}" == "skipped" ]]; then
+          echo "⏭️ Database Backup: Skipped" >> deployment-report.md
+        else
+          echo "❌ Database Backup: Failed" >> deployment-report.md
+        fi
+        
+        if [[ "${{ needs.production-deploy.result }}" == "success" ]]; then
+          echo "✅ Production Deployment: Successful" >> deployment-report.md
+        else
+          echo "❌ Production Deployment: Failed" >> deployment-report.md
+        fi
+        
+        if [[ "${{ needs.post-deployment.result }}" == "success" ]]; then
+          echo "✅ Post-deployment Verification: Passed" >> deployment-report.md
+        else
+          echo "❌ Post-deployment Verification: Failed" >> deployment-report.md
+        fi
+        
+        echo "" >> deployment-report.md
+        
+        if [[ "${{ job.status }}" == "success" ]]; then
+          echo "## 🎉 Deployment Successful!" >> deployment-report.md
+          echo "" >> deployment-report.md
+          echo "The TradingView ML Visualization system has been successfully deployed to production." >> deployment-report.md
+          echo "" >> deployment-report.md
+          echo "**Production URL:** http://${{ secrets.PRODUCTION_SERVER }}:3080" >> deployment-report.md
+        else
+          echo "## ⚠️ Deployment Issues" >> deployment-report.md
+          echo "" >> deployment-report.md
+          echo "The deployment encountered issues. Please review the logs and take appropriate action." >> deployment-report.md
+          
+          if [[ "${{ github.event.inputs.rollback_on_failure }}" == "true" ]]; then
+            echo "" >> deployment-report.md
+            echo "**Automatic rollback was attempted.**" >> deployment-report.md
+          fi
+        fi
+        
+        cat deployment-report.md
+
+    - name: Log final status
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_SERVER }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        timeout: 30s
+        script: |
+          # Log final deployment status
+          deployment_log="/var/log/tradingview-deployments.log"
+          timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          status="${{ job.status }}"
+          
+          echo "[$timestamp] Manual GitHub Actions Deployment - Status: $status, Operator: ${{ github.actor }}, Commit: ${{ github.sha }}" | sudo tee -a "$deployment_log"
