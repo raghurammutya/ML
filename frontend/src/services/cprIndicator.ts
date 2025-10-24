@@ -8,8 +8,12 @@ interface CPRSeries {
   tc: ISeriesApi<'Line'> | null
   r1: ISeriesApi<'Line'> | null
   r2: ISeriesApi<'Line'> | null
+  r3: ISeriesApi<'Line'> | null
   s1: ISeriesApi<'Line'> | null
   s2: ISeriesApi<'Line'> | null
+  s3: ISeriesApi<'Line'> | null
+  prev_high: ISeriesApi<'Line'> | null
+  prev_close: ISeriesApi<'Line'> | null
 }
 
 export const useCPRIndicator = (
@@ -22,8 +26,12 @@ export const useCPRIndicator = (
     tc: null,
     r1: null,
     r2: null,
+    r3: null,
     s1: null,
-    s2: null
+    s2: null,
+    s3: null,
+    prev_high: null,
+    prev_close: null
   })
 
   // Create CPR series when enabled
@@ -107,6 +115,14 @@ export const useCPRIndicator = (
         crosshairMarkerVisible: false,
         title: 'R2'
       }),
+      r3: chart.addLineSeries({
+        color: settings.resistance_color,
+        lineWidth: settings.line_width as any,
+        lineStyle: lineStyle as any,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        title: 'R3'
+      }),
       s1: chart.addLineSeries({
         color: settings.support_color,
         lineWidth: settings.line_width as any,
@@ -122,6 +138,30 @@ export const useCPRIndicator = (
         priceLineVisible: false,
         crosshairMarkerVisible: false,
         title: 'S2'
+      }),
+      s3: chart.addLineSeries({
+        color: settings.support_color,
+        lineWidth: settings.line_width as any,
+        lineStyle: lineStyle as any,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        title: 'S3'
+      }),
+      prev_high: chart.addLineSeries({
+        color: '#9CA3AF',
+        lineWidth: 1,
+        lineStyle: 1, // dashed
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        title: 'Prev High'
+      }),
+      prev_close: chart.addLineSeries({
+        color: '#6B7280',
+        lineWidth: 1,
+        lineStyle: 1, // dashed
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+        title: 'Prev Close'
       })
     }
   }
@@ -144,8 +184,12 @@ export const useCPRIndicator = (
       tc: null,
       r1: null,
       r2: null,
+      r3: null,
       s1: null,
-      s2: null
+      s2: null,
+      s3: null,
+      prev_high: null,
+      prev_close: null
     }
   }
 
@@ -189,6 +233,13 @@ export const useCPRIndicator = (
         lineStyle: lineStyle as any
       })
     }
+    if (series.r3) {
+      series.r3.applyOptions({
+        color: settings.resistance_color,
+        lineWidth: settings.line_width as any,
+        lineStyle: lineStyle as any
+      })
+    }
     if (series.s1) {
       series.s1.applyOptions({
         color: settings.support_color,
@@ -198,6 +249,13 @@ export const useCPRIndicator = (
     }
     if (series.s2) {
       series.s2.applyOptions({
+        color: settings.support_color,
+        lineWidth: settings.line_width as any,
+        lineStyle: lineStyle as any
+      })
+    }
+    if (series.s3) {
+      series.s3.applyOptions({
         color: settings.support_color,
         lineWidth: settings.line_width as any,
         lineStyle: lineStyle as any
@@ -214,8 +272,12 @@ export const useCPRIndicator = (
     const tcData: LineData[] = []
     const r1Data: LineData[] = []
     const r2Data: LineData[] = []
+    const r3Data: LineData[] = []
     const s1Data: LineData[] = []
     const s2Data: LineData[] = []
+    const s3Data: LineData[] = []
+    const prevHighData: LineData[] = []
+    const prevCloseData: LineData[] = []
 
     cprData.forEach(point => {
       const time = point.time as Time
@@ -224,8 +286,12 @@ export const useCPRIndicator = (
       tcData.push({ time, value: point.tc })
       r1Data.push({ time, value: point.r1 })
       r2Data.push({ time, value: point.r2 })
+      r3Data.push({ time, value: point.r3 })
       s1Data.push({ time, value: point.s1 })
       s2Data.push({ time, value: point.s2 })
+      s3Data.push({ time, value: point.s3 })
+      prevHighData.push({ time, value: point.prev_high })
+      prevCloseData.push({ time, value: point.prev_close })
     })
 
     // Update each series
@@ -235,8 +301,12 @@ export const useCPRIndicator = (
     if (series.tc) series.tc.setData(tcData)
     if (series.r1) series.r1.setData(r1Data)
     if (series.r2) series.r2.setData(r2Data)
+    if (series.r3) series.r3.setData(r3Data)
     if (series.s1) series.s1.setData(s1Data)
     if (series.s2) series.s2.setData(s2Data)
+    if (series.s3) series.s3.setData(s3Data)
+    if (series.prev_high) series.prev_high.setData(prevHighData)
+    if (series.prev_close) series.prev_close.setData(prevCloseData)
   }
 
   return {

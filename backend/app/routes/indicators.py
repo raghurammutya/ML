@@ -19,14 +19,18 @@ router = APIRouter(prefix="/indicators", tags=["indicators"])
 # CPR Models
 class CPRPoint(BaseModel):
     """Central Pivot Range point"""
-    time: int  # Unix timestamp
-    pivot: float  # Central Pivot (P)
-    bc: float     # Bottom Central (BC) 
-    tc: float     # Top Central (TC)
-    r1: float     # Resistance 1
-    r2: float     # Resistance 2  
-    s1: float     # Support 1
-    s2: float     # Support 2
+    time: int  # Unix timestamp (start of trading day)
+    pivot: float      # Central Pivot (P)
+    bc: float         # Bottom Central (BC) 
+    tc: float         # Top Central (TC)
+    r1: float         # Resistance 1
+    r2: float         # Resistance 2
+    r3: float         # Resistance 3
+    s1: float         # Support 1
+    s2: float         # Support 2
+    s3: float         # Support 3
+    prev_high: float  # Previous day high
+    prev_close: float # Previous day close
 
 class CPRResponse(BaseModel):
     """CPR indicator response"""
@@ -58,8 +62,10 @@ def calculate_cpr(high: float, low: float, close: float) -> Dict[str, float]:
     - Top Central (TC) = (P - BC) + P = 2*P - BC
     - Resistance 1 (R1) = 2*P - L
     - Resistance 2 (R2) = P + (H - L)
+    - Resistance 3 (R3) = H + 2*(P - L)
     - Support 1 (S1) = 2*P - H
     - Support 2 (S2) = P - (H - L)
+    - Support 3 (S3) = L - 2*(H - P)
     """
     pivot = (high + low + close) / 3
     bc = (high + low) / 2
@@ -67,8 +73,11 @@ def calculate_cpr(high: float, low: float, close: float) -> Dict[str, float]:
     
     r1 = (2 * pivot) - low
     r2 = pivot + (high - low)
+    r3 = high + 2 * (pivot - low)
+    
     s1 = (2 * pivot) - high
     s2 = pivot - (high - low)
+    s3 = low - 2 * (high - pivot)
     
     return {
         "pivot": round(pivot, 2),
@@ -76,8 +85,12 @@ def calculate_cpr(high: float, low: float, close: float) -> Dict[str, float]:
         "tc": round(tc, 2),
         "r1": round(r1, 2),
         "r2": round(r2, 2),
+        "r3": round(r3, 2),
         "s1": round(s1, 2),
-        "s2": round(s2, 2)
+        "s2": round(s2, 2),
+        "s3": round(s3, 2),
+        "prev_high": round(high, 2),
+        "prev_close": round(close, 2)
     }
 
 async def get_cpr_data(
@@ -89,20 +102,20 @@ async def get_cpr_data(
 ) -> List[CPRPoint]:
     """
     Generate CPR data for the given time range.
-    For each trading day, calculate CPR from previous day's HLC.
+    CPR values are calculated from previous day's HLC and remain constant throughout the trading day.
+    Returns one CPR point per trading day.
     """
     normalized_symbol = _normalize_symbol(symbol)
-    timeframe = _normalize_timeframe(resolution)
     from_ts, to_ts = _as_epoch_seconds(from_timestamp, to_timestamp)
     
-    logger.info(f"Calculating CPR for {normalized_symbol} {timeframe} from {from_ts} to {to_ts}")
+    logger.info(f"Calculating CPR for {normalized_symbol} from {from_ts} to {to_ts}")
     
     # Get daily OHLC data to calculate CPR
     # We need to get data from earlier to have previous day's HLC for first day
-    extended_from = from_ts - (24 * 3600 * 5)  # 5 days before
+    extended_from = from_ts - (24 * 3600 * 10)  # 10 days before to ensure we have enough data
     
     try:
-        # Get daily bars for CPR calculation
+        # Always get daily bars for CPR calculation regardless of requested resolution
         daily_history = await data_manager.get_history(
             normalized_symbol, extended_from, to_ts, "1D"
         )
@@ -127,7 +140,7 @@ async def get_cpr_data(
                 "close": closes[i]
             })
         
-        # Generate CPR points
+        # Generate CPR points - one per trading day
         cpr_points = []
         
         for i in range(1, len(daily_bars)):  # Start from index 1 to have previous day
@@ -145,21 +158,25 @@ async def get_cpr_data(
                 prev_day["close"]
             )
             
-            # Create CPR point for current day
+            # Create CPR point for current day (using current day's timestamp as start of trading day)
             cpr_point = CPRPoint(
-                time=current_day["time"],
+                time=current_day["time"],  # Start of current trading day
                 pivot=cpr_levels["pivot"],
                 bc=cpr_levels["bc"],
                 tc=cpr_levels["tc"],
                 r1=cpr_levels["r1"],
                 r2=cpr_levels["r2"],
+                r3=cpr_levels["r3"],
                 s1=cpr_levels["s1"],
-                s2=cpr_levels["s2"]
+                s2=cpr_levels["s2"],
+                s3=cpr_levels["s3"],
+                prev_high=cpr_levels["prev_high"],
+                prev_close=cpr_levels["prev_close"]
             )
             
             cpr_points.append(cpr_point)
         
-        logger.info(f"Generated {len(cpr_points)} CPR points")
+        logger.info(f"Generated {len(cpr_points)} CPR points for trading days")
         return cpr_points
         
     except Exception as e:

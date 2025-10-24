@@ -25,8 +25,12 @@ export interface CPRPoint {
   tc: number
   r1: number
   r2: number
+  r3: number
   s1: number
   s2: number
+  s3: number
+  prev_high: number
+  prev_close: number
 }
 
 interface IndicatorPanelProps {
