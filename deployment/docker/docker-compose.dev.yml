@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # Development Database
+  postgres-dev:
+    image: timescale/timescaledb:latest-pg15
+    container_name: tv-postgres-dev
+    environment:
+      POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_dev}
+      POSTGRES_USER: ${DB_USER:-stocksblitz}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ../database/init-dev.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "0.0.0.0:5433:5432"  # Different port for dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Development Redis
+  redis-dev:
+    image: redis:7-alpine
+    container_name: tv-redis-dev
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_pass}
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "0.0.0.0:6380:6379"  # Different port for dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dev_redis_pass}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Development Backend
+  backend-dev:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: tv-backend-dev
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-stocksblitz}:${DB_PASSWORD:-dev_password}@postgres-dev:5432/${DB_NAME:-stocksblitz_unified_dev}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev_redis_pass}@redis-dev:6379
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+      RELOAD: "true"
+      CORS_ORIGINS: "*"
+    volumes:
+      - ../../backend:/app  # Mount source code for hot reload
+    ports:
+      - "0.0.0.0:8001:8000"  # Different port for dev
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      redis-dev:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Development Frontend
+  frontend-dev:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: tv-frontend-dev
+    environment:
+      - VITE_API_BASE_URL=http://5.223.52.98:8001
+      - VITE_ENVIRONMENT=development
+    volumes:
+      - ../../frontend/src:/app/src  # Mount source for hot reload
+      - ../../frontend/public:/app/public
+    ports:
+      - "0.0.0.0:3001:3000"  # Different port for dev
+    depends_on:
+      - backend-dev
+    restart: unless-stopped
+
+volumes:
+  postgres_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+
+networks:
+  default:
+    name: tradingview-dev-network
