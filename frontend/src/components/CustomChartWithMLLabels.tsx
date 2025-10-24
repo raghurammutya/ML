@@ -132,12 +132,12 @@ const LABEL_COLOR: Record<string, string> = {
 function makeTickMarkFormatter() {
   // Use UTC formatters to match the data
   const dFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'UTC',
+    timeZone: 'Asia/Kolkata',
     day: '2-digit', 
     month: 'short' 
   })
   const tFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'UTC',
+    timeZone: 'Asia/Kolkata',
     hour: '2-digit', 
     minute: '2-digit', 
     hour12: false 
