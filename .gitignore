@@ -7,3 +7,11 @@ dist/
 **/.vite/
 **/dist/
 tradingview-*/
+.production_checksums
+FINAL_SYNC_STATUS.md
+TIMEZONE_CROSSHAIR_CONFIG.md
+VERIFICATION_RESULTS.md
+*.original_perms
+pre-sync-*
+frontend/build/
+frontend/nginx.dev.conf
