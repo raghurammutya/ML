@@ -6,15 +6,15 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: tv-postgres-prod
     environment:
-      POSTGRES_DB: ${DB_NAME:-stocksblitz_unified}
+      POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_prod}
       POSTGRES_USER: ${DB_USER:-stocksblitz}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      TIMESCALEDB_TELEMETRY: off
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
+      TIMESCALEDB_TELEMETRY: "off"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d
     ports:
-      - "5432:5432"
+      - "0.0.0.0:5435:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
@@ -26,11 +26,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: tv-redis-prod
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_pass}
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "0.0.0.0:6382:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
@@ -41,21 +41,20 @@ services:
   # Backend API
   backend:
     build:
-      context: ../../
-      dockerfile: deployment/docker/Dockerfile.backend.prod
+      context: ../../backend
+      dockerfile: Dockerfile
     container_name: tv-backend-prod
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-stocksblitz_unified}
+      DB_NAME: ${DB_NAME:-stocksblitz_unified_prod}
       DB_USER: ${DB_USER:-stocksblitz}
-      DB_PASSWORD: ${DB_PASSWORD}
-      REDIS_URL: redis://redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      DATABASE_URL: postgresql://${DB_USER:-stocksblitz}:${DB_PASSWORD:-dev_password}@postgres:5432/${DB_NAME:-stocksblitz_unified_prod}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev_redis_pass}@redis:6379
       ENVIRONMENT: production
       LOG_LEVEL: INFO
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8080:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,7 +74,9 @@ services:
       dockerfile: deployment/docker/Dockerfile.frontend.prod
     container_name: tv-frontend-prod
     ports:
-      - "80:80"
+      - "0.0.0.0:3080:80"
+    environment:
+      - VITE_API_BASE_URL=http://5.223.52.98:8080
     depends_on:
       - backend
     restart: unless-stopped
@@ -85,19 +86,6 @@ services:
       timeout: 10s
       retries: 3
 
-  # Nginx Load Balancer (for multiple backend instances)
-  nginx:
-    image: nginx:alpine
-    container_name: tv-nginx-prod
-    volumes:
-      - ./nginx-lb.conf:/etc/nginx/nginx.conf:ro
-    ports:
-      - "443:443"
-      - "80:80"
-    depends_on:
-      - frontend
-      - backend
-    restart: unless-stopped
 
 volumes:
   postgres_data:

@@ -11,32 +11,32 @@ export default defineConfig({
     proxy: {
       // ───── Your core chart endpoints ─────
       '/history': {
-        target: 'http://127.0.0.1:8009',  // <-- backend listens here
+        target: 'http://127.0.0.1:8080',  // <-- backend listens here
         changeOrigin: true,
       },
       '/marks': {
-        target: 'http://127.0.0.1:8009',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
       // If your chart also calls this TradingView endpoint, keep it:
       '/timescale_marks': {
-        target: 'http://127.0.0.1:8009',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
 
       // ───── Dashboard health/stats (optional) ─────
       '/health': {
-        target: 'http://127.0.0.1:8009',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
       '/stats': {
-        target: 'http://127.0.0.1:8009',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
       
       // ───── Labels API endpoint ─────
       '/api/labels': {
-        target: 'http://127.0.0.1:8009',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
 

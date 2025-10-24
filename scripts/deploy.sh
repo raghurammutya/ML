@@ -11,7 +11,7 @@ set -e
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_DIR")" && pwd)"
 DOCKER_DIR="$PROJECT_ROOT/deployment/docker"
 
 # Colors for output

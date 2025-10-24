@@ -26,6 +26,8 @@ type CustomChartProps = {
   timeframe?: Timeframe
   chartType?: ChartType
   height?: number
+  fromSec?: number | null
+  toSec?: number | null
 }
 
 const DEFAULT_SYMBOL = 'NIFTY50'
@@ -333,7 +335,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   
   // Infinite scrolling state
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
-  const [oldestTimestamp, setOldestTimestamp] = useState<number | null>(null)
   const [hasMoreData, setHasMoreData] = useState(true)
   
   // Context menu state
@@ -407,7 +408,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
       
       // Update oldest timestamp
       if (olderBars.length > 0) {
-        setOldestTimestamp(olderBars[0].time)
         oldestTimestampRef.current = olderBars[0].time
       }
       
@@ -609,7 +609,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         console.log(`[LOAD] Loading data for ${symbol} ${timeframe}min...`)
         
         // Reset infinite scroll state
-        setOldestTimestamp(null)
         setHasMoreData(true)
         setIsLoadingOlder(false)
         oldestTimestampRef.current = null
@@ -636,7 +635,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         
         // Set oldest timestamp for infinite scrolling
         if (bars.length > 0) {
-          setOldestTimestamp(bars[0].time)
           oldestTimestampRef.current = bars[0].time
           console.log(`[LOAD] Set oldest timestamp to ${bars[0].time} (${new Date(bars[0].time * 1000).toISOString()})`)
         }

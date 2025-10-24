@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
+import json
 
 class Settings(BaseSettings):
     # Database
@@ -44,10 +45,24 @@ class Settings(BaseSettings):
     log_format: str = "json"
     
     # CORS
-    cors_origins: list[str] = ["*"]
+    cors_origins: Union[list[str], str] = ["*"]
     cors_credentials: bool = True
     cors_methods: list[str] = ["*"]
     cors_headers: list[str] = ["*"]
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Handle CORS origins parsing
+        if isinstance(self.cors_origins, str):
+            try:
+                # Try to parse as JSON first
+                self.cors_origins = json.loads(self.cors_origins)
+            except json.JSONDecodeError:
+                # If not JSON, treat as single origin or comma-separated
+                if self.cors_origins == "*":
+                    self.cors_origins = ["*"]
+                else:
+                    self.cors_origins = [origin.strip() for origin in self.cors_origins.split(",")]
     
     class Config:
         env_file = ".env"

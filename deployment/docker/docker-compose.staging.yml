@@ -9,7 +9,7 @@ services:
       POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_staging}
       POSTGRES_USER: ${DB_USER:-stocksblitz}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
-      TIMESCALEDB_TELEMETRY: off
+      TIMESCALEDB_TELEMETRY: "off"
     volumes:
       - postgres_staging_data:/var/lib/postgresql/data
       - ../database/backup-restore.sh:/docker-entrypoint-initdb.d/01-restore.sh
@@ -51,7 +51,7 @@ services:
       REDIS_URL: redis://redis-staging:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       ENVIRONMENT: staging
-      DEBUG: false
+      DEBUG: "false"
       LOG_LEVEL: INFO
       CORS_ORIGINS: ${STAGING_FRONTEND_URL}
     ports:
