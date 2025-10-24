@@ -64,6 +64,20 @@ const App: React.FC = () => {
       <div className="main-content">
         <div className="chart-container">
 
+          {/* Top-left info pill */}
+          <div style={{
+            position: 'absolute', top: 12, left: 12, zIndex: 1000,
+            background: 'rgba(19, 23, 34, 0.98)', border: '2px solid #26a69a',
+            borderRadius: 8, padding: '8px 14px', display: 'flex', gap: 12, alignItems: 'center'
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#d1d4dc' }}>🤖 NIFTY50 with ML Predictions</div>
+            <div style={{ fontSize: 12, color: '#26a69a', background: '#1e222d', padding: '4px 8px', borderRadius: 4, border: '1px solid #26a69a' }}>
+              {selectedTimeframe}m • {chartType}
+            </div>
+            <div style={{ fontSize: 11, color: '#8c93a7', background: '#1e222d', padding: '3px 6px', borderRadius: 3, border: '1px solid #2a2e39' }}>
+              {fromSec && toSec ? 'Custom range' : 'Auto range (~6 months)'}
+            </div>
+          </div>
 
           {/* Top-right controls: timeframe + chart type + date range */}
           <div style={{

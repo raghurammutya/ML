@@ -129,23 +129,15 @@ const LABEL_COLOR: Record<string, string> = {
   'Exit Bearish': '#42A5F5',  // blue for bearish exits
 }
 
-// Format volume in human readable format
-function formatVolume(volume: number): string {
-  if (volume >= 1e9) return (volume / 1e9).toFixed(1) + 'B'
-  if (volume >= 1e6) return (volume / 1e6).toFixed(1) + 'M'
-  if (volume >= 1e3) return (volume / 1e3).toFixed(1) + 'K'
-  return volume.toString()
-}
-
 function makeTickMarkFormatter() {
-  // Use IST timezone for Indian market data
+  // Use UTC formatters to match the data
   const dFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'Asia/Kolkata',
+    timeZone: 'UTC',
     day: '2-digit', 
     month: 'short' 
   })
   const tFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'Asia/Kolkata',
+    timeZone: 'UTC',
     hour: '2-digit', 
     minute: '2-digit', 
     hour12: false 
@@ -154,9 +146,7 @@ function makeTickMarkFormatter() {
 
   return (unixSec: number) => {
     const d = new Date(unixSec * 1000)
-    // Use IST for day key calculation
-    const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d)
-    const dayKey = istDate // YYYY-MM-DD format
+    const dayKey = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`
     const timeTxt = tFmt.format(d)
     
     // Show date on first tick of the day
@@ -171,7 +161,7 @@ function makeTickMarkFormatter() {
 // Fetch chart bars
 async function fetchBars(symbol: string, timeframe: Timeframe, from?: number, to?: number): Promise<Bar[]> {
   const timeRange = from && to ? { from, to } : getInitialTimeRange(timeframe)
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '../tradingview-api'
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/tradingview-api'
   const url = `${API_BASE_URL}/history?symbol=${encodeURIComponent(symbol)}&from=${timeRange.from}&to=${timeRange.to}&resolution=${timeframe}`
   console.log(`Fetching bars: ${url}`)
   
@@ -216,7 +206,7 @@ async function fetchBars(symbol: string, timeframe: Timeframe, from?: number, to
 // Fetch user-created labels only
 async function fetchUserLabels(symbol: string, timeframe: Timeframe, from?: number, to?: number): Promise<any[]> {
   const timeRange = from && to ? { from, to } : getInitialTimeRange(timeframe)
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '../tradingview-api'
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/tradingview-api'
   const url = `${API_BASE_URL}/marks?symbol=${encodeURIComponent(symbol)}&resolution=${timeframe}&from=${timeRange.from}&to=${timeRange.to}&include_neutral=true`
   console.log(`Fetching labels: ${url}`)
   
@@ -354,17 +344,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   const [menuXY, setMenuXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
   const [contextTimestamp, setContextTimestamp] = useState<number | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
-  
-  // Crosshair data state
-  const [crosshairData, setCrosshairData] = useState<{
-    time: string
-    open: number
-    high: number
-    low: number
-    close: number
-    volume: number
-    isGreen: boolean
-  } | null>(null)
 
   // Store current data for refresh
   const currentBarsRef = useRef<Bar[]>([])
@@ -459,26 +438,7 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         tickMarkFormatter: makeTickMarkFormatter(),
       },
       rightPriceScale: { borderColor: '#2b3245' },
-      crosshair: { 
-        mode: 0,
-        vertLine: {
-          labelVisible: true  // Keep default time label visible
-        }
-      },
-      localization: {
-        timeFormatter: (unixSec: number) => {
-          // Format crosshair time in IST with candle color
-          const date = new Date(unixSec * 1000)
-          return new Intl.DateTimeFormat('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            month: 'short',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false
-          }).format(date)
-        }
-      },
+      crosshair: { mode: 0 },
     })
     
     chartRef.current = chart
@@ -536,44 +496,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
       priceLineVisible: false, 
       color: '#4da3ff',
       visible: false 
-    })
-
-    // Subscribe to crosshair move for OHLCV display
-    chart.subscribeCrosshairMove((param) => {
-      if (param.point === undefined || !param.time) {
-        setCrosshairData(null)
-        return
-      }
-
-      // Find the bar from stored data
-      const currentBars = currentBarsRef.current
-      const targetTime = Number(param.time)
-      const bar = currentBars.find(b => Math.abs(Number(b.time) - targetTime) < 60) // Within 1 minute tolerance
-      
-      if (bar) {
-        const isGreen = bar.close >= bar.open
-        
-        const timeStr = new Intl.DateTimeFormat('en-IN', {
-          timeZone: 'Asia/Kolkata',
-          month: 'short',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false
-        }).format(new Date(Number(param.time) * 1000))
-
-        setCrosshairData({
-          time: timeStr,
-          open: bar.open,
-          high: bar.high,
-          low: bar.low,
-          close: bar.close,
-          volume: 0, // Volume not available in Bar type
-          isGreen
-        })
-      } else {
-        setCrosshairData(null)
-      }
     })
 
     // Right-click context menu
@@ -689,7 +611,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         console.log(`[LOAD] Loading data for ${symbol} ${timeframe}min...`)
         
         // Reset infinite scroll state
-        oldestTimestampRef.current = null
         setHasMoreData(true)
         setIsLoadingOlder(false)
         oldestTimestampRef.current = null
@@ -716,7 +637,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         
         // Set oldest timestamp for infinite scrolling
         if (bars.length > 0) {
-          oldestTimestampRef.current = bars[0].time
           oldestTimestampRef.current = bars[0].time
           console.log(`[LOAD] Set oldest timestamp to ${bars[0].time} (${new Date(bars[0].time * 1000).toISOString()})`)
         }
@@ -884,48 +804,9 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
-      {/* OHLCV Display Only */}
-      <div style={{
-        padding: '8px 12px',
-        background: '#0e1220',
-        borderBottom: '1px solid #1e222d',
-        color: '#d1d4dc',
-        fontSize: 12,
-        fontWeight: 'normal',
-        display: 'flex',
-        gap: '16px',
-        alignItems: 'center',
-        minHeight: '20px'
-      }}>
-        {crosshairData ? (
-          <>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              {crosshairData.time}
-            </span>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              Open: {crosshairData.open.toFixed(2)}
-            </span>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              High: {crosshairData.high.toFixed(2)}
-            </span>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              Low: {crosshairData.low.toFixed(2)}
-            </span>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              Close: {crosshairData.close.toFixed(2)}
-            </span>
-            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
-              Vol: {formatVolume(crosshairData.volume)}
-            </span>
-          </>
-        ) : (
-          <span style={{ color: '#666', fontSize: 11 }}>Hover over chart to see OHLCV data</span>
-        )}
-      </div>
-      
       <div 
         ref={containerRef} 
-        style={{ width: '100%', height: height - 40 }}
+        style={{ width: '100%', height }}
       />
 
       {/* Status footer */}
