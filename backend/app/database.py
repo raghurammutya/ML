@@ -5,12 +5,16 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 
 logger = logging.getLogger("app.database")
 
+# IST timezone offset (UTC+5:30)
+IST_OFFSET = timedelta(hours=5, minutes=30)
+IST_TIMEZONE = timezone(IST_OFFSET)
 
 # -----------------------------
 # Helpers / Normalization
@@ -166,13 +170,28 @@ class DataManager:
             if any(r[field] is None for field in ["open", "high", "low", "close"]):
                 continue
                 
-            ts = int(r["ts"].timestamp())
+            # Database stores naive timestamps that represent IST time
+            # We need to treat them as IST and convert to UTC for TradingView
+            naive_dt = r["ts"]
+            if isinstance(naive_dt, datetime):
+                # Treat the naive datetime as IST
+                ist_dt = naive_dt.replace(tzinfo=IST_TIMEZONE)
+                # Convert to UTC timestamp
+                ts = int(ist_dt.timestamp())
+            else:
+                # Fallback to original method if timestamp format is unexpected
+                ts = int(naive_dt.timestamp())
             t.append(ts)
             o.append(float(r["open"]))
             h.append(float(r["high"]))
             l.append(float(r["low"]))
             c.append(float(r["close"]))
             v.append(int(r["volume"]) if r["volume"] is not None else 0)
+
+        # Return no_data if no valid OHLC data found for the requested timeframe
+        if not t:
+            logger.info(f"No data found for symbol={symbol_db}, timeframe={timeframe}, from={from_s}, to={to_s}")
+            return {"s": "no_data"}
 
         return {"s": "ok", "t": t, "o": o, "h": h, "l": l, "c": c, "v": v}
     async def set_bar_label(
@@ -269,15 +288,18 @@ class DataManager:
 
         neutral_clause = "" if include_neutral else "AND label IS NOT NULL AND label <> 'Neutral'"
 
+        # Convert IST timestamps to UTC epochs for TradingView
+        # Database stores naive timestamps representing IST (UTC+5:30)
         sql = f"""
             SELECT
-            EXTRACT(EPOCH FROM time)::bigint AS time_s,
+            (EXTRACT(EPOCH FROM time)::bigint - 19800) AS time_s,
             label,
             label_confidence
             FROM ml_labeled_data
             WHERE symbol=$1
             AND timeframe=$2
-            AND time BETWEEN to_timestamp($3) AND to_timestamp($4)
+            AND time BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes') 
+                         AND (to_timestamp($4) + interval '5 hours 30 minutes')
             AND label IS NOT NULL
             {neutral_clause}
             ORDER BY time ASC
