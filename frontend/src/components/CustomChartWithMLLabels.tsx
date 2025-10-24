@@ -131,8 +131,16 @@ const LABEL_COLOR: Record<string, string> = {
   'Exit Bearish': '#42A5F5',  // blue for bearish exits
 }
 
+// Format volume in human readable format
+function formatVolume(volume: number): string {
+  if (volume >= 1e9) return (volume / 1e9).toFixed(1) + 'B'
+  if (volume >= 1e6) return (volume / 1e6).toFixed(1) + 'M'
+  if (volume >= 1e3) return (volume / 1e3).toFixed(1) + 'K'
+  return volume.toString()
+}
+
 function makeTickMarkFormatter() {
-  // Use UTC formatters to match the data
+  // Use IST timezone for Indian market data
   const dFmt = new Intl.DateTimeFormat('en-US', { 
     timeZone: 'Asia/Kolkata',
     day: '2-digit', 
@@ -148,7 +156,9 @@ function makeTickMarkFormatter() {
 
   return (unixSec: number) => {
     const d = new Date(unixSec * 1000)
-    const dayKey = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`
+    // Use IST for day key calculation
+    const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d)
+    const dayKey = istDate // YYYY-MM-DD format
     const timeTxt = tFmt.format(d)
     
     // Show date on first tick of the day
@@ -337,6 +347,27 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   const [error, setError] = useState<string | null>(null)
   const [dataLoaded, setDataLoaded] = useState(false)
   
+  // Infinite scrolling state
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
+  const [hasMoreData, setHasMoreData] = useState(true)
+  
+  // Context menu state
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuXY, setMenuXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const [contextTimestamp, setContextTimestamp] = useState<number | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  
+  // Crosshair data state
+  const [crosshairData, setCrosshairData] = useState<{
+    time: string
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+    isGreen: boolean
+  } | null>(null)
+
   // Indicator state
   const [cprData, setCprData] = useState<CPRPoint[]>([])
   const [cprSettings, setCprSettings] = useState<IndicatorSettings>({
@@ -349,16 +380,6 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
     line_width: 1,
     line_style: 'solid'
   })
-  
-  // Infinite scrolling state
-  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
-  const [hasMoreData, setHasMoreData] = useState(true)
-  
-  // Context menu state
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [menuXY, setMenuXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
-  const [contextTimestamp, setContextTimestamp] = useState<number | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
 
   // Store current data for refresh
   const currentBarsRef = useRef<Bar[]>([])
@@ -456,7 +477,26 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         tickMarkFormatter: makeTickMarkFormatter(),
       },
       rightPriceScale: { borderColor: '#2b3245' },
-      crosshair: { mode: 0 },
+      crosshair: { 
+        mode: 0,
+        vertLine: {
+          labelVisible: true  // Keep default time label visible
+        }
+      },
+      localization: {
+        timeFormatter: (unixSec: number) => {
+          // Format crosshair time in IST timezone
+          const date = new Date(unixSec * 1000)
+          return new Intl.DateTimeFormat('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          }).format(date)
+        }
+      },
     })
     
     chartRef.current = chart
@@ -514,6 +554,44 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
       priceLineVisible: false, 
       color: '#4da3ff',
       visible: false 
+    })
+
+    // Subscribe to crosshair move for OHLCV display
+    chart.subscribeCrosshairMove((param) => {
+      if (param.point === undefined || !param.time) {
+        setCrosshairData(null)
+        return
+      }
+
+      // Find the bar from stored data
+      const currentBars = currentBarsRef.current
+      const targetTime = Number(param.time)
+      const bar = currentBars.find(b => Math.abs(Number(b.time) - targetTime) < 60) // Within 1 minute tolerance
+      
+      if (bar) {
+        const isGreen = bar.close >= bar.open
+        
+        const timeStr = new Intl.DateTimeFormat('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          month: 'short',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        }).format(new Date(Number(param.time) * 1000))
+
+        setCrosshairData({
+          time: timeStr,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+          volume: 0, // Volume not available in Bar type
+          isGreen
+        })
+      } else {
+        setCrosshairData(null)
+      }
     })
 
     // Right-click context menu
@@ -843,9 +921,50 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
+      {/* OHLCV Display Only */}
+      <div style={{
+        padding: '8px 12px',
+        background: '#0e1220',
+        borderBottom: '1px solid #1e222d',
+        color: '#d1d4dc',
+        fontSize: 12,
+        fontWeight: 'normal',
+        display: 'flex',
+        gap: '16px',
+        alignItems: 'center',
+        minHeight: '36px',
+        position: 'relative',
+        zIndex: 999
+      }}>
+        {crosshairData ? (
+          <>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              {crosshairData.time}
+            </span>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              Open: {crosshairData.open.toFixed(2)}
+            </span>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              High: {crosshairData.high.toFixed(2)}
+            </span>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              Low: {crosshairData.low.toFixed(2)}
+            </span>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              Close: {crosshairData.close.toFixed(2)}
+            </span>
+            <span style={{ color: crosshairData.isGreen ? '#26a69a' : '#ef5350' }}>
+              Vol: {formatVolume(crosshairData.volume)}
+            </span>
+          </>
+        ) : (
+          <span style={{ color: '#666', fontSize: 11 }}>Hover over chart to see OHLCV data</span>
+        )}
+      </div>
+      
       <div 
         ref={containerRef} 
-        style={{ width: '100%', height, position: 'relative' }}
+        style={{ width: '100%', height: height - 40, position: 'relative' }}
       >
         {/* Indicator Panel */}
         <IndicatorPanel
