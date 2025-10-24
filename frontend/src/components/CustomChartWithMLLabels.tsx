@@ -9,6 +9,8 @@ import {
   ISeriesApi,
 } from 'lightweight-charts'
 import { createPortal } from 'react-dom'
+import IndicatorPanel, { Indicator, CPRPoint, IndicatorSettings } from './IndicatorPanel'
+import { useCPRIndicator } from '../services/cprIndicator'
 
 type ChartType = 'candle' | 'line'
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
@@ -335,6 +337,19 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   const [error, setError] = useState<string | null>(null)
   const [dataLoaded, setDataLoaded] = useState(false)
   
+  // Indicator state
+  const [cprData, setCprData] = useState<CPRPoint[]>([])
+  const [cprSettings, setCprSettings] = useState<IndicatorSettings>({
+    enabled: false,
+    pivot_color: '#FFEB3B',
+    bc_color: '#FF5722',
+    tc_color: '#4CAF50',
+    resistance_color: '#2196F3',
+    support_color: '#FF9800',
+    line_width: 1,
+    line_style: 'solid'
+  })
+  
   // Infinite scrolling state
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
   const [hasMoreData, setHasMoreData] = useState(true)
@@ -352,6 +367,9 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   const oldestTimestampRef = useRef<number | null>(null)
   const hasMoreDataRef = useRef<boolean>(true)
   const isLoadingOlderRef = useRef<boolean>(false)
+  
+  // CPR indicator hook
+  const { updateCPRData } = useCPRIndicator(chartRef, cprSettings)
   
   // Load older historical data for infinite scrolling
   const loadOlderData = async () => {
@@ -768,6 +786,27 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
     }
   }
 
+  // Indicator handlers
+  const handleIndicatorChange = (newIndicators: Indicator[]) => {
+    // Update CPR settings if CPR indicator changed
+    const cprIndicator = newIndicators.find(ind => ind.id === 'cpr')
+    if (cprIndicator) {
+      setCprSettings(cprIndicator.settings)
+    }
+  }
+
+  const handleCPRDataChange = (data: CPRPoint[]) => {
+    setCprData(data)
+    updateCPRData(data)
+  }
+
+  // Update CPR data when it changes
+  useEffect(() => {
+    if (cprData.length > 0) {
+      updateCPRData(cprData)
+    }
+  }, [cprData])
+
   // Delete label
   const deleteLabel = async () => {
     console.log('[DELETE] Deleting label at timestamp:', contextTimestamp)
@@ -806,8 +845,16 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <div 
         ref={containerRef} 
-        style={{ width: '100%', height }}
-      />
+        style={{ width: '100%', height, position: 'relative' }}
+      >
+        {/* Indicator Panel */}
+        <IndicatorPanel
+          onIndicatorChange={handleIndicatorChange}
+          onCPRDataChange={handleCPRDataChange}
+          symbol={symbol}
+          timeframe={timeframe}
+        />
+      </div>
 
       {/* Status footer */}
       <div style={{
