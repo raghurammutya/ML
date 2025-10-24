@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.env*
+dist/
+*.log
+**/__pycache__/
+**/.vite/
+**/dist/
+tradingview-*/

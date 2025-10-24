@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: tv-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - tv-network
+
+  backend:
+    build: ./backend
+    container_name: tv-backend
+    ports:
+      - "127.0.0.1:8081:8000"
+    environment:
+     - DB_HOST=host.docker.internal
+     - REDIS_URL=redis://redis:6379
+     - POSTGRES_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tv-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    container_name: tv-frontend
+    ports:
+      - "127.0.0.1:8082:3000"
+    environment:
+      - VITE_API_BASE_URL=http://5.223.52.98/tradingview-api
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - tv-network
+
+networks:
+  tv-network:
+    driver: bridge
