@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Pre-commit hook to prevent commits to production branch when locked
+
+LOCK_FILE="/tmp/tradingview-production.lock"
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+PRODUCTION_BRANCHES=("master" "main" "production")
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Check if current branch is a production branch
+is_production_branch() {
+    for branch in "${PRODUCTION_BRANCHES[@]}"; do
+        if [[ "$CURRENT_BRANCH" == "$branch" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check if production is locked
+if is_production_branch && [[ -f "$LOCK_FILE" ]]; then
+    source "$LOCK_FILE"
+    if [[ "$PRODUCTION_LOCKED" == "true" ]]; then
+        echo -e "${RED}ERROR:${NC} Cannot commit to production branch '$CURRENT_BRANCH'"
+        echo -e "${RED}ERROR:${NC} Production environment is locked since $LOCKED_AT"
+        echo -e "${YELLOW}INFO:${NC} Use 'sudo ./scripts/unlock-production.sh' to unlock for maintenance"
+        echo -e "${YELLOW}INFO:${NC} Or commit to a feature branch instead"
+        exit 1
+    fi
+fi
+
+# Validate critical files syntax
+echo "Validating critical files..."
+
+# Check TypeScript/JavaScript files
+if git diff --cached --name-only | grep -E '\.(ts|tsx|js|jsx)$' | head -10 | xargs -r npx tsc --noEmit --skipLibCheck 2>/dev/null; then
+    echo "✓ TypeScript validation passed"
+else
+    echo -e "${YELLOW}WARNING:${NC} TypeScript validation issues detected"
+fi
+
+# Check Python files
+if git diff --cached --name-only | grep -E '\.py$' | head -10 | xargs -r python3 -m py_compile 2>/dev/null; then
+    echo "✓ Python syntax validation passed"
+else
+    echo -e "${YELLOW}WARNING:${NC} Python syntax issues detected"
+fi
+
+echo "Pre-commit validation completed"
+exit 0
