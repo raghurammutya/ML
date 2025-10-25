@@ -8,8 +8,8 @@ from fastapi import FastAPI
 from loguru import logger
 
 from .config import get_settings
-from .redis_client import redis_publisher
 from .generator import mock_stream_loop
+from .redis_client import redis_publisher
 
 settings = get_settings()
 
@@ -29,9 +29,11 @@ async def lifespan(app: FastAPI):
                 await task
         await redis_publisher.close()
         logger.info("Shutdown complete")
- 
- 
- app = FastAPI(title="Ticker Service", lifespan=lifespan)
-@@
- async def health() -> dict[str, str]:
-     return {"status": "ok", "environment": settings.environment}
+
+
+app = FastAPI(title="Ticker Service", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok", "environment": settings.environment}
