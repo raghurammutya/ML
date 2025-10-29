@@ -20,7 +20,12 @@ from .monitoring import (
     track_request_metrics, update_db_pool_metrics
 )
 from .models import HealthResponse, CacheStats
-from app.routes import marks_asyncpg, labels, indicators
+from .fo_stream import FOStreamConsumer
+from .backfill import BackfillManager
+from .realtime import RealTimeHub
+from .ticker_client import TickerServiceClient
+from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor
 
 # -------- logging --------
 logging.basicConfig(
@@ -34,6 +39,13 @@ settings = get_settings()
 data_manager: Optional[DataManager] = None
 cache_manager: Optional[CacheManager] = None
 redis_client: Optional[redis.Redis] = None
+fo_stream_consumer: Optional[FOStreamConsumer] = None
+real_time_hub: Optional[RealTimeHub] = None
+ticker_client: Optional[TickerServiceClient] = None
+nifty_subscription_manager: Optional[NiftySubscriptionManager] = None
+nifty_monitor_stream: Optional[NiftyMonitorStream] = None
+monitor_hub: Optional[RealTimeHub] = None
+backfill_manager: Optional[BackfillManager] = None
 
 background_tasks = []  # supervised background tasks
 
@@ -83,7 +95,16 @@ async def task_supervisor():
 # -------- lifespan --------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global data_manager, cache_manager, redis_client
+    global data_manager
+    global cache_manager
+    global redis_client
+    global fo_stream_consumer
+    global real_time_hub
+    global ticker_client
+    global nifty_subscription_manager
+    global nifty_monitor_stream
+    global monitor_hub
+    global backfill_manager
 
     try:
         logger.info("Starting TradingView ML Visualization API")
@@ -109,6 +130,11 @@ async def lifespan(app: FastAPI):
         await data_manager.initialize()
         health_monitor.update_db_health(True)
 
+        # Real-time hubs shared between routes and background consumers
+        real_time_hub = RealTimeHub()
+        monitor_hub = RealTimeHub()
+        fo.set_realtime_hub(real_time_hub)
+
         # Routes
         udf_handler = UDFHandler(data_manager)        # uses DB manager (not cache)
         app.include_router(udf_handler.get_router())
@@ -123,6 +149,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to include indicators router: {e}")
         logger.info("UDF routes included successfully")
+        app.include_router(fo.router)
+
+        ticker_client = TickerServiceClient(
+            settings.ticker_service_url,
+            timeout=settings.ticker_service_timeout,
+        )
+        nifty_subscription_manager = NiftySubscriptionManager(ticker_client, settings)
+        backfill_manager = BackfillManager(data_manager, ticker_client)
+        nifty_monitor.set_data_manager(data_manager)
+        nifty_monitor.set_subscription_manager(nifty_subscription_manager)
+
+        if settings.monitor_stream_enabled:
+            nifty_monitor_stream = NiftyMonitorStream(redis_client, settings, monitor_hub)
+            nifty_monitor.set_monitor_stream(nifty_monitor_stream)
+            nifty_monitor.set_realtime_hub(monitor_hub)
+        else:
+            nifty_monitor_stream = None
+            logger.info("Nifty monitor stream disabled via configuration")
+
+        app.include_router(nifty_monitor.router)
+
+        if settings.fo_stream_enabled:
+            fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
+            background_tasks.append(asyncio.create_task(fo_stream_consumer.run()))
+            logger.info("FO stream consumer started")
+        if nifty_monitor_stream:
+            background_tasks.append(asyncio.create_task(nifty_monitor_stream.run()))
+            logger.info("Nifty monitor stream consumer started")
+        if backfill_manager and settings.backfill_enabled:
+            background_tasks.append(asyncio.create_task(backfill_manager.run()))
+            logger.info("Backfill manager loop started")
 
         # Supervise background tasks
         background_tasks.append(asyncio.create_task(task_supervisor()))
@@ -139,10 +196,16 @@ async def lifespan(app: FastAPI):
             t.cancel()
         await asyncio.gather(*background_tasks, return_exceptions=True)
 
+        if fo_stream_consumer:
+            await fo_stream_consumer.shutdown()
+        if backfill_manager:
+            await backfill_manager.shutdown()
         if data_manager:
             await data_manager.close()
         if redis_client:
             await redis_client.close()
+        if ticker_client:
+            await ticker_client.close()
 
         logger.info("Shutdown complete")
 

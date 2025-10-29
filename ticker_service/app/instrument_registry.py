@@ -120,17 +120,26 @@ class InstrumentRegistry:
     async def refresh_with_client(self, client: "KiteClient") -> None:
         await self.initialise()
         await client.ensure_session()
+
         segments = self._settings.instrument_segments
         logger.info("Refreshing instrument registry | segments=%s", ",".join(segments))
 
         async def _download(segment: str) -> List[Dict[str, object]]:
-            return await client.fetch_instruments(segment)
+            try:
+                instruments = await client.fetch_instruments(segment)
+                logger.debug("Fetched %d instruments for segment=%s", len(instruments), segment)
+                return instruments
+            except Exception as exc:
+                logger.exception("Failed to fetch instruments for segment=%s: %s", segment, exc)
+                return []
 
         downloads = await asyncio.gather(*[_download(segment) for segment in segments])
         payload = dict(zip(segments, downloads))
+
         async with self._lock:
             await self._apply_refresh(payload)
             await self._reload_cache()
+
         logger.info("Instrument registry refresh complete | records=%d", len(self._cache))
 
     async def _apply_refresh(self, payload: Dict[str, Sequence[Dict[str, object]]]) -> None:

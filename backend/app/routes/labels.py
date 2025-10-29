@@ -6,6 +6,8 @@ import asyncpg
 import logging
 from datetime import datetime
 
+from ..database import create_pool, _normalize_symbol, _normalize_timeframe
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,6 @@ class LabelResponse(BaseModel):
 # ---------- Helper to get DB pool ----------
 async def get_pool(request: Request) -> asyncpg.Pool:
     # Try to get from app.state first (like marks_asyncpg.py does)
-    from app.database import create_pool
     pool_key = "pg_pool"
     pool = getattr(request.app.state, pool_key, None)
     
@@ -53,34 +54,8 @@ async def create_label(
         pool = await get_pool(request)
         
         # Normalize symbol to match marks endpoint logic
-        symbol_normalized = label_data.symbol.strip().upper()
-        symbol_aliases = {
-            "NIFTY": "NIFTY",
-            "NIFTY50": "NIFTY", 
-            "NSE:NIFTY50": "NIFTY",
-            "NSE:NIFTY": "NIFTY",
-            "^NSEI": "NIFTY",
-        }
-        symbol_normalized = symbol_aliases.get(symbol_normalized, symbol_normalized)
-        
-        # Normalize timeframe to match DB format (same logic as database.py)
-        def normalize_timeframe(resolution: str) -> str:
-            r = str(resolution).strip().lower()
-            if r in {"60", "1h", "60min", "1hour"}:
-                return "1hour"
-            if r in {"1d", "d", "day", "1day"}:
-                return "1day"
-            if r.isdigit():
-                minutes = int(r)
-                if minutes <= 30:
-                    return f"{minutes}min"
-                elif minutes == 60:
-                    return "1hour"
-                else:
-                    return f"{minutes}min"
-            return f"{resolution}min" if resolution.isdigit() else resolution
-        
-        timeframe = normalize_timeframe(label_data.timeframe)
+        symbol_normalized = _normalize_symbol(label_data.symbol)
+        timeframe = _normalize_timeframe(label_data.timeframe)
         
         # Convert unix timestamp to PostgreSQL timestamp (as IST naive datetime)
         # TradingView sends UTC epoch, but database expects IST naive timestamps
@@ -131,35 +106,9 @@ async def delete_label(
     try:
         pool = await get_pool(request)
         
-        # Normalize symbol to match marks endpoint logic
-        symbol_normalized = label_data.symbol.strip().upper()
-        symbol_aliases = {
-            "NIFTY": "NIFTY",
-            "NIFTY50": "NIFTY", 
-            "NSE:NIFTY50": "NIFTY",
-            "NSE:NIFTY": "NIFTY",
-            "^NSEI": "NIFTY",
-        }
-        symbol_normalized = symbol_aliases.get(symbol_normalized, symbol_normalized)
-        
-        # Normalize timeframe to match DB format (same logic as database.py)
-        def normalize_timeframe(resolution: str) -> str:
-            r = str(resolution).strip().lower()
-            if r in {"60", "1h", "60min", "1hour"}:
-                return "1hour"
-            if r in {"1d", "d", "day", "1day"}:
-                return "1day"
-            if r.isdigit():
-                minutes = int(r)
-                if minutes <= 30:
-                    return f"{minutes}min"
-                elif minutes == 60:
-                    return "1hour"
-                else:
-                    return f"{minutes}min"
-            return f"{resolution}min" if resolution.isdigit() else resolution
-        
-        timeframe = normalize_timeframe(label_data.timeframe)
+        # Normalize symbol/timeframe to align with TradingView endpoints
+        symbol_normalized = _normalize_symbol(label_data.symbol)
+        timeframe = _normalize_timeframe(label_data.timeframe)
         
         # Convert unix timestamp to PostgreSQL timestamp (as IST naive datetime)
         # TradingView sends UTC epoch, but database expects IST naive timestamps

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 interface TradingViewWidgetProps {
   symbol: string
@@ -20,12 +20,53 @@ const TradingViewWidget: React.FC<TradingViewWidgetProps> = ({
   const [currentData, setCurrentData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const normalizedSymbol = useMemo(() => symbol.trim(), [symbol])
+  const tradingViewSymbol = useMemo(() => {
+    if (!normalizedSymbol) return 'NSE:NIFTY50'
+    return normalizedSymbol.includes(':') ? normalizedSymbol : `NSE:${normalizedSymbol}`
+  }, [normalizedSymbol])
+  const historySymbol = useMemo(() => {
+    if (!normalizedSymbol) return 'NIFTY50'
+    const compact = normalizedSymbol.includes(':') ? normalizedSymbol.split(':').pop() ?? normalizedSymbol : normalizedSymbol
+    return compact.replace(/\s+/g, '').toUpperCase()
+  }, [normalizedSymbol])
+
+  const fetchCustomData = useCallback(async () => {
+    try {
+      const endTime = 1753457340   // July 25, 2025 15:29
+      const startTime = 1752845100 // July 18, 2025 13:25
+      
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || '/tradingview-api'
+      const params = `symbol=${encodeURIComponent(historySymbol)}&from=${startTime}&to=${endTime}&resolution=${interval}`
+      const [historyRes, marksRes] = await Promise.all([
+        fetch(`${baseUrl}/history?${params}`),
+        fetch(`${baseUrl}/marks?${params}`)
+      ])
+
+      if (historyRes.ok && marksRes.ok) {
+        const historyData = await historyRes.json()
+        const marksData = await marksRes.json()
+        
+        setCurrentData({
+          history: historyData,
+          marks: marksData
+        })
+      } else {
+        setCurrentData(null)
+      }
+    } catch (fetchError) {
+      console.error('Error fetching custom data:', fetchError)
+      setCurrentData(null)
+    }
+  }, [historySymbol, interval])
 
   useEffect(() => {
     if (!containerRef.current) return
 
     // Clean up previous widget
     containerRef.current.innerHTML = ''
+    setLoading(true)
+    setError(null)
     
     // Create the TradingView widget
     const script = document.createElement('script')
@@ -43,7 +84,7 @@ const TradingViewWidget: React.FC<TradingViewWidgetProps> = ({
     }
     script.innerHTML = JSON.stringify({
       "autosize": true,
-      "symbol": "NSE:NIFTY",
+      "symbol": tradingViewSymbol,
       "interval": interval === "60" ? "60" : interval,
       "timezone": "Asia/Kolkata",
       "theme": "dark",
@@ -87,33 +128,7 @@ const TradingViewWidget: React.FC<TradingViewWidgetProps> = ({
         containerRef.current.innerHTML = ''
       }
     }
-  }, [symbol, interval])
-
-  const fetchCustomData = async () => {
-    try {
-      // Use ML data date range (July 2025) instead of current date
-      const endTime = 1753457340   // July 25, 2025 15:29
-      const startTime = 1752845100 // July 18, 2025 13:25
-      
-      // Fetch our ML labels
-      const [historyRes, marksRes] = await Promise.all([
-        fetch(`../tradingview-api/history?symbol=NIFTY50&from=${startTime}&to=${endTime}&resolution=${interval}`),
-        fetch(`../tradingview-api/marks?symbol=NIFTY50&from=${startTime}&to=${endTime}&resolution=${interval}`)
-      ])
-
-      if (historyRes.ok && marksRes.ok) {
-        const historyData = await historyRes.json()
-        const marksData = await marksRes.json()
-        
-        setCurrentData({
-          history: historyData,
-          marks: marksData
-        })
-      }
-    } catch (error) {
-      console.error('Error fetching custom data:', error)
-    }
-  }
+  }, [fetchCustomData, interval, tradingViewSymbol])
 
   return (
     <div style={{ height: '100%', position: 'relative' }}>

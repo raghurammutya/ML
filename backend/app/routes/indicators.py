@@ -10,11 +10,13 @@ from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, Query, HTTPException, Depends
 from pydantic import BaseModel
 
+from ..config import get_settings
 from ..database import DataManager, _normalize_symbol, _normalize_timeframe, _as_epoch_seconds
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/indicators", tags=["indicators"])
+settings = get_settings()
 
 # CPR Models
 class CPRPoint(BaseModel):
@@ -199,7 +201,7 @@ async def get_data_manager() -> DataManager:
 
 @router.get("/cpr", response_model=CPRResponse)
 async def get_cpr_indicator(
-    symbol: str = Query("NIFTY50", description="Symbol to get CPR for"),
+    symbol: str = Query(settings.monitor_default_symbol, description="Symbol to get CPR for"),
     from_timestamp: int = Query(..., alias="from", description="Start timestamp"),
     to_timestamp: int = Query(..., alias="to", description="End timestamp"),
     resolution: str = Query("1D", description="Timeframe resolution"),

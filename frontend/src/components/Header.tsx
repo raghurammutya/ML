@@ -1,6 +1,11 @@
 import React from 'react'
 import { HealthStatus } from '../types'
 
+const DEFAULT_CHART_SYMBOL =
+  (import.meta.env.VITE_CHART_SYMBOL as string | undefined) ??
+  (import.meta.env.VITE_MONITOR_SYMBOL as string | undefined) ??
+  'NIFTY50'
+
 interface HeaderProps {
   health: HealthStatus | null
 }
@@ -14,7 +19,7 @@ const Header: React.FC<HeaderProps> = ({ health }) => {
 
   return (
     <div className="header">
-      <h1>NIFTY50 - ML Label Visualization</h1>
+      <h1>{DEFAULT_CHART_SYMBOL.toUpperCase()} - ML Label Visualization</h1>
       
       <div className="header-info">
         <div>

@@ -60,7 +60,11 @@ echo "Starting frontend in $ENVIRONMENT environment"
 echo "Backend service: $BACKEND_SERVICE_NAME:$API_PORT"
 echo "Backend URL override: ${BACKEND_URL:-none}"
 
-# Start nginx with template substitution
+# Render nginx configuration from template
+envsubst '\$BACKEND_SERVICE_NAME \$API_PORT \$ENVIRONMENT \$BACKEND_URL \$APP_VERSION' \
+    < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+
+# Start nginx
 exec nginx-debug -g 'daemon off;'
 EOF
 

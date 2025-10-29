@@ -5,6 +5,8 @@ from pydantic import BaseModel, field_validator
 import asyncpg
 import os
 
+from ..database import _normalize_symbol
+
 router = APIRouter()
 
 # ---------- Pydantic ----------
@@ -17,15 +19,7 @@ class MarksQuery(BaseModel):
     @field_validator("symbol")
     @classmethod
     def normalize_symbol(cls, v: str) -> str:
-        s = v.strip().upper()
-        aliases = {
-            "NIFTY": "NIFTY",
-            "NIFTY50": "NIFTY",
-            "NSE:NIFTY50": "NIFTY",
-            "NSE:NIFTY": "NIFTY",
-            "^NSEI": "NIFTY",
-        }
-        return aliases.get(s, s)
+        return _normalize_symbol(v)
 
     @field_validator("resolution")
     @classmethod

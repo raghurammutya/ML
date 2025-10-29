@@ -62,6 +62,11 @@ class KiteClient:
         self._kite = KiteConnect(api_key=api_key)
         if self.access_token:
             self._kite.set_access_token(self.access_token)
+        logger.debug(
+            "Access token set for account=%s | headers=%s",
+            self.account_id,
+            self.access_token
+        )
 
         self._settings = get_settings()
         self._ticker: KiteTicker | None = None
@@ -77,6 +82,12 @@ class KiteClient:
 
     @classmethod
     def from_account(cls, account: "KiteAccount") -> "KiteClient":
+        logger.debug(
+            "Creating KiteClient for account=%s | token=%s",
+            account.account_id,
+            (account.access_token or "")[:6] + "..." if account.access_token else "MISSING"
+        )
+
         return cls(
             account_id=account.account_id,
             api_key=account.api_key,
@@ -152,13 +163,18 @@ class KiteClient:
 
         return await asyncio.to_thread(_fetch)
 
-    async def fetch_instruments(self, segment: str) -> List[Dict[str, Any]]:
-        await self.ensure_session()
+    def fetch_instruments(self, segment: str) -> List[Dict[str, Any]]:
+        def _download():
+            # Temporarily override the token header for this call
+            self._kite.set_access_token(f"token {self.api_key}:{self.access_token}")
+            try:
+                return self._kite.instruments(segment)
+            finally:
+                # Restore raw token for other API calls
+                self._kite.set_access_token(self.access_token)
 
-        def _download() -> List[Dict[str, Any]]:
-            return self._kite.instruments(segment)
+        return asyncio.to_thread(_download)
 
-        return await asyncio.to_thread(_download)
 
     async def get_last_price(self, tradingsymbol: str) -> float:
         await self.ensure_session()
@@ -166,6 +182,18 @@ class KiteClient:
         def _quote() -> float:
             quote = self._kite.quote([tradingsymbol])
             return float(quote[tradingsymbol]["last_price"])
+
+        return await asyncio.to_thread(_quote)
+
+    async def get_quote(self, tradingsymbols: Iterable[str]) -> Dict[str, Any]:
+        symbols = [str(symbol) for symbol in tradingsymbols if symbol]
+        if not symbols:
+            return {}
+
+        await self.ensure_session()
+
+        def _quote() -> Dict[str, Any]:
+            return self._kite.quote(symbols)
 
         return await asyncio.to_thread(_quote)
 

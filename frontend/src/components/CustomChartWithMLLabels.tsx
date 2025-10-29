@@ -32,7 +32,10 @@ type CustomChartProps = {
   toSec?: number | null
 }
 
-const DEFAULT_SYMBOL = 'NIFTY50'
+const DEFAULT_SYMBOL =
+  (import.meta.env.VITE_CHART_SYMBOL as string | undefined) ??
+  (import.meta.env.VITE_MONITOR_SYMBOL as string | undefined) ??
+  'NIFTY50'
 const DEFAULT_TF: Timeframe = '5'  // Testing 5-minute data
 const DEFAULT_TYPE: ChartType = 'candle'
 

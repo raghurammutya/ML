@@ -1,0 +1,8 @@
+accounts:
+  primary:
+    api_key: ${KITE_primary_API_KEY}
+    api_secret: ${KITE_primary_API_SECRET}
+    username: ${KITE_primary_USERNAME}
+    password: ${KITE_primary_PASSWORD}
+    totp_key: ${KITE_primary_TOTP_KEY}
+    token_dir: ./tokens

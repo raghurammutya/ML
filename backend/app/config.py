@@ -13,13 +13,38 @@ class Settings(BaseSettings):
     db_pool_max: int = 20
     db_pool_timeout: int = 60
     db_query_timeout: int = 30  # Individual query timeout
+    database_url: Optional[str] = None
+    timescale_database_url: Optional[str] = None
+    postgres_url: Optional[str] = None
     
     # Redis
     redis_url: str = "redis://localhost:6379"
     redis_decode_responses: bool = True
-    redis_socket_timeout: int = 5
-    redis_socket_connect_timeout: int = 5
-    
+    redis_socket_timeout: int = 30
+    redis_socket_connect_timeout: int = 30
+    fo_stream_enabled: bool = True
+    fo_options_channel: str = "ticker:nifty:options"
+    fo_underlying_channel: str = "ticker:nifty:underlying"
+    fo_timeframes: list[str] = ["1min", "5min", "15min"]
+    fo_persist_timeframes: list[str] = ["1min"]
+    fo_flush_lag_seconds: int = 5
+    fo_max_buffer_minutes: int = 60
+    fo_strike_gap: int = 50
+    fo_max_moneyness_level: int = 10
+    fo_option_expiry_window: int = 3
+    backfill_enabled: bool = True
+    backfill_check_interval_seconds: int = 300
+    backfill_gap_threshold_minutes: int = 3
+    backfill_max_batch_minutes: int = 120
+    monitor_default_symbol: str = "NIFTY50"
+   
+    # Ticker service
+    ticker_service_url: str = "http://localhost:8080"
+    ticker_service_timeout: int = 10
+    ticker_service_mode: str = "FULL"
+    ticker_service_account_id: Optional[str] = None
+    monitor_stream_enabled: bool = True
+
     # Cache TTLs (seconds)
     cache_ttl_1m: int = 60
     cache_ttl_5m: int = 300
@@ -75,15 +100,15 @@ RESOLUTION_MAP = {
 
 # Database table mappings - use base table for all timeframes and aggregate in code
 TABLE_MAP = {
-    "1": "nifty50_ohlc",      # 1-minute: use base table
-    "2": "nifty50_ohlc",      # 2-minute: aggregate from base table  
-    "3": "nifty50_ohlc",      # 3-minute: aggregate from base table
-    "5": "nifty50_ohlc",      # 5-minute: aggregate from base table
-    "10": "nifty50_ohlc",     # 10-minute: aggregate from base table
-    "15": "nifty50_ohlc",     # 15-minute: aggregate from base table
-    "30": "nifty50_ohlc",     # 30-minute: aggregate from base table
-    "60": "nifty50_ohlc",     # 1-hour: aggregate from base table
-    "D": "nifty50_ohlc",      # Daily: aggregate from base table
-    "W": "nifty50_ohlc",      # Weekly: aggregate from base table
-    "M": "nifty50_ohlc"       # Monthly: aggregate from base table
+    "1": "minute_bars",       # 1-minute: use canonical base table
+    "2": "minute_bars",       # 2-minute: aggregate from canonical table
+    "3": "minute_bars",       # 3-minute: aggregate from canonical table
+    "5": "minute_bars",       # 5-minute: aggregate from canonical table
+    "10": "minute_bars",      # 10-minute: aggregate from canonical table
+    "15": "minute_bars",      # 15-minute: aggregate from canonical table
+    "30": "minute_bars",      # 30-minute: aggregate from canonical table
+    "60": "minute_bars",      # 1-hour: aggregate from canonical table
+    "D": "minute_bars",       # Daily: aggregate from canonical table
+    "W": "minute_bars",       # Weekly: aggregate from canonical table
+    "M": "minute_bars"        # Monthly: aggregate from canonical table
 }

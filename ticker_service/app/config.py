@@ -1,4 +1,5 @@
 from functools import lru_cache
+from datetime import time as dtime
 from typing import List
 
 from pydantic import Field
@@ -40,14 +41,38 @@ class Settings(BaseSettings):
     instrument_db_name: str = Field(default="stocksblitz_unified", env="INSTRUMENT_DB_NAME")
     instrument_db_user: str = Field(default="stocksblitz", env="INSTRUMENT_DB_USER")
     instrument_db_password: str = Field(default="stocksblitz123", env="INSTRUMENT_DB_PASSWORD")
-    instrument_refresh_hours: int = Field(default=12, description="Refresh cadence for instrument metadata (hours)")
+    instrument_refresh_hours: int = Field(default=1, description="Refresh cadence for instrument metadata (hours)")
     instrument_refresh_check_seconds: int = Field(
         default=1_800, description="Background poll interval for registry refresh checks (seconds)"
     )
-    instrument_segments: List[str] = Field(default_factory=lambda: ["NFO", "NSE"])
+    instrument_segments: List[str] = Field(default_factory=lambda: ["NFO", "NSE","BSE", "NFO-OPT","NFO-FUT","MCX","CDS"])
     instrument_cache_ttl_seconds: int = Field(
         default=300,
         description="Lifetime for instrument lookup cache (seconds)",
+    )
+    market_open_time: dtime = Field(
+        default=dtime(9, 15),
+        description="Local market open time (24h clock).",
+    )
+    market_close_time: dtime = Field(
+        default=dtime(15, 30),
+        description="Local market close time (24h clock).",
+    )
+    market_timezone: str = Field(
+        default="Asia/Kolkata",
+        description="IANA timezone used to evaluate market hours.",
+    )
+    mock_history_minutes: int = Field(
+        default=10,
+        description="Number of minutes of historical data to seed mock generation.",
+    )
+    mock_price_variation_bps: float = Field(
+        default=12.5,
+        description="Maximum mock price variation per tick in basis points.",
+    )
+    mock_volume_variation: float = Field(
+        default=0.15,
+        description="Maximum proportional variation applied to mock volumes/OI.",
     )
 
     model_config = {

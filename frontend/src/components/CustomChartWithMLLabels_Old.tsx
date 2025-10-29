@@ -35,7 +35,10 @@ type CustomChartProps = {
   marksUrlBuilder?: (symbol: string, tf: Timeframe, fromSec?: number, toSec?: number) => string
 }
 
-const DEFAULT_SYMBOL = 'NIFTY50'
+const DEFAULT_SYMBOL =
+  (import.meta.env.VITE_CHART_SYMBOL as string | undefined) ??
+  (import.meta.env.VITE_MONITOR_SYMBOL as string | undefined) ??
+  'NIFTY50'
 const DEFAULT_TF: Timeframe = '5'
 const DEFAULT_TYPE: ChartType = 'candle'
 

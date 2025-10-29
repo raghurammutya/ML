@@ -1,0 +1,336 @@
+from __future__ import annotations
+import json, os
+from pathlib import Path
+
+import asyncio
+from datetime import datetime, timezone
+import threading
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+
+from loguru import logger
+WS_ROOT = os.getenv("KITE_WS_ROOT", "wss://ws.kite.trade/")
+from ..config import get_settings
+from ..schema import Instrument
+
+if TYPE_CHECKING:
+    from ..accounts import KiteAccount
+
+try:
+    from kiteconnect import KiteConnect, KiteTicker
+except ImportError as exc:  # pragma: no cover - surfaced at runtime if package missing
+    KiteConnect = None
+    KiteTicker = None
+    _kite_import_error = exc
+else:
+    _kite_import_error = None
+
+
+TickHandler = Callable[[str, List[Dict[str, Any]]], Awaitable[None]]
+ErrorHandler = Callable[[str, Exception], Awaitable[None]]
+def _resolve_token_dir() -> Path:
+    """Match session.py behavior: prefer KITE_TOKEN_DIR (abs or relative to app/kite),
+    else default to app/kite/tokens."""
+    base = Path(__file__).parent  # app/kite
+    env_dir = os.getenv("KITE_TOKEN_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        return p if p.is_absolute() else base / env_dir
+    return base / "tokens"
+class KiteClient:
+    """
+    Convenience wrapper over KiteConnect/KiteTicker that exposes async-friendly helpers
+    for historical fetches and real-time subscriptions.
+    """
+
+    def __init__(self, account_id: str, api_key: str, access_token: str | None = None) -> None:
+        if _kite_import_error:
+            raise RuntimeError(
+                "kiteconnect is not installed. Install it via `pip install kiteconnect`."
+            ) from _kite_import_error
+        self.account_id = account_id
+        self.api_key = api_key
+        self.access_token = access_token or ""
+        self._kite = KiteConnect(api_key=api_key)
+        if self.access_token:
+            self._kite.set_access_token(self.access_token)
+
+        self._ticker: KiteTicker | None = None
+        self._ticker_connected = False
+        self._ticker_running = False
+        self._ticker_mode = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._tick_handler: TickHandler | None = None
+        self._error_handler: ErrorHandler | None = None
+        self._subscription_lock = threading.Lock()
+        self._target_tokens: Set[int] = set()
+        self._subscribed_tokens: Set[int] = set()
+        self._settings = get_settings()
+
+    @classmethod
+    def from_account(cls, account: "KiteAccount") -> "KiteClient":
+        return cls(account_id=account.account_id, api_key=account.api_key, access_token=account.access_token)
+
+    async def ensure_session(self) -> None:
+        if self.access_token:
+            return
+
+        # Try to load cached token from disk
+        token_dir = _resolve_token_dir()
+        candidates = [
+            token_dir / f"kite_token_{self.account_id}.json",
+            token_dir / f"kite_token_{self.account_id.lower()}.json",
+            Path.cwd() / "Kite_FOdata_scripts" / "tokens" / f"kite_token_{self.account_id}.json",
+        ]
+
+        for p in candidates:
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text())
+                    tok = data.get("access_token")
+                    if tok:
+                        self.access_token = tok
+                        self._kite.set_access_token(tok)
+                        return
+                except Exception:
+                    pass
+
+        # If still missing, raise with precise path info (not the legacy hint)
+        raise RuntimeError(
+            f"Account {self.account_id} missing access token. "
+            f"Tried: {', '.join(str(p) for p in candidates)}. "
+            f"Set KITE_TOKEN_DIR or run the token bootstrap."
+        )
+
+    async def fetch_historical(self, instrument_token: int, from_ts: int, to_ts: int, interval: str) -> List[Dict[str, Any]]:
+        await self.ensure_session()
+
+        from_dt = datetime.fromtimestamp(from_ts, tz=timezone.utc)
+        to_dt = datetime.fromtimestamp(to_ts, tz=timezone.utc)
+
+        def _fetch() -> List[Dict[str, Any]]:
+            return self._kite.historical_data(instrument_token, from_dt, to_dt, interval, continuous=False)
+
+        return await asyncio.to_thread(_fetch)
+
+    async def load_option_chain(self, underlying: str, expiry_window: int, otm_levels: int) -> List[Instrument]:
+        await self.ensure_session()
+
+        def _fetch_instruments() -> List[Dict[str, Any]]:
+            return self._kite.instruments("NFO")
+
+        instruments = await asyncio.to_thread(_fetch_instruments)
+        filtered = [inst for inst in instruments if inst.get("name", "").upper() == underlying.upper()]
+        if not filtered:
+            logger.warning("Account %s: no instruments found for %s", self.account_id, underlying)
+            return []
+
+        quote_symbol = self._settings.nifty_quote_symbol
+
+        async def _fetch_spot() -> float:
+            def _quote() -> float:
+                quote = self._kite.quote([quote_symbol])
+                return float(quote[quote_symbol]["last_price"])
+
+            return await asyncio.to_thread(_quote)
+
+        try:
+            spot_price = await _fetch_spot()
+        except Exception as exc:
+            logger.error("Account %s: failed to fetch spot price (%s). Falling back to synthetic strikes.", self.account_id, exc)
+            spot_price = 0.0
+
+        strike_step = 50
+        atm_strike = round(spot_price / strike_step) * strike_step if spot_price else 0
+        strike_range = {atm_strike + strike_step * i for i in range(-otm_levels, otm_levels + 1)} if atm_strike else set()
+
+        expiries = sorted({inst["expiry"] for inst in filtered if inst.get("expiry")})
+        expiries = expiries[:expiry_window] if expiry_window else expiries
+        expiry_whitelist = {exp for exp in expiries}
+
+        option_chain: List[Instrument] = []
+        for inst in filtered:
+            instrument_type = inst.get("instrument_type")
+            expiry = inst.get("expiry")
+            strike = float(inst.get("strike") or 0)
+            if instrument_type not in ("CE", "PE"):
+                continue
+            if expiry_whitelist and expiry not in expiry_whitelist:
+                continue
+            if strike_range and strike not in strike_range:
+                continue
+            instrument = Instrument(
+                symbol=underlying,
+                instrument_token=int(inst["instrument_token"]),
+                strike=strike,
+                expiry=expiry.isoformat() if hasattr(expiry, "isoformat") else str(expiry),
+                instrument_type=instrument_type,
+            )
+            option_chain.append(instrument)
+
+        option_chain.sort(key=lambda inst: (inst.expiry or "", inst.strike or 0.0, inst.instrument_type))
+        return option_chain
+
+    async def subscribe_tokens(
+        self,
+        instrument_tokens: List[int],
+        on_ticks: TickHandler,
+        on_error: Optional[ErrorHandler] = None,
+    ) -> None:
+        if not instrument_tokens:
+            return
+        await self.ensure_session()
+
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        self._tick_handler = on_ticks
+        self._error_handler = on_error
+
+        with self._subscription_lock:
+            self._target_tokens.update(int(token) for token in instrument_tokens)
+
+        self._ensure_ticker()
+        self._sync_subscriptions()
+
+    async def unsubscribe_tokens(self, instrument_tokens: List[int]) -> None:
+        if not instrument_tokens:
+            return
+        with self._subscription_lock:
+            for token in instrument_tokens:
+                self._target_tokens.discard(int(token))
+        self._sync_subscriptions()
+
+    async def stop_stream(self) -> None:
+        with self._subscription_lock:
+            self._target_tokens.clear()
+        self._sync_subscriptions()
+        if self._ticker:
+            self._ticker.close()
+        self._ticker = None
+        self._ticker_running = False
+        self._ticker_connected = False
+        self._subscribed_tokens.clear()
+        self._loop = None
+        logger.info("Kite ticker stopped for account %s", self.account_id)
+
+    # ---- KiteTicker wiring -------------------------------------------------
+
+    def _ensure_ticker(self) -> None:
+        """Create/launch KiteTicker and wire callbacks once per process."""
+        if self._ticker_running:
+            return
+        if not self.access_token:
+            raise RuntimeError(f"Account {self.account_id} has no access_token; call ensure_session() first.")
+
+        # NOTE: KiteTicker signature: KiteTicker(api_key, access_token, root=...)
+        self._ticker = KiteTicker(self.api_key, self.access_token, root=WS_ROOT)
+
+        # ---- callbacks
+        def _on_connect(ws, response=None):
+            self._ticker_connected = True
+            mode = getattr(self._settings, "ticker_mode", "LTP").upper()
+            self._ticker_mode = mode
+            logger.info("Kite ticker thread started for %s in %s mode", self.account_id, mode)
+            # First sync immediately on connect
+            self._sync_subscriptions()
+
+        def _on_close(ws, code, reason):
+            self._ticker_connected = False
+            logger.warning("Kite ticker closed for %s (code=%s reason=%s)", self.account_id, code, reason)
+
+        def _on_error(ws, code, reason):
+            try:
+                logger.error("Kite ticker error for %s (code=%s reason=%s)", self.account_id, code, reason)
+                if self._error_handler and self._loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._error_handler(self.account_id, RuntimeError(f"WS error {code}: {reason}")),
+                        self._loop,
+                    )
+            except Exception:
+                logger.exception("Error dispatching ticker error for %s", self.account_id)
+
+        def _on_ticks(ws, ticks):
+            # fan out to async handler in the main loop
+            if self._tick_handler and self._loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._tick_handler(self.account_id, ticks), self._loop
+                    )
+                except Exception:
+                    logger.exception("Dispatching ticks failed for %s", self.account_id)
+
+        self._ticker.on_connect = _on_connect
+        self._ticker.on_close = _on_close
+        self._ticker.on_error = _on_error
+        self._ticker.on_ticks = _on_ticks
+
+        # Launch WS in a background thread
+        self._ticker_running = True
+        threading.Thread(
+            target=self._ticker.connect,
+            kwargs={"threaded": True, "disable_ssl_verification": False},
+            name=f"kite-ws-{self.account_id}",
+            daemon=True,
+        ).start()
+    def _sync_subscriptions(self) -> None:
+        if not self._ticker or not self._ticker_running:
+            return
+
+        with self._subscription_lock:
+            target = {int(t) for t in self._target_tokens}
+            to_add = list(target - self._subscribed_tokens)
+            to_del = list(self._subscribed_tokens - target)
+
+        if to_add:
+            try:
+                self._ticker.subscribe(to_add)
+                self._subscribed_tokens.update(to_add)
+            except Exception:
+                logger.exception("Subscribe failed for %s -> %s", self.account_id, to_add)
+
+        if to_del:
+            try:
+                self._ticker.unsubscribe(to_del)
+                for t in to_del:
+                    self._subscribed_tokens.discard(t)
+            except Exception:
+                logger.exception("Unsubscribe failed for %s -> %s", self.account_id, to_del)
+
+        # Set/update mode after (re)subscription; default to LTP
+        mode = (self._ticker_mode or "LTP").upper()
+        try:
+            if mode == "LTP":
+                self._ticker.set_mode(self._ticker.MODE_LTP, list(self._subscribed_tokens))
+            else:
+                # Fallback to QUOTE for anything else requested
+                self._ticker.set_mode(self._ticker.MODE_QUOTE, list(self._subscribed_tokens))
+        except Exception:
+            logger.exception("set_mode(%s) failed for %s", mode, self.account_id)
+    def _on_ticker_connect(self, ws) -> None:  # pragma: no cover
+        self._ticker_connected = True
+        logger.info("Kite ticker connected for account %s", self.account_id)
+        self._sync_subscriptions()
+
+    def _on_ticker_close(self, ws, code, reason) -> None:  # pragma: no cover
+        self._ticker_connected = False
+        logger.warning("Kite ticker closed for %s (code=%s reason=%s)", self.account_id, code, reason)
+
+    def _on_ticker_error(self, ws, code, reason) -> None:  # pragma: no cover
+        logger.error("Kite ticker error for %s (code=%s reason=%s)", self.account_id, code, reason)
+        if self._error_handler and self._loop:
+            coro = self._error_handler(self.account_id, Exception(reason))
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def _on_ticker_noreconnect(self, ws) -> None:  # pragma: no cover
+        logger.error("Kite ticker gave up reconnecting for %s", self.account_id)
+
+    def _on_ticker_reconnect(self, ws, attempt_count) -> None:  # pragma: no cover
+        logger.warning("Kite ticker reconnect attempt %s for %s", attempt_count, self.account_id)
+
+    def _on_ticks(self, ws, ticks: List[Dict[str, Any]]) -> None:  # pragma: no cover
+        if not ticks or not self._tick_handler or not self._loop:
+            return
+        try:
+            coro = self._tick_handler(self.account_id, ticks)
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except Exception as exc:
+            logger.exception("Failed to dispatch ticks for %s: %s", self.account_id, exc)

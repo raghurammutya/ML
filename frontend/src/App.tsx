@@ -8,6 +8,11 @@ import { fetchHealth, fetchCacheStats } from './services/api'
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
 type ChartType = 'candle' | 'line'
 
+const DEFAULT_CHART_SYMBOL =
+  (import.meta.env.VITE_CHART_SYMBOL as string | undefined) ??
+  (import.meta.env.VITE_MONITOR_SYMBOL as string | undefined) ??
+  'NIFTY50'
+
 const App: React.FC = () => {
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null)
@@ -17,6 +22,7 @@ const App: React.FC = () => {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>('5')
 
   const [chartType, setChartType] = useState<ChartType>('candle')
+  const [symbol] = useState<string>(DEFAULT_CHART_SYMBOL.toUpperCase())
 
   // Date/time filter (optional)
   const [fromInput, setFromInput] = useState<string>('') // e.g. 2024-10-01 09:15
@@ -70,7 +76,7 @@ const App: React.FC = () => {
             background: 'rgba(19, 23, 34, 0.98)', border: '2px solid #26a69a',
             borderRadius: 8, padding: '8px 14px', display: 'flex', gap: 12, alignItems: 'center'
           }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#d1d4dc' }}>NIFTY50</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#d1d4dc' }}>{symbol}</div>
             <div style={{ fontSize: 12, color: '#26a69a', background: '#1e222d', padding: '4px 8px', borderRadius: 4, border: '1px solid #26a69a' }}>
               {selectedTimeframe}m • {chartType}
             </div>
@@ -137,7 +143,7 @@ const App: React.FC = () => {
           </div>
 
           <CustomChartWithMLLabels
-            symbol="NIFTY50"
+            symbol={symbol}
             timeframe={selectedTimeframe}
             chartType={chartType}
             height={520}

@@ -16,3 +16,5 @@ pre-sync-*
 frontend/build/
 frontend/nginx.dev.conf
 .venv/
+Kite_FOdata_scripts/tokens/
+scripts/unlock-production.sh
