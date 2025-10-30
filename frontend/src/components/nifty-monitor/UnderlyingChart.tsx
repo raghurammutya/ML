@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createChart, type IChartApi, type ISeriesApi, type CandlestickData, type Time, type MouseEventParams, type Range, type BusinessDay } from 'lightweight-charts'
 import { useMonitorSync } from './MonitorSyncContext'
+import { ChartLabels } from '../chart-labels/ChartLabels'
+import { ErrorBoundary } from '../ErrorBoundary'
+import { Label } from '../../types/labels'
+import { 
+  createLabel, 
+  deleteLabel, 
+  fetchLabels, 
+  connectLabelStream, 
+  subscribeLabelStream, 
+  parseLabelMessage,
+  timestampToUTC 
+} from '../../services/labels'
 
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
 
@@ -66,6 +78,8 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const [loading, setLoading] = useState(false)
+  const [labels, setLabels] = useState<Label[]>([])
+  const wsRef = useRef<WebSocket | null>(null)
   const { setTimeRange, setCrosshairTime, setPriceRange } = useMonitorSync()
 
   const syncPriceRange = useCallback(() => {
@@ -80,6 +94,54 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
       // series might be disposed while the chart is recreating
     }
   }, [setPriceRange])
+
+  // Label handlers
+  const handleLabelCreate = useCallback(async (timestamp: number, labelType: Label['label_type']) => {
+    try {
+      const response = await createLabel({
+        symbol,
+        label_type: labelType,
+        metadata: {
+          timeframe,
+          nearest_candle_timestamp_utc: timestampToUTC(timestamp),
+          sample_offset_seconds: 0
+        },
+        tags: ['manual']
+      });
+      console.log('Label created:', response);
+    } catch (error) {
+      console.error('Failed to create label:', error);
+    }
+  }, [symbol, timeframe]);
+
+  const handleLabelUpdate = useCallback(async (labelId: string, updates: Partial<Label>) => {
+    try {
+      // Update logic will be implemented in Sprint 2
+      console.log('Label update requested:', labelId, updates);
+    } catch (error) {
+      console.error('Failed to update label:', error);
+    }
+  }, []);
+
+  const handleLabelDelete = useCallback(async (labelId: string) => {
+    try {
+      const label = labels.find(l => l.id === labelId);
+      if (!label) return;
+      
+      const timestamp = new Date(label.metadata.nearest_candle_timestamp_utc).getTime() / 1000;
+      await deleteLabel(labelId, symbol, timeframe, timestamp);
+      
+      // Remove from local state optimistically
+      setLabels(prev => prev.filter(l => l.id !== labelId));
+    } catch (error) {
+      console.error('Failed to delete label:', error);
+    }
+  }, [labels, symbol, timeframe]);
+
+  const handleShowChart = useCallback((labelId: string) => {
+    // Show Chart popup implementation will be added in Sprint 2
+    console.log('Show chart requested for label:', labelId);
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -186,6 +248,82 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     load()
   }, [symbol, timeframe, setPriceRange, setTimeRange, syncPriceRange])
 
+  // Fetch labels on symbol/timeframe change
+  useEffect(() => {
+    const loadLabels = async () => {
+      try {
+        const result = await fetchLabels(symbol, timeframe);
+        setLabels(Array.isArray(result?.labels) ? result.labels : []);
+      } catch (error) {
+        console.error('Failed to fetch labels:', error);
+        setLabels([]); // Reset to empty array on error
+      }
+    };
+    loadLabels();
+  }, [symbol, timeframe]);
+
+  // WebSocket connection for real-time label updates
+  useEffect(() => {
+    // Skip WebSocket in development until backend is properly configured
+    if (process.env.NODE_ENV === 'development') {
+      console.info('Skipping label WebSocket in development mode');
+      return;
+    }
+    
+    const connectWS = () => {
+      try {
+        const ws = connectLabelStream();
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          console.log('Label WebSocket connected');
+          subscribeLabelStream(ws, symbol, timeframe);
+        };
+
+        ws.onmessage = (event) => {
+          const message = parseLabelMessage(event.data);
+          if (!message) return;
+
+          console.log('Label message received:', message);
+          
+          switch (message.type) {
+            case 'label.create':
+              // Refresh labels after create
+              fetchLabels(symbol, timeframe).then(result => {
+                setLabels(result.labels);
+              }).catch(console.error);
+              break;
+            case 'label.update':
+              // Handle label updates (Sprint 2)
+              break;
+            case 'label.delete':
+              setLabels(prev => prev.filter(l => l.id !== message.payload.id));
+              break;
+          }
+        };
+
+        ws.onclose = () => {
+          console.log('Label WebSocket disconnected');
+        };
+
+        ws.onerror = (error) => {
+          console.error('Label WebSocket error:', error);
+        };
+      } catch (error) {
+        console.error('Failed to connect label WebSocket:', error);
+      }
+    };
+
+    connectWS();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [symbol, timeframe]);
+
   return (
     <div className="monitor-card">
       <div className="monitor-card__header">
@@ -196,6 +334,19 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
         {loading && <span className="monitor-card__badge">Loading…</span>}
       </div>
       <div ref={containerRef} style={{ width: '100%', height: CHART_HEIGHT }} />
+      <ErrorBoundary fallback={<div style={{padding: '10px', color: '#666'}}>Labels temporarily unavailable</div>}>
+        <ChartLabels
+          chart={chartRef.current}
+          series={seriesRef.current}
+          symbol={symbol}
+          timeframe={timeframe}
+          labels={Array.isArray(labels) ? labels : []}
+          onLabelCreate={handleLabelCreate}
+          onLabelUpdate={handleLabelUpdate}
+          onLabelDelete={handleLabelDelete}
+          onShowChart={handleShowChart}
+        />
+      </ErrorBoundary>
     </div>
   )
 }

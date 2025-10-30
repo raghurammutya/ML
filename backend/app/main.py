@@ -25,7 +25,7 @@ from .backfill import BackfillManager
 from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream
 
 # -------- logging --------
 logging.basicConfig(
@@ -45,6 +45,7 @@ ticker_client: Optional[TickerServiceClient] = None
 nifty_subscription_manager: Optional[NiftySubscriptionManager] = None
 nifty_monitor_stream: Optional[NiftyMonitorStream] = None
 monitor_hub: Optional[RealTimeHub] = None
+labels_hub: Optional[RealTimeHub] = None
 backfill_manager: Optional[BackfillManager] = None
 
 background_tasks = []  # supervised background tasks
@@ -133,13 +134,17 @@ async def lifespan(app: FastAPI):
         # Real-time hubs shared between routes and background consumers
         real_time_hub = RealTimeHub()
         monitor_hub = RealTimeHub()
+        labels_hub = RealTimeHub()
         fo.set_realtime_hub(real_time_hub)
+        labels.set_realtime_hub(labels_hub)
+        label_stream.set_realtime_hub(labels_hub)
 
         # Routes
         udf_handler = UDFHandler(data_manager)        # uses DB manager (not cache)
         app.include_router(udf_handler.get_router())
         app.include_router(marks_asyncpg.router)      # asyncpg-backed /marks route
         app.include_router(labels.router)             # labels CRUD endpoints
+        app.include_router(label_stream.router)       # labels WebSocket stream
         
         # Set data manager for indicators and include router
         try:

@@ -148,6 +148,11 @@ const MonitorPage = () => {
 
   useEffect(() => {
     fetchFoIndicators().then(defs => {
+      if (!Array.isArray(defs)) {
+        console.warn('fetchFoIndicators returned non-array:', defs);
+        setIndicators([]);
+        return;
+      }
       setIndicators(defs)
       const nextState: Record<string, PanelViewState> = {}
       const horizontal: string[] = []
@@ -160,6 +165,9 @@ const MonitorPage = () => {
       setPanelState(nextState)
       setHorizontalOrder(horizontal)
       setVerticalOrder(vertical)
+    }).catch(error => {
+      console.error('Failed to fetch indicators:', error);
+      setIndicators([]); // Ensure we have an empty array
     })
   }, [])
 
@@ -312,11 +320,11 @@ const MonitorPage = () => {
   }, [tokensForSession])
 
   const activeHorizontalPanels = useMemo(
-    () => indicators.filter(def => def.orientation === 'horizontal' && panelState[def.id]?.enabled),
+    () => (indicators || []).filter(def => def.orientation === 'horizontal' && panelState[def.id]?.enabled),
     [indicators, panelState]
   )
   const activeVerticalPanels = useMemo(
-    () => indicators.filter(def => def.orientation === 'vertical' && panelState[def.id]?.enabled),
+    () => (indicators || []).filter(def => def.orientation === 'vertical' && panelState[def.id]?.enabled),
     [indicators, panelState]
   )
 
