@@ -25,7 +25,7 @@ from .backfill import BackfillManager
 from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay
 
 # -------- logging --------
 logging.basicConfig(
@@ -145,6 +145,7 @@ async def lifespan(app: FastAPI):
         app.include_router(marks_asyncpg.router)      # asyncpg-backed /marks route
         app.include_router(labels.router)             # labels CRUD endpoints
         app.include_router(label_stream.router)       # labels WebSocket stream
+        app.include_router(historical.router)         # historical series endpoint
         
         # Set data manager for indicators and include router
         try:
@@ -174,6 +175,7 @@ async def lifespan(app: FastAPI):
             logger.info("Nifty monitor stream disabled via configuration")
 
         app.include_router(nifty_monitor.router)
+        app.include_router(replay.router)
 
         if settings.fo_stream_enabled:
             fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)

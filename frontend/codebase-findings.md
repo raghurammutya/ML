@@ -198,3 +198,157 @@ Current ml_labeled_data stores full OHLC data. Sprint 1 requires metadata-only m
 - [x] Pin functionality persists to ml_labels
 - [ ] Live WebSocket updates in popup (requires market hours)
 - [ ] Horizontal panels display data (blocked by pre-existing OI bug)
+
+---
+
+## Sprint 3 Implementation (Completed - Foundation)
+
+### New Components & Hooks
+- **frontend/src/hooks/useReplayMode.ts** - Replay state management hook
+  - Enter/exit replay mode with window fetching
+  - Play/pause/step controls with configurable speeds (0.1x to 10x)
+  - Seek to timestamp, rewind/fast forward actions
+  - Buffered data management for local playback
+  - Automatic cursor advancement with interval management
+
+- **frontend/src/components/nifty-monitor/ReplayControls.tsx** - Playback controls UI
+  - Time badge showing current cursor position in IST
+  - Play/Pause/Step/Rewind/Fast Forward buttons
+  - Speed selector with +/- controls
+  - Exit button and "End of Data" indicator
+  - Disabled states for boundary conditions
+
+- **frontend/src/components/nifty-monitor/ReplayWatermark.tsx** - Replay mode indicator
+  - Semi-transparent "REPLAY MODE" watermark overlay
+  - Rotated text with shadow effects
+  - Non-interactive, visual-only indicator
+
+### Backend Replay System
+- **backend/app/routes/replay.py** - Replay window endpoint
+  - GET /replay/window - Fetch historical time-series window
+  - Query params: underlying, timeframe, start, end, expiries, strikes, panels
+  - Returns: timestamps[], candles[], panels{} with aligned series
+  - Queries underlying_bars and fo_option_strike_bars tables
+  - Supports Greek panels: iv, delta, gamma, theta, vega for calls/puts
+
+- **backend/app/main.py** - Registered replay router
+  - Replay endpoints available at /replay/*
+
+### Type Definitions
+- **frontend/src/types/replay.ts** - Complete replay type system
+  - ReplayState: isActive, cursorUtc, playbackSpeed, bufferedData
+  - ReplayControls: enter, exit, play, pause, step, seek, setSpeed
+  - PerformanceMode: enabled, reducedCadence, disableSparklines
+  - ReplayWindowRequest/Response: API contracts
+  - ReplayFrameMessage, BackpressureMessage: WebSocket messages
+
+### Services
+- **frontend/src/services/replay.ts** - Replay data fetching
+  - fetchReplayWindow() - HTTP bulk window fetch
+  - ReplayWebSocketClient - Streaming replay frames (optional mode)
+  - enterReplay/exitReplay WebSocket messages
+  - Auto-reconnect on disconnect
+
+### Styling
+- **frontend/src/index.css** - Replay and performance mode styles
+  - .replay-watermark - Large rotated semi-transparent overlay
+  - .replay-cursor - Vertical line with glow effect
+  - .future-data - De-emphasized (30% opacity, grayscale)
+  - .replay-controls - Floating toolbar with dark theme
+  - .perf-mode-toggle - Performance mode button styles
+  - .perf-mode-badge - Warning badge for reduced cadence mode
+
+### Key Features Implemented
+
+**Replay Mode Architecture:**
+- Page-level replay (not global) - each page can independently enter replay
+- HTTP window fetch for 6-hour historical buffer
+- Local playback engine with configurable speed multipliers
+- Step-by-step candle navigation
+- Cursor synchronization across all panels (main chart + horizontal + vertical)
+- Future data de-emphasis (right-of-cursor at 30% opacity + grayscale)
+
+**Performance Mode Foundation:**
+- Type definitions for performance state
+- UI styling for toggle and badge
+- Backpressure message type for server-initiated cadence reduction
+- Client acknowledgment pattern via WebSocket
+
+**Default UX Constants:**
+```typescript
+DEFAULT_UX = {
+  strikes: { window: 20 },        // ±20 from ATM
+  expiries: { count: 3 },          // 3 nearest
+  seriesPerPanel: { max: 3 },     // Max 3 lines
+  layout: {
+    mainChartHeight: '60vh',
+    horizontalPanelHeight: '120px',
+    verticalPanelWidth: '200px'
+  }
+}
+```
+
+### Integration Points
+
+**To Complete Sprint 3:**
+1. **MonitorPage Integration**:
+   - Import useReplayMode hook
+   - Add "Replay" button to header controls
+   - Add "Performance Mode" toggle to header
+   - Wrap chart area with ReplayWatermark when state.isActive
+   - Render ReplayControls when state.isActive
+   - Pass replay cursor to MonitorSyncContext for panel synchronization
+
+2. **Panel Sync**:
+   - Update UnderlyingChart to render vertical cursor at replayCursor position
+   - Apply .future-data class to candles right of cursor
+   - Update HorizontalPanel/VerticalPanel to sync crosshair with replay cursor
+   - Disable live WebSocket subscriptions when replay active
+
+3. **Performance Mode**:
+   - Implement toggle handler in MonitorPage
+   - Update subscription cadence from 1s to 5s when enabled
+   - Show perf-mode-badge in header
+   - Handle backpressure messages from server
+
+4. **Grid Layout** (Future):
+   - Install react-grid-layout: `npm install react-grid-layout`
+   - Wrap horizontal/vertical panel stacks with GridLayout
+   - Allow drag-and-drop reordering
+   - Persist layout to localStorage or backend
+
+### Database Requirements
+- **underlying_bars** table must exist with columns:
+  - symbol, timeframe, bucket_time, open, high, low, close, volume
+- **fo_option_strike_bars** table must have:
+  - symbol, timeframe, bucket_time, strike, expiry
+  - call_iv_avg, put_iv_avg, call_delta_avg, put_delta_avg
+  - call_gamma_avg, put_gamma_avg, call_theta_avg, put_theta_avg
+  - call_vega_avg, put_vega_avg
+
+### Testing Checklist (Sprint 3)
+- [ ] Replay button triggers window fetch and enters replay mode
+- [ ] Watermark appears on main chart
+- [ ] Play advances cursor smoothly at selected speed
+- [ ] Step forward/backward moves exactly one candle
+- [ ] Right-of-cursor content is de-emphasized
+- [ ] All panels show synchronized timestamp
+- [ ] Exit replay returns to live mode
+- [ ] Performance mode toggle changes UI state
+- [ ] Backend /replay/window endpoint returns valid data
+- [ ] Speed selector cycles through presets correctly
+
+### Known Limitations
+- Grid layout drag-and-drop not yet implemented (requires react-grid-layout)
+- Panel reordering currently static
+- Replay cursor visual not yet rendered on chart (needs LightweightCharts integration)
+- Performance mode toggle present but not wired to WebSocket cadence changes
+- Backpressure detection not implemented on server side
+
+### Next Steps for Full Sprint 3
+1. Wire replay controls to MonitorPage state
+2. Add replay cursor overlay to UnderlyingChart
+3. Implement future-data styling with conditional class
+4. Test with real data during market hours
+5. Add grid layout for panel reordering
+6. Implement server-side backpressure detection
