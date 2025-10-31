@@ -1428,6 +1428,27 @@ class DataManager:
             raise AttributeError("DataManager has no usable asyncpg pool")
         return pool.acquire()
 
+    async def get_next_expiries(self, symbol: str, limit: int = 2) -> List[date]:
+        """
+        Get next N expiries for a symbol from fo_option_strike_bars.
+        Used as default when expiries not specified.
+        """
+        if not self.pool:
+            return []
+
+        symbol_norm = _normalize_symbol(symbol)
+        query = """
+            SELECT DISTINCT expiry
+            FROM fo_option_strike_bars
+            WHERE symbol = $1
+              AND expiry >= CURRENT_DATE
+            ORDER BY expiry
+            LIMIT $2
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol_norm, limit)
+        return [row['expiry'] for row in rows]
+
     async def get_pool_stats(self) -> dict:
         """
         Async to match main.py's `await data_manager.get_pool_stats()`.

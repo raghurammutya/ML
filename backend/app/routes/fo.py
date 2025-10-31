@@ -271,24 +271,166 @@ async def moneyness_series(
     dm: DataManager = Depends(get_data_manager),
 ):
     """
-    TEMPORARY: Returning empty data due to missing DataManager methods.
-    The horizontal panels need fetch_fo_strike_rows and fetch_fo_expiry_metrics
-    which don't exist in the current DataManager implementation.
-    This allows the UI to load without 500 errors so Sprint 2 features can be tested.
+    Return time-series data grouped by moneyness buckets.
+    Used by horizontal panels (IV, Delta, Gamma, Theta, Vega charts).
     """
-    logger.warning(f"moneyness-series returning empty data (pre-existing bug - missing DataManager methods)")
+    from collections import defaultdict
 
-    indicator = indicator.lower()
+    # Normalize inputs
     normalized_tf = _normalize_timeframe(timeframe)
     symbol_db = _normalize_symbol(symbol)
+    indicator = indicator.lower()
+
+    # Parse expiries
+    if expiry:
+        expiry_dates = []
+        for exp_str in expiry:
+            try:
+                expiry_dates.append(datetime.fromisoformat(exp_str).date())
+            except ValueError:
+                logger.warning(f"Invalid expiry format: {exp_str}")
+                continue
+    else:
+        # Default: next 2 expiries
+        expiry_dates = await dm.get_next_expiries(symbol_db, limit=2)
+
+    if not expiry_dates:
+        return {
+            "status": "ok",
+            "symbol": symbol_db,
+            "timeframe": normalized_tf,
+            "indicator": indicator,
+            "series": []
+        }
+
+    # Time range (default: last 6 hours)
+    if from_time and to_time:
+        from_dt = datetime.fromtimestamp(from_time, tz=timezone.utc)
+        to_dt = datetime.fromtimestamp(to_time, tz=timezone.utc)
+    else:
+        to_dt = datetime.now(timezone.utc)
+        from_dt = to_dt - timedelta(hours=6)
+
+    # Map indicator to column expression
+    if option_side == "both":
+        column_map = {
+            "iv": "(COALESCE(call_iv_avg, 0) + COALESCE(put_iv_avg, 0)) / 2.0",
+            "delta": "ABS(COALESCE(call_delta_avg, 0)) + ABS(COALESCE(put_delta_avg, 0))",
+            "gamma": "(COALESCE(call_gamma_avg, 0) + COALESCE(put_gamma_avg, 0)) / 2.0",
+            "theta": "(COALESCE(call_theta_avg, 0) + COALESCE(put_theta_avg, 0)) / 2.0",
+            "vega": "(COALESCE(call_vega_avg, 0) + COALESCE(put_vega_avg, 0)) / 2.0",
+            "oi": "COALESCE(call_oi_sum, 0) + COALESCE(put_oi_sum, 0)",
+            "pcr": "CASE WHEN COALESCE(call_oi_sum, 0) > 0 THEN COALESCE(put_oi_sum, 0) / call_oi_sum ELSE NULL END",
+        }
+    elif option_side == "call":
+        column_map = {
+            "iv": "call_iv_avg",
+            "delta": "call_delta_avg",
+            "gamma": "call_gamma_avg",
+            "theta": "call_theta_avg",
+            "vega": "call_vega_avg",
+            "oi": "call_oi_sum",
+        }
+    else:  # put
+        column_map = {
+            "iv": "put_iv_avg",
+            "delta": "put_delta_avg",
+            "gamma": "put_gamma_avg",
+            "theta": "put_theta_avg",
+            "vega": "put_vega_avg",
+            "oi": "put_oi_sum",
+        }
+
+    value_expr = column_map.get(indicator)
+    if not value_expr:
+        raise HTTPException(status_code=400, detail=f"Invalid indicator: {indicator}")
+
+    # Query database
+    query = f"""
+        SELECT
+            bucket_time,
+            expiry,
+            strike,
+            underlying_close,
+            {value_expr} as value
+        FROM fo_option_strike_bars
+        WHERE symbol = $1
+          AND timeframe = $2
+          AND expiry = ANY($3)
+          AND bucket_time BETWEEN $4 AND $5
+          AND {value_expr} IS NOT NULL
+        ORDER BY bucket_time, expiry, strike
+    """
+
+    async with dm.pool.acquire() as conn:
+        rows = await conn.fetch(
+            query,
+            symbol_db,
+            normalized_tf,
+            expiry_dates,
+            from_dt,
+            to_dt
+        )
+
+    # Group by (expiry, bucket, time)
+    # Store as {(expiry, bucket): {timestamp: value}}
+    series_data = defaultdict(lambda: defaultdict(list))
+
+    for row in rows:
+        expiry_str = row['expiry'].isoformat()
+        timestamp = int(row['bucket_time'].timestamp())
+        strike = float(row['strike'])
+        underlying = float(row['underlying_close']) if row['underlying_close'] else None
+        value = float(row['value']) if row['value'] is not None else None
+
+        if value is None or underlying is None:
+            continue
+
+        # Classify moneyness bucket
+        bucket = _classify_moneyness_bucket(strike, underlying, settings.fo_strike_gap)
+
+        # Store point - group by timestamp, average if multiple strikes in same bucket
+        key = (expiry_str, bucket)
+        series_data[key][timestamp].append(value)
+
+    # Format response - average values at same timestamp
+    series = []
+    for (expiry_str, bucket), time_points in series_data.items():
+        points = [
+            {"time": ts, "value": round(sum(vals) / len(vals), 4)}
+            for ts, vals in sorted(time_points.items())
+        ]
+
+        if points:
+            series.append({
+                "expiry": expiry_str,
+                "bucket": bucket,
+                "points": points
+            })
 
     return {
         "status": "ok",
         "symbol": symbol_db,
         "timeframe": normalized_tf,
         "indicator": indicator,
-        "series": []  # Empty data - horizontal panels will load but show no data
+        "series": series
     }
+
+
+def _classify_moneyness_bucket(strike: float, underlying: float, gap: int = 50) -> str:
+    """
+    Classify strike into moneyness bucket.
+    Returns: "ATM", "OTM1", "OTM2", "ITM1", "ITM2", etc.
+    """
+    offset = strike - underlying
+    level = int(round(offset / gap))
+
+    if level == 0:
+        return "ATM"
+    elif level > 0:
+        return f"OTM{min(abs(level), 10)}"
+    else:
+        return f"ITM{min(abs(level), 10)}"
 
 
 @router.get("/strike-distribution")
@@ -298,20 +440,43 @@ async def strike_distribution(
     indicator: str = Query("iv"),
     expiry: Optional[List[str]] = Query(default=None),
     bucket_time: Optional[int] = None,
+    strike_range: int = Query(10, description="ATM ± N strikes to return"),
     dm: DataManager = Depends(get_data_manager),
 ):
+    """
+    Return strike distribution for vertical panels.
+    Frontend sends multiple expiries and expects data grouped by expiry.
+    """
     indicator = indicator.lower()
     if indicator not in SUPPORTED_INDICATORS - {"max_pain"}:
         raise HTTPException(status_code=400, detail=f"Indicator {indicator} not supported for strike view")
+
     normalized_tf = _normalize_timeframe(timeframe)
     symbol_db = _normalize_symbol(symbol)
     expiries = _parse_expiry_params(expiry)
 
     if bucket_time:
-        # Use fetch_latest with time filtering
         rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries, bucket_time, bucket_time + 1)
     else:
         rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries)
+
+    # Get latest underlying price to determine ATM
+    underlying_ltp = None
+    for row in rows:
+        if row.get("underlying_close"):
+            underlying_ltp = float(row["underlying_close"])
+            break
+
+    # Calculate strike range if we have underlying price
+    if underlying_ltp:
+        gap = settings.fo_strike_gap  # 50 for NIFTY
+        atm_strike = round(underlying_ltp / gap) * gap
+        min_strike = atm_strike - (strike_range * gap)
+        max_strike = atm_strike + (strike_range * gap)
+    else:
+        # No filtering if we don't have underlying price
+        min_strike = None
+        max_strike = None
 
     grouped: Dict[str, Dict[str, List[Dict[str, float]]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
@@ -320,22 +485,31 @@ async def strike_distribution(
             ts = int(bucket_ts.replace(tzinfo=timezone.utc).timestamp())
         else:
             ts = int(bucket_ts)
+
         expiry_key = row["expiry"].isoformat()
         strike = float(row["strike"])
+
+        # Filter by strike range (ATM ± N strikes)
+        if min_strike is not None and max_strike is not None:
+            if strike < min_strike or strike > max_strike:
+                continue
+
         underlying = row.get("underlying_close")
         call_val = _indicator_value(row, indicator, "call")
         put_val = _indicator_value(row, indicator, "put")
         combined = _combine_sides(indicator, call_val, put_val)
         value = combined if indicator != "pcr" else _indicator_value(row, "pcr", "call")
+
         if value is None:
             continue
+
         grouped[expiry_key]["points"].append({
             "strike": strike,
-            "value": value,
-            "call": call_val,
-            "put": put_val,
-            "call_oi": row.get("call_oi_sum"),
-            "put_oi": row.get("put_oi_sum"),
+            "value": round(value, 4),
+            "call": round(call_val, 4) if call_val is not None else None,
+            "put": round(put_val, 4) if put_val is not None else None,
+            "call_oi": float(row.get("call_oi_sum")) if row.get("call_oi_sum") else 0,
+            "put_oi": float(row.get("put_oi_sum")) if row.get("put_oi_sum") else 0,
             "bucket_time": ts,
             "underlying": underlying,
         })
