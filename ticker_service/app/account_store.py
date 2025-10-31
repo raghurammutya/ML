@@ -166,6 +166,11 @@ class AccountStore:
             if not row:
                 return None
 
+            # Handle metadata - psycopg3 auto-deserializes JSONB to dict
+            metadata = row[11]
+            if metadata and isinstance(metadata, str):
+                metadata = json.loads(metadata)
+
             account = {
                 "account_id": row[0],
                 "api_key": self._decrypt(row[1]) if decrypt else row[1],
@@ -178,7 +183,7 @@ class AccountStore:
                 "is_active": row[8],
                 "created_at": row[9].isoformat(),
                 "updated_at": row[10].isoformat(),
-                "metadata": json.loads(row[11]) if row[11] else None
+                "metadata": metadata
             }
 
             return account
@@ -206,6 +211,11 @@ class AccountStore:
             accounts = []
 
             for row in rows:
+                # Handle metadata - psycopg3 auto-deserializes JSONB to dict
+                metadata = row[11]
+                if metadata and isinstance(metadata, str):
+                    metadata = json.loads(metadata)
+
                 account = {
                     "account_id": row[0],
                     "api_key": self._decrypt(row[1]),
@@ -218,7 +228,7 @@ class AccountStore:
                     "is_active": row[8],
                     "created_at": row[9].isoformat(),
                     "updated_at": row[10].isoformat(),
-                    "metadata": json.loads(row[11]) if row[11] else None
+                    "metadata": metadata
                 }
                 accounts.append(account)
 
