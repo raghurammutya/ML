@@ -9,10 +9,10 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="stocksblitz",
-    version="0.1.0",
+    version="0.2.0",
     author="StocksBlitz",
     author_email="support@stocksblitz.com",
-    description="Intuitive Python SDK for algorithmic trading with StocksBlitz",
+    description="Intuitive Python SDK for algorithmic trading with advanced services (Alerts, Messaging, Calendar, News)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/raghurammutya/ML",
