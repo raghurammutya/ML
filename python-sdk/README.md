@@ -10,7 +10,10 @@
 - ✅ **40+ technical indicators** - RSI, MACD, SMA, EMA, Bollinger Bands, ATR, and more
 - ✅ **Multi-timeframe analysis** - 1m, 5m, 15m, 1h, 1d
 - ✅ **Trading operations** - Place orders, manage positions, track PnL
-- ✅ **Type hints** - Full IDE autocomplete support
+- ✅ **Strategy management** - Isolated P&L tracking, metrics, and performance analysis (v0.2.0)
+- ✅ **Instrument filtering** - Pattern-based filtering with ATM/OTM/ITM selection (v0.2.0)
+- ✅ **Advanced services** - Alerts, messaging, calendar, and news integration (v0.2.0)
+- ✅ **Type hints** - Full IDE autocomplete support with enums and dataclasses
 
 ## Installation
 
@@ -242,6 +245,129 @@ while True:
     time.sleep(300)  # 5 minutes
 ```
 
+### 8. Strategy Management (v0.2.0)
+
+```python
+from stocksblitz import TradingClient, StrategyType
+
+client = TradingClient(api_url="http://localhost:8009", api_key="YOUR_API_KEY")
+
+# Create strategy
+strategy = client.Strategy(
+    strategy_name="RSI Mean Reversion",
+    strategy_type=StrategyType.MEAN_REVERSION,
+    config={"rsi_oversold": 30, "rsi_overbought": 70}
+)
+
+# Use context manager
+with strategy:
+    inst = client.Instrument("NIFTY25N0424500PE")
+
+    # Check RSI
+    if inst['5m'].rsi[14] < 30:
+        strategy.buy(inst, quantity=50)  # Auto-linked to strategy
+
+    # Get strategy metrics
+    metrics = strategy.metrics
+    print(f"P&L: ₹{metrics.total_pnl:,.2f}")
+    print(f"ROI: {metrics.roi:.2f}%")
+    print(f"Trades: {metrics.total_trades}")
+
+# Get strategy positions
+for pos in strategy.positions:
+    print(f"{pos.tradingsymbol}: P&L=₹{pos.pnl:,.2f}")
+```
+
+### 9. Instrument Filtering (v0.2.0)
+
+```python
+from stocksblitz import TradingClient
+
+client = TradingClient(api_url="http://localhost:8009", api_key="YOUR_API_KEY")
+
+# Pattern-based filtering
+filter = client.InstrumentFilter("NSE@NIFTY@28-Oct-2025@Put")
+
+# Lambda filtering
+liquid_options = filter.where(lambda i: (
+    50 < i.ltp < 100 and
+    i.oi > 100000 and
+    i.delta > 0.3
+))
+
+# Criteria-based filtering
+results = filter.find(ltp_min=50, ltp_max=100, oi_min=100000)
+
+# ATM/OTM/ITM selection
+filter = client.InstrumentFilter("NSE@NIFTY@Nw@Put")  # Next week
+atm = filter.atm()  # At-the-money
+otm2 = filter.otm(2)  # 2 strikes out-of-the-money
+
+# Top by attribute
+top_oi = filter.top(5, by='oi')  # Top 5 by open interest
+
+# Filter by indicators
+oversold = filter.where(lambda i: i['5m'].rsi[14] < 30)
+```
+
+### 10. Advanced Services (v0.2.0)
+
+```python
+from stocksblitz import TradingClient, AlertType, AlertPriority, NewsCategory, NewsSentiment
+
+client = TradingClient(api_url="http://localhost:8009", api_key="YOUR_API_KEY")
+
+# Alerts
+def on_price_alert(event):
+    print(f"Alert: {event.message}")
+    # Take action based on alert
+
+client.alerts.on(AlertType.PRICE, on_price_alert)
+
+alert = client.alerts.raise_alert(
+    alert_type=AlertType.PRICE,
+    priority=AlertPriority.HIGH,
+    symbol="NIFTY50",
+    message="Price crossed 24000"
+)
+
+# Messaging (Pub/Sub)
+def on_signal(msg):
+    print(f"Signal received: {msg.content}")
+
+client.messaging.subscribe("trade-signals", on_signal)
+
+client.messaging.publish(
+    topic="trade-signals",
+    content={"symbol": "NIFTY50", "action": "BUY"}
+)
+
+# Calendar & Reminders
+from datetime import datetime, timedelta
+
+reminder_id = client.calendar.set_reminder(
+    title="Close positions",
+    scheduled_at=datetime.now() + timedelta(hours=1),
+    callback=lambda r: print("Time to close positions!")
+)
+
+client.calendar.start_monitoring()
+
+# News with Sentiment
+def on_news(item):
+    if item.sentiment == NewsSentiment.NEGATIVE:
+        print(f"Negative news: {item.title}")
+
+client.news.subscribe(
+    callback=on_news,
+    category=NewsCategory.MARKET,
+    symbols=["NIFTY50"]
+)
+
+# Get sentiment summary
+summary = client.news.get_sentiment_summary(["NIFTY50"], hours=24)
+```
+
 ## API Reference
 
 ### TradingClient
@@ -255,8 +381,15 @@ client = TradingClient(api_url: str, api_key: str)
 **Methods**:
 - `Instrument(spec: str) -> Instrument` - Create instrument
 - `Account(account_id: str = "primary") -> Account` - Create account instance
-- `InstrumentFilter(pattern: str) -> InstrumentFilter` - Create filter
+- `InstrumentFilter(pattern: str) -> InstrumentFilter` - Create filter (v0.2.0)
+- `Strategy(**kwargs) -> Strategy` - Create or load strategy (v0.2.0)
 - `clear_cache()` - Clear all cached data
+
+**Services** (v0.2.0):
+- `alerts: AlertService` - Event-based alert system
+- `messaging: MessagingService` - Pub/sub messaging
+- `calendar: CalendarService` - Reminders and scheduling
+- `news: NewsService` - News aggregation with sentiment analysis
 
 ### Instrument
 
@@ -416,11 +549,33 @@ For issues and questions:
 
 ## Changelog
 
+### v0.2.0 (2025-10-31)
+
+**Major enhancements**:
+- ✅ **Strategy Management**: Create/load strategies with isolated P&L tracking
+  - Strategy-specific orders, positions, and holdings
+  - Performance metrics (ROI, Sharpe ratio, max drawdown)
+  - Context manager support for clean strategy execution
+  - Historical snapshots for performance analysis
+- ✅ **Instrument Filtering**: Powerful pattern-based instrument search
+  - Pattern syntax: `Exchange@Underlying@Expiry@OptionType[@Strike]`
+  - Lambda filtering: `filter.where(lambda i: i.ltp > 50)`
+  - Criteria-based: `filter.find(ltp_min=50, oi_min=100000)`
+  - ATM/OTM/ITM selection for options
+  - Relative notation support (Nw=next week, Nm=next month)
+- ✅ **Advanced Services**:
+  - **Alerts**: Event-based alert system with priority levels
+  - **Messaging**: Pub/sub messaging for inter-strategy communication
+  - **Calendar**: Set recurring/one-time reminders with callbacks
+  - **News**: Aggregation with ML sentiment analysis
+- ✅ **Type Safety**: 17 enum classes and 7 dataclass models
+- ✅ **Enhanced Exception Handling**: Comprehensive error types
+
 ### v0.1.0 (2025-10-31)
 
 **Initial release**:
 - Core instrument classes
-- Technical indicators support
+- 40+ technical indicators
 - Trading operations
 - Position management
 - Smart caching
@@ -428,18 +583,13 @@ For issues and questions:
 
 ## Roadmap
 
-**v0.2.0** (Planned):
-- WebSocket streaming support
-- Advanced instrument notation (relative expiry/strike)
-- Instrument filtering
-- Batch operations
-- Redis caching backend
-
 **v0.3.0** (Planned):
+- WebSocket streaming support
 - Strategy backtesting framework
 - Performance analytics
 - Risk management tools
 - Portfolio optimization
+- Redis caching backend
 
 ---
 
