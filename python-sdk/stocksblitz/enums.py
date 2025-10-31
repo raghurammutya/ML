@@ -150,3 +150,26 @@ class EventStatus(str, Enum):
     TRIGGERED = "TRIGGERED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
     EXPIRED = "EXPIRED"
+
+
+class StrategyType(str, Enum):
+    """Strategy types."""
+    SCALPING = "scalping"
+    DAY_TRADING = "day_trading"
+    SWING_TRADING = "swing_trading"
+    MEAN_REVERSION = "mean_reversion"
+    MOMENTUM = "momentum"
+    BREAKOUT = "breakout"
+    HEDGING = "hedging"
+    SPREADS = "spreads"
+    ARBITRAGE = "arbitrage"
+    OPTIONS = "options"
+    CUSTOM = "custom"
+
+
+class StrategyStatus(str, Enum):
+    """Strategy status."""
+    DRAFT = "draft"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    STOPPED = "stopped"

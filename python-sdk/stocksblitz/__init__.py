@@ -26,6 +26,7 @@ from .client import TradingClient
 from .instrument import Instrument
 from .account import Account, Position, Order, Funds
 from .filter import InstrumentFilter
+from .strategy import Strategy, StrategyMetrics
 
 # Services
 from .services import AlertService, MessagingService, CalendarService, NewsService
@@ -47,6 +48,8 @@ from .enums import (
     NewsCategory,
     NewsSentiment,
     EventStatus,
+    StrategyType,
+    StrategyStatus,
 )
 
 # Types
@@ -86,6 +89,10 @@ __all__ = [
     # Filtering
     "InstrumentFilter",
 
+    # Strategy
+    "Strategy",
+    "StrategyMetrics",
+
     # Services
     "AlertService",
     "MessagingService",
@@ -108,6 +115,8 @@ __all__ = [
     "NewsCategory",
     "NewsSentiment",
     "EventStatus",
+    "StrategyType",
+    "StrategyStatus",
 
     # Types
     "AlertEvent",

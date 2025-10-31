@@ -8,6 +8,7 @@ from .cache import SimpleCache
 from .instrument import Instrument
 from .account import Account
 from .filter import InstrumentFilter
+from .strategy import Strategy
 from .services import AlertService, MessagingService, CalendarService, NewsService
 
 
@@ -107,6 +108,54 @@ class TradingClient:
         """
         filter_obj = InstrumentFilter(pattern, api_client=self._api)
         return filter_obj
+
+    def Strategy(
+        self,
+        strategy_id: Optional[int] = None,
+        strategy_name: Optional[str] = None,
+        strategy_type: str = "custom",
+        **kwargs
+    ) -> Strategy:
+        """
+        Create or load Strategy instance.
+
+        Args:
+            strategy_id: Existing strategy ID (loads existing strategy)
+            strategy_name: Strategy name (creates new or loads existing)
+            strategy_type: Strategy type (default: "custom")
+            **kwargs: Additional strategy parameters
+
+        Returns:
+            Strategy object
+
+        Examples:
+            >>> # Load existing strategy by ID
+            >>> strategy = client.Strategy(strategy_id=123)
+            >>>
+            >>> # Create/load strategy by name
+            >>> strategy = client.Strategy(
+            ...     strategy_name="My RSI Strategy",
+            ...     strategy_type="mean_reversion"
+            ... )
+            >>>
+            >>> # Execute trades within strategy
+            >>> with strategy:
+            ...     inst = client.Instrument("NIFTY50")
+            ...     if inst['5m'].rsi[14] < 30:
+            ...         strategy.buy(inst, quantity=50)
+            >>>
+            >>> # Get strategy metrics
+            >>> metrics = strategy.metrics
+            >>> print(f"P&L: {metrics.total_pnl}, ROI: {metrics.roi}%")
+        """
+        strategy = Strategy(
+            api_client=self._api,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            strategy_type=strategy_type,
+            **kwargs
+        )
+        return strategy
 
     @property
     def alerts(self) -> AlertService:
