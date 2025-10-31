@@ -1,23 +1,66 @@
 """
 StocksBlitz Python SDK
 
-Intuitive Python interface for algorithmic trading with the StocksBlitz platform.
+Intuitive Python interface for algorithmic trading with advanced services
+for alerts, messaging, calendar, and news.
 
 Example:
-    >>> from stocksblitz import TradingClient
+    >>> from stocksblitz import TradingClient, AlertType, AlertPriority
     >>> client = TradingClient(api_url="http://localhost:8009", api_key="YOUR_API_KEY")
-    >>> inst = client.Instrument("NSE@NIFTY@Nw+1@Put@OTM2")
+    >>> inst = client.Instrument("NIFTY25N0424500PE")
+    >>>
+    >>> # Trading
     >>> if inst['5m'].rsi[14] > 70:
     ...     client.Account().sell(inst, quantity=50)
+    >>>
+    >>> # Alerts
+    >>> def on_alert(event):
+    ...     print(f"Alert: {event.message}")
+    >>> client.alerts.on(AlertType.PRICE, on_alert)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "StocksBlitz"
 
 from .client import TradingClient
 from .instrument import Instrument
 from .account import Account, Position, Order, Funds
 from .filter import InstrumentFilter
+
+# Services
+from .services import AlertService, MessagingService, CalendarService, NewsService
+
+# Enums
+from .enums import (
+    Exchange,
+    TransactionType,
+    OrderType,
+    ProductType,
+    Validity,
+    OrderStatus,
+    PositionType,
+    Timeframe,
+    AlertType,
+    AlertPriority,
+    MessageType,
+    ReminderFrequency,
+    NewsCategory,
+    NewsSentiment,
+    EventStatus,
+)
+
+# Types
+from .types import (
+    AlertEvent,
+    Message,
+    Reminder,
+    NewsItem,
+    OrderRequest,
+    QuoteData,
+    GreeksData,
+)
+
+# Exceptions
 from .exceptions import (
     StocksBlitzError,
     InstrumentNotFoundError,
@@ -42,6 +85,38 @@ __all__ = [
 
     # Filtering
     "InstrumentFilter",
+
+    # Services
+    "AlertService",
+    "MessagingService",
+    "CalendarService",
+    "NewsService",
+
+    # Enums
+    "Exchange",
+    "TransactionType",
+    "OrderType",
+    "ProductType",
+    "Validity",
+    "OrderStatus",
+    "PositionType",
+    "Timeframe",
+    "AlertType",
+    "AlertPriority",
+    "MessageType",
+    "ReminderFrequency",
+    "NewsCategory",
+    "NewsSentiment",
+    "EventStatus",
+
+    # Types
+    "AlertEvent",
+    "Message",
+    "Reminder",
+    "NewsItem",
+    "OrderRequest",
+    "QuoteData",
+    "GreeksData",
 
     # Exceptions
     "StocksBlitzError",

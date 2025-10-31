@@ -8,6 +8,7 @@ from .cache import SimpleCache
 from .instrument import Instrument
 from .account import Account
 from .filter import InstrumentFilter
+from .services import AlertService, MessagingService, CalendarService, NewsService
 
 
 class TradingClient:
@@ -49,6 +50,12 @@ class TradingClient:
         # Store for easy access
         self.api_url = api_url
         self.api_key = api_key
+
+        # Initialize services
+        self._alerts = AlertService(self._api)
+        self._messaging = MessagingService(self._api)
+        self._calendar = CalendarService(self._api)
+        self._news = NewsService(self._api)
 
     def Instrument(self, spec: str) -> Instrument:
         """
@@ -100,6 +107,99 @@ class TradingClient:
         """
         filter_obj = InstrumentFilter(pattern, api_client=self._api)
         return filter_obj
+
+    @property
+    def alerts(self) -> AlertService:
+        """
+        Access alert service.
+
+        Returns:
+            AlertService instance
+
+        Example:
+            >>> # Register alert callback
+            >>> def on_alert(event):
+            ...     print(f"Alert: {event.message}")
+            >>> client.alerts.on(AlertType.PRICE, on_alert)
+            >>>
+            >>> # Raise alert
+            >>> client.alerts.raise_alert(
+            ...     alert_type=AlertType.PRICE,
+            ...     priority=AlertPriority.HIGH,
+            ...     symbol="NIFTY50",
+            ...     message="Price above 24000"
+            ... )
+        """
+        return self._alerts
+
+    @property
+    def messaging(self) -> MessagingService:
+        """
+        Access messaging service.
+
+        Returns:
+            MessagingService instance
+
+        Example:
+            >>> # Subscribe to topic
+            >>> def on_message(msg):
+            ...     print(f"Message: {msg.content}")
+            >>> client.messaging.subscribe("trade-signals", on_message)
+            >>>
+            >>> # Publish message
+            >>> client.messaging.publish(
+            ...     topic="trade-signals",
+            ...     content={"symbol": "NIFTY50", "signal": "BUY"}
+            ... )
+        """
+        return self._messaging
+
+    @property
+    def calendar(self) -> CalendarService:
+        """
+        Access calendar service.
+
+        Returns:
+            CalendarService instance
+
+        Example:
+            >>> # Set reminder
+            >>> reminder_id = client.calendar.set_reminder(
+            ...     title="Close positions",
+            ...     scheduled_at=datetime(2025, 10, 31, 15, 30),
+            ...     callback=lambda r: print("Reminder triggered!")
+            ... )
+            >>>
+            >>> # Start monitoring
+            >>> client.calendar.start_monitoring()
+        """
+        return self._calendar
+
+    @property
+    def news(self) -> NewsService:
+        """
+        Access news service.
+
+        Returns:
+            NewsService instance
+
+        Example:
+            >>> # Subscribe to news
+            >>> def on_news(item):
+            ...     if item.sentiment == NewsSentiment.NEGATIVE:
+            ...         print(f"Negative news: {item.title}")
+            >>> client.news.subscribe(
+            ...     callback=on_news,
+            ...     category=NewsCategory.MARKET
+            ... )
+            >>>
+            >>> # Get latest news
+            >>> items = client.news.get_news(
+            ...     symbols=["NIFTY50"],
+            ...     limit=10
+            ... )
+        """
+        return self._news
 
     def clear_cache(self):
         """Clear all cached data."""
