@@ -16,11 +16,30 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from loguru import logger
+
+# Import Prometheus metrics
+try:
+    from ..metrics import (
+        websocket_pool_connections,
+        websocket_pool_subscribed_tokens,
+        websocket_pool_target_tokens,
+        websocket_pool_capacity_utilization,
+        websocket_pool_subscriptions_total,
+        websocket_pool_unsubscriptions_total,
+        websocket_pool_subscription_errors_total,
+        websocket_pool_connected_status,
+    )
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    logger.warning("Prometheus metrics not available for WebSocket pool")
 
 try:
     from kiteconnect import KiteTicker
@@ -98,6 +117,13 @@ class KiteWebSocketPool:
         # Health monitoring
         self._health_check_task: Optional[asyncio.Task] = None
         self._last_tick_time: Dict[int, float] = {}  # connection_id -> timestamp
+
+        # Subscribe timeout handling
+        self._subscribe_executor = ThreadPoolExecutor(
+            max_workers=5,
+            thread_name_prefix="ws_subscribe"
+        )
+        self._subscribe_timeout = 10.0  # 10 second timeout for subscribe operations
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Initialize the pool with the event loop and start health monitoring"""
@@ -257,6 +283,55 @@ class KiteWebSocketPool:
             self._connections.append(connection)
             return connection
 
+    def _subscribe_with_timeout(
+        self,
+        connection: WebSocketConnection,
+        tokens: List[int],
+        mode: str
+    ) -> bool:
+        """
+        Execute subscribe operation with timeout to prevent indefinite hangs.
+
+        Args:
+            connection: WebSocket connection to subscribe on
+            tokens: List of instrument tokens to subscribe
+            mode: Ticker mode (FULL, QUOTE, or LTP)
+
+        Returns:
+            True if subscription succeeded, False if timeout or error
+        """
+        def _do_subscribe():
+            connection.ticker.subscribe(tokens)
+
+            # Set mode
+            if mode == "FULL":
+                connection.ticker.set_mode(connection.ticker.MODE_FULL, tokens)
+            elif mode == "QUOTE":
+                connection.ticker.set_mode(connection.ticker.MODE_QUOTE, tokens)
+            else:
+                connection.ticker.set_mode(connection.ticker.MODE_LTP, tokens)
+
+        future = self._subscribe_executor.submit(_do_subscribe)
+        try:
+            future.result(timeout=self._subscribe_timeout)
+            return True
+        except FuturesTimeoutError:
+            logger.error(
+                "Subscribe operation timeout after %.1fs for connection #%d (tokens=%s)",
+                self._subscribe_timeout,
+                connection.connection_id,
+                tokens
+            )
+            return False
+        except Exception as e:
+            logger.exception(
+                "Subscribe operation failed for connection #%d (tokens=%s): %s",
+                connection.connection_id,
+                tokens,
+                e
+            )
+            return False
+
     def _sync_connection_subscriptions(self, connection: WebSocketConnection) -> None:
         """Sync subscriptions for a specific connection"""
         if not connection.connected or not hasattr(connection.ticker, "ws"):
@@ -266,34 +341,44 @@ class KiteWebSocketPool:
         if not tokens:
             return
 
-        try:
-            # Subscribe to tokens
-            connection.ticker.subscribe(tokens)
+        mode = self.ticker_mode.upper()
+        success = self._subscribe_with_timeout(connection, tokens, mode)
 
-            # Set mode
-            mode = self.ticker_mode.upper()
-            if mode == "FULL":
-                connection.ticker.set_mode(connection.ticker.MODE_FULL, tokens)
-            elif mode == "QUOTE":
-                connection.ticker.set_mode(connection.ticker.MODE_QUOTE, tokens)
-            else:
-                connection.ticker.set_mode(connection.ticker.MODE_LTP, tokens)
-
+        if success:
             logger.debug(
                 "Synced %d tokens for connection #%d (account %s)",
                 len(tokens),
                 connection.connection_id,
                 self.account_id,
             )
-        except Exception:
-            logger.exception(
-                "Failed to sync subscriptions for connection #%d (account %s)",
+        else:
+            logger.error(
+                "Failed to sync subscriptions for connection #%d (account %s) - timeout or error",
                 connection.connection_id,
                 self.account_id,
             )
 
-    def subscribe_tokens(self, tokens: List[int]) -> None:
-        """Subscribe to tokens, automatically creating new connections if needed"""
+            # Invoke error handler if registered
+            if self._error_handler and self._loop and not self._loop.is_closed():
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._error_handler(
+                            self.account_id,
+                            RuntimeError(
+                                f"Subscription sync failed for connection #{connection.connection_id}: "
+                                f"{len(tokens)} tokens timeout or error"
+                            ),
+                        ),
+                        self._loop,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Failed to dispatch error callback for subscription sync failure: %s",
+                        e
+                    )
+
+    async def subscribe_tokens(self, tokens: List[int]) -> None:
+        """Subscribe to tokens, automatically creating new connections if needed (async to prevent event loop blocking)"""
         if not tokens:
             return
 
@@ -332,31 +417,65 @@ class KiteWebSocketPool:
 
         # Phase 2: Perform actual network I/O outside lock
         # This prevents holding lock during potentially slow network operations
-        for token, conn_id, connection in pending_subscriptions:
-            try:
-                connection.ticker.subscribe([token])
+        # Run subscriptions in executor to prevent blocking event loop
+        mode = self.ticker_mode.upper()
 
-                # Set mode
-                mode = self.ticker_mode.upper()
-                if mode == "FULL":
-                    connection.ticker.set_mode(connection.ticker.MODE_FULL, [token])
-                elif mode == "QUOTE":
-                    connection.ticker.set_mode(connection.ticker.MODE_QUOTE, [token])
-                else:
-                    connection.ticker.set_mode(connection.ticker.MODE_LTP, [token])
+        async def _subscribe_token(token: int, conn_id: int, connection):
+            """Subscribe a single token asynchronously"""
+            # Run blocking subscribe operation in executor
+            loop = asyncio.get_running_loop()
+            success = await loop.run_in_executor(
+                None,
+                self._subscribe_with_timeout,
+                connection,
+                [token],
+                mode
+            )
 
-                self.total_subscriptions += 1
-            except Exception:
-                logger.exception(
-                    "Failed to subscribe token %d on connection #%d",
+            if success:
+                with self._pool_lock:
+                    self.total_subscriptions += 1
+            else:
+                # Remove from tracking on failure
+                logger.error(
+                    "Failed to subscribe token %d on connection #%d - timeout or error",
                     token,
                     conn_id,
                 )
-                # Remove from tracking on failure
                 with self._pool_lock:
                     connection.subscribed_tokens.discard(token)
                     if token in self._token_to_connection:
                         del self._token_to_connection[token]
+
+                # Update error metrics
+                if METRICS_AVAILABLE:
+                    websocket_pool_subscription_errors_total.labels(
+                        account_id=self.account_id,
+                        error_type="timeout_or_error"
+                    ).inc()
+
+                # Invoke error handler if registered
+                if self._error_handler and self._loop and not self._loop.is_closed():
+                    try:
+                        await self._error_handler(
+                            self.account_id,
+                            RuntimeError(
+                                f"Failed to subscribe token {token} on connection #{conn_id}: "
+                                f"timeout or error"
+                            ),
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Failed to dispatch error callback for token subscription failure: %s",
+                            e
+                        )
+
+        # Subscribe all tokens concurrently (but still with timeout protection)
+        await asyncio.gather(
+            *[_subscribe_token(token, conn_id, connection)
+              for token, conn_id, connection in pending_subscriptions],
+            return_exceptions=True
+        )
 
         logger.info(
             "Subscription complete for account %s: %d tokens across %d connections",
@@ -365,8 +484,17 @@ class KiteWebSocketPool:
             len(self._connections),
         )
 
+        # Update Prometheus metrics
+        self._update_metrics()
+
+        # Update subscription counter metrics
+        if METRICS_AVAILABLE:
+            websocket_pool_subscriptions_total.labels(account_id=self.account_id).inc(
+                len(pending_subscriptions)
+            )
+
     def unsubscribe_tokens(self, tokens: List[int]) -> None:
-        """Unsubscribe from tokens"""
+        """Unsubscribe from tokens (only removes from tracking on success)"""
         if not tokens:
             return
 
@@ -385,23 +513,42 @@ class KiteWebSocketPool:
                 None,
             )
             if not connection:
+                # Connection no longer exists, safe to remove from tracking
+                with self._pool_lock:
+                    if token in self._token_to_connection:
+                        del self._token_to_connection[token]
                 continue
 
             # Unsubscribe
+            success = False
             if connection.connected and hasattr(connection.ticker, "ws"):
                 try:
                     connection.ticker.unsubscribe([token])
                     self.total_unsubscriptions += 1
+                    success = True
                 except Exception:
                     logger.exception(
                         "Failed to unsubscribe token %d from connection #%d",
                         token,
                         connection_id,
                     )
+            else:
+                # Connection not active, safe to remove from tracking
+                success = True
 
-            # Remove from tracking
-            connection.subscribed_tokens.discard(token)
-            del self._token_to_connection[token]
+            # Only remove from tracking if unsubscribe succeeded
+            if success:
+                with self._pool_lock:
+                    connection.subscribed_tokens.discard(token)
+                    if token in self._token_to_connection:
+                        del self._token_to_connection[token]
+
+                # Update unsubscription counter
+                if METRICS_AVAILABLE:
+                    websocket_pool_unsubscriptions_total.labels(account_id=self.account_id).inc()
+
+        # Update Prometheus metrics after all unsubscriptions
+        self._update_metrics()
 
     async def _health_check_loop(self):
         """Background task that monitors connection health and detects stale connections"""
@@ -448,6 +595,11 @@ class KiteWebSocketPool:
             self._health_check_task.cancel()
             self._health_check_task = None
             logger.debug("Health check task cancelled")
+
+        # Shutdown subscribe executor
+        logger.debug("Shutting down subscribe executor")
+        self._subscribe_executor.shutdown(wait=True, cancel_futures=True)
+        logger.debug("Subscribe executor shutdown complete")
 
         with self._pool_lock:
             self._target_tokens.clear()
@@ -509,6 +661,46 @@ class KiteWebSocketPool:
             self._connections.clear()
 
         logger.info("All WebSocket connections stopped for account %s", self.account_id)
+
+        # Update metrics to reflect stopped state
+        self._update_metrics()
+
+    def _update_metrics(self) -> None:
+        """Update Prometheus metrics based on current pool state"""
+        if not METRICS_AVAILABLE:
+            return
+
+        with self._pool_lock:
+            # Update connection count
+            websocket_pool_connections.labels(account_id=self.account_id).set(
+                len(self._connections)
+            )
+
+            # Update token counts
+            total_subscribed = sum(len(c.subscribed_tokens) for c in self._connections)
+            websocket_pool_subscribed_tokens.labels(account_id=self.account_id).set(
+                total_subscribed
+            )
+            websocket_pool_target_tokens.labels(account_id=self.account_id).set(
+                len(self._target_tokens)
+            )
+
+            # Update capacity utilization
+            total_capacity = len(self._connections) * self.max_instruments_per_connection
+            if total_capacity > 0:
+                utilization = (total_subscribed / total_capacity) * 100
+                websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(
+                    round(utilization, 2)
+                )
+            else:
+                websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(0)
+
+            # Update per-connection status
+            for connection in self._connections:
+                websocket_pool_connected_status.labels(
+                    account_id=self.account_id,
+                    connection_id=str(connection.connection_id)
+                ).set(1 if connection.connected else 0)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the connection pool"""

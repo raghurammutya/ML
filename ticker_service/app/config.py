@@ -2,7 +2,8 @@ from functools import lru_cache
 from datetime import time as dtime
 from typing import List
 
-from pydantic import Field
+import pytz
+from pydantic import Field, field_validator, ValidationError
 from pydantic_settings import BaseSettings
 
 
@@ -108,6 +109,104 @@ class Settings(BaseSettings):
         env="API_KEY",
         description="API key for authenticating requests. Required when api_key_enabled=True.",
     )
+
+    # Validators
+    @field_validator("option_expiry_window", "otm_levels", "historical_days", "option_strike_step")
+    @classmethod
+    def validate_positive_integers(cls, v: int, info) -> int:
+        """Ensure positive integer values"""
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("instrument_db_port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        """Ensure port is in valid range"""
+        if not (1 <= v <= 65535):
+            raise ValueError(f"instrument_db_port must be between 1 and 65535, got {v}")
+        return v
+
+    @field_validator("ticker_mode")
+    @classmethod
+    def validate_ticker_mode(cls, v: str) -> str:
+        """Ensure ticker mode is valid"""
+        mode = v.lower()
+        if mode not in {"full", "quote", "ltp"}:
+            raise ValueError(f"ticker_mode must be one of 'full', 'quote', 'ltp', got '{v}'")
+        return mode
+
+    @field_validator("market_timezone")
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        """Ensure timezone is valid IANA timezone"""
+        try:
+            pytz.timezone(v)
+        except pytz.UnknownTimeZoneError:
+            raise ValueError(f"market_timezone '{v}' is not a valid IANA timezone")
+        return v
+
+    @field_validator("mock_volume_variation")
+    @classmethod
+    def validate_proportion(cls, v: float) -> float:
+        """Ensure proportion is between 0 and 1"""
+        if not (0 <= v <= 1):
+            raise ValueError(f"mock_volume_variation must be between 0 and 1, got {v}")
+        return v
+
+    @field_validator("mock_price_variation_bps")
+    @classmethod
+    def validate_bps(cls, v: float) -> float:
+        """Ensure basis points are non-negative"""
+        if v < 0:
+            raise ValueError(f"mock_price_variation_bps must be non-negative, got {v}")
+        return v
+
+    @field_validator("stream_interval_seconds", "order_executor_worker_poll_interval", "order_executor_worker_error_backoff")
+    @classmethod
+    def validate_positive_floats(cls, v: float, info) -> float:
+        """Ensure positive float values"""
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("order_executor_max_tasks")
+    @classmethod
+    def validate_max_tasks(cls, v: int) -> int:
+        """Ensure max tasks is positive"""
+        if v <= 0:
+            raise ValueError(f"order_executor_max_tasks must be positive, got {v}")
+        return v
+
+    @field_validator("instrument_db_host", "instrument_db_name", "instrument_db_user")
+    @classmethod
+    def validate_non_empty_strings(cls, v: str, info) -> str:
+        """Ensure critical database fields are not empty"""
+        if not v or not v.strip():
+            raise ValueError(f"{info.field_name} cannot be empty")
+        return v.strip()
+
+    @field_validator("redis_url")
+    @classmethod
+    def validate_redis_url(cls, v: str) -> str:
+        """Ensure Redis URL starts with redis://"""
+        if not v.startswith("redis://"):
+            raise ValueError(f"redis_url must start with 'redis://', got '{v}'")
+        return v
+
+    @field_validator("max_instruments_per_ws_connection")
+    @classmethod
+    def validate_max_instruments(cls, v: int) -> int:
+        """Ensure max instruments is reasonable (1-3000)"""
+        if not (1 <= v <= 3000):
+            raise ValueError(f"max_instruments_per_ws_connection must be between 1 and 3000, got {v}")
+        return v
+
+    def model_post_init(self, __context) -> None:
+        """Post-initialization validation for dependent fields"""
+        # Validate API key is set when authentication is enabled
+        if self.api_key_enabled and not self.api_key.strip():
+            raise ValueError("api_key must be set when api_key_enabled=True")
 
     model_config = {
         "env_file": ".env",

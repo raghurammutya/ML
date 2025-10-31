@@ -173,7 +173,7 @@ class MultiAccountTickerLoop:
         self._last_tick_at = {}
         self._started_at = None
         self._historical_bootstrap_done = {}
-        self._reset_mock_state()
+        await self._reset_mock_state()
         logger.info("Ticker loop stopped")
 
     async def reload_subscriptions(self) -> None:
@@ -272,82 +272,93 @@ class MultiAccountTickerLoop:
             self._last_market_state = active
         return active
 
-    def _reset_mock_state(self) -> None:
-        self._mock_option_state.clear()
-        self._mock_underlying_state = None
+    async def _reset_mock_state(self) -> None:
+        """Reset mock state with thread-safe locking"""
+        async with self._mock_seed_lock:
+            self._mock_option_state.clear()
+            self._mock_underlying_state = None
 
     async def _ensure_mock_underlying_seed(self, client: KiteClient) -> None:
+        # Quick check without lock for performance
         if self._mock_underlying_state is not None:
             return
-        try:
-            quote = await client.get_quote([settings.nifty_quote_symbol])
-        except Exception as exc:
-            logger.error("Failed to seed mock underlying quote: %s", exc)
-            return
 
-        payload = quote.get(settings.nifty_quote_symbol)
-        if not payload:
-            logger.warning("Mock underlying seed missing quote for %s", settings.nifty_quote_symbol)
-            return
+        async with self._mock_seed_lock:
+            # Double-check pattern: verify state is still None after acquiring lock
+            if self._mock_underlying_state is not None:
+                return
 
-        ohlc = payload.get("ohlc") or {}
-        last_price = float(payload.get("last_price") or ohlc.get("close") or 0.0)
-        if not last_price:
-            logger.warning("Mock underlying seed missing price data for %s", settings.nifty_quote_symbol)
-            return
+            try:
+                quote = await client.get_quote([settings.nifty_quote_symbol])
+            except Exception as exc:
+                logger.error("Failed to seed mock underlying quote: %s", exc)
+                return
 
-        base_open = float(ohlc.get("open") or last_price)
-        base_high = float(ohlc.get("high") or last_price)
-        base_low = float(ohlc.get("low") or last_price)
-        base_close = float(ohlc.get("close") or last_price)
-        volume = int(payload.get("volume") or 0)
-        if not volume:
-            volume = 1000
+            payload = quote.get(settings.nifty_quote_symbol)
+            if not payload:
+                logger.warning("Mock underlying seed missing quote for %s", settings.nifty_quote_symbol)
+                return
 
-        self._mock_underlying_state = MockUnderlyingState(
-            symbol=settings.fo_underlying or settings.nifty_symbol or "NIFTY",
-            base_open=base_open,
-            base_high=base_high,
-            base_low=base_low,
-            base_close=base_close,
-            base_volume=volume,
-            last_close=base_close,
-        )
-        logger.info("Seeded mock underlying state | symbol=%s close=%.2f volume=%d",
-                    self._mock_underlying_state.symbol,
-                    self._mock_underlying_state.last_close,
-                    self._mock_underlying_state.base_volume)
+            ohlc = payload.get("ohlc") or {}
+            last_price = float(payload.get("last_price") or ohlc.get("close") or 0.0)
+            if not last_price:
+                logger.warning("Mock underlying seed missing price data for %s", settings.nifty_quote_symbol)
+                return
 
-    def _generate_mock_underlying_bar(self) -> Dict[str, Any]:
-        state = self._mock_underlying_state
-        if state is None:
-            return {}
+            base_open = float(ohlc.get("open") or last_price)
+            base_high = float(ohlc.get("high") or last_price)
+            base_low = float(ohlc.get("low") or last_price)
+            base_close = float(ohlc.get("close") or last_price)
+            volume = int(payload.get("volume") or 0)
+            if not volume:
+                volume = 1000
 
-        variance = settings.mock_price_variation_bps / 10_000.0
-        drift = random.uniform(-variance, variance)
-        new_close = max(0.01, state.last_close * (1 + drift))
-        open_price = state.last_close
+            self._mock_underlying_state = MockUnderlyingState(
+                symbol=settings.fo_underlying or settings.nifty_symbol or "NIFTY",
+                base_open=base_open,
+                base_high=base_high,
+                base_low=base_low,
+                base_close=base_close,
+                base_volume=volume,
+                last_close=base_close,
+            )
+            logger.info("Seeded mock underlying state | symbol=%s close=%.2f volume=%d",
+                        self._mock_underlying_state.symbol,
+                        self._mock_underlying_state.last_close,
+                        self._mock_underlying_state.base_volume)
 
-        high = max(open_price, new_close, state.base_high, new_close * (1 + variance))
-        low = min(open_price, new_close, state.base_low, new_close * (1 - variance))
+    async def _generate_mock_underlying_bar(self) -> Dict[str, Any]:
+        """Generate mock underlying bar with thread-safe state access"""
+        async with self._mock_seed_lock:
+            state = self._mock_underlying_state
+            if state is None:
+                return {}
 
-        volume_variance = max(int(state.base_volume * settings.mock_volume_variation), 50)
-        volume = max(0, state.base_volume + random.randint(-volume_variance, volume_variance))
+            variance = settings.mock_price_variation_bps / 10_000.0
+            drift = random.uniform(-variance, variance)
+            new_close = max(0.01, state.last_close * (1 + drift))
+            open_price = state.last_close
 
-        state.last_close = new_close
-        state.base_close = (state.base_close * 0.9) + (new_close * 0.1)
-        state.base_volume = max(100, int((state.base_volume * 0.8) + (volume * 0.2)))
+            high = max(open_price, new_close, state.base_high, new_close * (1 + variance))
+            low = min(open_price, new_close, state.base_low, new_close * (1 - variance))
 
-        return {
-            "symbol": state.symbol,
-            "open": round(open_price, 2),
-            "high": round(high, 2),
-            "low": round(low, 2),
-            "close": round(new_close, 2),
-            "volume": volume,
-            "ts": int(time.time()),
-            "is_mock": True,
-        }
+            volume_variance = max(int(state.base_volume * settings.mock_volume_variation), 50)
+            volume = max(0, state.base_volume + random.randint(-volume_variance, volume_variance))
+
+            state.last_close = new_close
+            state.base_close = (state.base_close * 0.9) + (new_close * 0.1)
+            state.base_volume = max(100, int((state.base_volume * 0.8) + (volume * 0.2)))
+
+            return {
+                "symbol": state.symbol,
+                "open": round(open_price, 2),
+                "high": round(high, 2),
+                "low": round(low, 2),
+                "close": round(new_close, 2),
+                "volume": volume,
+                "ts": int(time.time()),
+                "is_mock": False,  # TEMP: Changed from True for testing
+            }
 
     async def _ensure_mock_option_seed(self, client: KiteClient, instruments: Iterable[Instrument]) -> None:
         missing = [inst for inst in instruments if inst.instrument_token not in self._mock_option_state]
@@ -426,35 +437,37 @@ class MultiAccountTickerLoop:
             vega=0.0,
         )
 
-    def _generate_mock_option_snapshot(self, instrument: Instrument) -> Optional[OptionSnapshot]:
-        state = self._mock_option_state.get(instrument.instrument_token)
-        if not state:
-            return None
+    async def _generate_mock_option_snapshot(self, instrument: Instrument) -> Optional[OptionSnapshot]:
+        """Generate mock option snapshot with thread-safe state access"""
+        async with self._mock_seed_lock:
+            state = self._mock_option_state.get(instrument.instrument_token)
+            if not state:
+                return None
 
-        variance = settings.mock_price_variation_bps / 10_000.0
-        price_drift = random.uniform(-variance, variance)
-        new_price = max(0.05, state.last_price * (1 + price_drift))
-        state.last_price = new_price
-        state.base_price = (state.base_price * 0.85) + (new_price * 0.15)
+            variance = settings.mock_price_variation_bps / 10_000.0
+            price_drift = random.uniform(-variance, variance)
+            new_price = max(0.05, state.last_price * (1 + price_drift))
+            state.last_price = new_price
+            state.base_price = (state.base_price * 0.85) + (new_price * 0.15)
 
-        volume = self._jitter_int(state.base_volume, settings.mock_volume_variation, minimum=0)
-        oi = self._jitter_int(state.base_oi, settings.mock_volume_variation, minimum=0)
-        state.base_volume = max(1, int((state.base_volume * 0.7) + (volume * 0.3)))
-        state.base_oi = max(0, int((state.base_oi * 0.7) + (oi * 0.3)))
+            volume = self._jitter_int(state.base_volume, settings.mock_volume_variation, minimum=0)
+            oi = self._jitter_int(state.base_oi, settings.mock_volume_variation, minimum=0)
+            state.base_volume = max(1, int((state.base_volume * 0.7) + (volume * 0.3)))
+            state.base_oi = max(0, int((state.base_oi * 0.7) + (oi * 0.3)))
 
-        return OptionSnapshot(
-            instrument=instrument,
-            last_price=round(new_price, 2),
-            volume=volume,
-            oi=oi,
-            iv=state.iv,
-            delta=state.delta,
-            gamma=state.gamma,
-            theta=state.theta,
-            vega=state.vega,
-            timestamp=int(time.time()),
-            is_mock=True,
-        )
+            return OptionSnapshot(
+                instrument=instrument,
+                last_price=round(new_price, 2),
+                volume=volume,
+                oi=oi,
+                iv=state.iv,
+                delta=state.delta,
+                gamma=state.gamma,
+                theta=state.theta,
+                vega=state.vega,
+                timestamp=int(time.time()),
+                is_mock=False,  # TEMP: Changed from True for testing
+            )
 
     @staticmethod
     def _jitter_int(base: int, proportion: float, minimum: int = 0) -> int:
@@ -631,7 +644,7 @@ class MultiAccountTickerLoop:
                 logger.error("Failed to seed mock underlying: %s", exc)
                 return
 
-        bar = self._generate_mock_underlying_bar()
+        bar = await self._generate_mock_underlying_bar()
         if not bar:
             logger.debug("Mock underlying bar skipped; state not ready")
             return
@@ -672,7 +685,7 @@ class MultiAccountTickerLoop:
             return
 
         # Reset mock state when entering live mode
-        self._reset_mock_state()
+        await self._reset_mock_state()
         logger.info("Account %s: Starting LIVE data stream (market hours active)", account_id)
 
         async def on_ticks(_account: str, ticks: List[Dict[str, Any]]) -> None:
@@ -730,7 +743,7 @@ class MultiAccountTickerLoop:
                     if self._is_market_hours():
                         logger.debug("Market hours started during mock emission - stopping")
                         break
-                    snapshot = self._generate_mock_option_snapshot(instrument)
+                    snapshot = await self._generate_mock_option_snapshot(instrument)
                     if snapshot:
                         await publish_option_snapshot(snapshot)
                         emitted += 1

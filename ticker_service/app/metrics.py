@@ -90,6 +90,55 @@ websocket_messages_total = Counter(
     ['message_type', 'channel']
 )
 
+# WebSocket Pool metrics
+websocket_pool_connections = Gauge(
+    'websocket_pool_connections',
+    'Number of active WebSocket pool connections per account',
+    ['account_id']
+)
+
+websocket_pool_subscribed_tokens = Gauge(
+    'websocket_pool_subscribed_tokens',
+    'Number of subscribed tokens per account',
+    ['account_id']
+)
+
+websocket_pool_target_tokens = Gauge(
+    'websocket_pool_target_tokens',
+    'Number of target tokens per account',
+    ['account_id']
+)
+
+websocket_pool_capacity_utilization = Gauge(
+    'websocket_pool_capacity_utilization_percent',
+    'WebSocket pool capacity utilization percentage',
+    ['account_id']
+)
+
+websocket_pool_subscriptions_total = Counter(
+    'websocket_pool_subscriptions_total',
+    'Total WebSocket subscriptions',
+    ['account_id']
+)
+
+websocket_pool_unsubscriptions_total = Counter(
+    'websocket_pool_unsubscriptions_total',
+    'Total WebSocket unsubscriptions',
+    ['account_id']
+)
+
+websocket_pool_subscription_errors_total = Counter(
+    'websocket_pool_subscription_errors_total',
+    'Total WebSocket subscription errors',
+    ['account_id', 'error_type']
+)
+
+websocket_pool_connected_status = Gauge(
+    'websocket_pool_connected_status',
+    'WebSocket connection status per connection (1=connected, 0=disconnected)',
+    ['account_id', 'connection_id']
+)
+
 # Instrument registry metrics
 instrument_cache_size = Gauge(
     'instrument_cache_size',

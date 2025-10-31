@@ -6,7 +6,7 @@ WebSocket streaming, webhooks, batch orders
 from typing import List, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Depends, Query, Request
 from pydantic import BaseModel, Field, HttpUrl
 
 from .batch_orders import BatchOrderRequest, batch_executor
@@ -577,21 +577,29 @@ async def get_publisher_stats():
 
 
 @router.post("/backpressure/reset-circuit-breaker", dependencies=[Depends(verify_api_key)])
-async def reset_circuit_breaker():
+async def reset_circuit_breaker(request: Request):
     """
     Manually reset the circuit breaker to CLOSED state.
 
     Use this to force-reopen a circuit after fixing underlying issues.
 
     Requires API key authentication.
+    Rate limited to 5 requests per minute to prevent abuse.
     """
     from .redis_publisher_v2 import get_resilient_publisher, CircuitState
 
+    # Apply rate limiting (5 requests per minute for this sensitive endpoint)
+    limiter = request.app.state.limiter
+    await limiter.limit("5/minute")(request)
+
     try:
         publisher = get_resilient_publisher()
-        publisher.circuit_breaker.state = CircuitState.CLOSED
-        publisher.circuit_breaker.failure_count = 0
-        publisher.circuit_breaker.success_count = 0
+
+        # Use thread-safe state mutation
+        with publisher.circuit_breaker._lock:
+            publisher.circuit_breaker.state = CircuitState.CLOSED
+            publisher.circuit_breaker.failure_count = 0
+            publisher.circuit_breaker.success_count = 0
 
         logger.info("Circuit breaker manually reset to CLOSED state")
 
@@ -687,9 +695,28 @@ async def get_websocket_pool_stats():
 
     # Get stats from all accounts
     for account_id, session in orchestrator._sessions.items():
-        pool_stats = session.client.get_pool_stats()
-        if pool_stats:
-            all_stats[account_id] = pool_stats
+        try:
+            pool_stats = session.client.get_pool_stats()
+            if pool_stats and isinstance(pool_stats, dict):
+                # Validate and sanitize stats to handle None values
+                sanitized_stats = {
+                    "account_id": pool_stats.get("account_id", account_id),
+                    "total_connections": pool_stats.get("total_connections", 0),
+                    "total_target_tokens": pool_stats.get("total_target_tokens", 0),
+                    "total_subscribed_tokens": pool_stats.get("total_subscribed_tokens", 0),
+                    "max_instruments_per_connection": pool_stats.get("max_instruments_per_connection", 1000),
+                    "total_capacity": pool_stats.get("total_capacity", 0),
+                    "connections": pool_stats.get("connections", []),
+                    "statistics": pool_stats.get("statistics", {})
+                }
+                all_stats[account_id] = sanitized_stats
+        except Exception as e:
+            logger.warning(f"Failed to get pool stats for account {account_id}: {e}")
+            # Include error info in stats
+            all_stats[account_id] = {
+                "error": "Failed to retrieve stats",
+                "message": str(e)
+            }
 
     return {
         "total_accounts": len(all_stats),
@@ -727,11 +754,33 @@ async def get_websocket_pool_stats_for_account(account_id: str):
             detail=f"Account '{account_id}' not found"
         )
 
-    pool_stats = session.client.get_pool_stats()
-    if not pool_stats:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Account '{account_id}' has no active WebSocket pool"
-        )
+    try:
+        pool_stats = session.client.get_pool_stats()
+        if not pool_stats or not isinstance(pool_stats, dict):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Account '{account_id}' has no active WebSocket pool"
+            )
 
-    return pool_stats
+        # Validate and sanitize stats to handle None values
+        sanitized_stats = {
+            "account_id": pool_stats.get("account_id", account_id),
+            "total_connections": pool_stats.get("total_connections", 0),
+            "total_target_tokens": pool_stats.get("total_target_tokens", 0),
+            "total_subscribed_tokens": pool_stats.get("total_subscribed_tokens", 0),
+            "max_instruments_per_connection": pool_stats.get("max_instruments_per_connection", 1000),
+            "total_capacity": pool_stats.get("total_capacity", 0),
+            "connections": pool_stats.get("connections", []),
+            "statistics": pool_stats.get("statistics", {})
+        }
+
+        return sanitized_stats
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.exception(f"Failed to get pool stats for account {account_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve pool stats: {str(e)}"
+        )

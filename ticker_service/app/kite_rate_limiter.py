@@ -316,7 +316,19 @@ class KiteRateLimiter:
         # Check per-minute limit
         per_minute = self.per_minute_limiters.get(endpoint)
         if per_minute:
-            remaining_timeout = timeout - (time.monotonic() - start_time) if timeout else None
+            if timeout:
+                remaining_timeout = timeout - (time.monotonic() - start_time)
+                # Check if we've already exceeded timeout
+                if remaining_timeout <= 0:
+                    logger.warning(
+                        f"Rate limit timeout exhausted for {endpoint.value} before per-minute check"
+                    )
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
+                    return False
+            else:
+                remaining_timeout = None
+
             if wait:
                 success = await per_minute.wait_for_slot(timeout=remaining_timeout)
                 if not success:
@@ -337,7 +349,19 @@ class KiteRateLimiter:
         # Check per-day limit
         per_day = self.per_day_limiters.get(endpoint)
         if per_day:
-            remaining_timeout = timeout - (time.monotonic() - start_time) if timeout else None
+            if timeout:
+                remaining_timeout = timeout - (time.monotonic() - start_time)
+                # Check if we've already exceeded timeout
+                if remaining_timeout <= 0:
+                    logger.error(
+                        f"Rate limit timeout exhausted for {endpoint.value} before daily check"
+                    )
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
+                    return False
+            else:
+                remaining_timeout = None
+
             if wait:
                 success = await per_day.wait_for_slot(timeout=remaining_timeout)
                 if not success:

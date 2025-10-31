@@ -308,7 +308,7 @@ class KiteClient:
             self.account_id,
             len(instrument_tokens),
         )
-        self._ws_pool.subscribe_tokens(instrument_tokens)
+        await self._ws_pool.subscribe_tokens(instrument_tokens)
 
     async def unsubscribe_tokens(self, tokens: Iterable[int]) -> None:
         instrument_tokens = [int(token) for token in tokens]
