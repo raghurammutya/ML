@@ -7,14 +7,16 @@ from typing import List, Optional
 import re
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .config import get_settings
+from .middleware import RequestIDMiddleware
 from .generator import ticker_loop
 from .instrument_registry import instrument_registry
 from .order_executor import get_executor, init_executor
@@ -102,6 +104,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ticker Service", lifespan=lifespan)
+
+# Add middlewares
+app.add_middleware(RequestIDMiddleware)
 
 # Add rate limiter state and exception handler
 app.state.limiter = limiter
@@ -195,6 +200,16 @@ def _to_timestamp(dt: datetime) -> int:
     else:
         dt = dt.astimezone(timezone.utc)
     return int(dt.timestamp())
+
+
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    """
+    Prometheus metrics endpoint.
+
+    Returns metrics in Prometheus exposition format.
+    """
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")

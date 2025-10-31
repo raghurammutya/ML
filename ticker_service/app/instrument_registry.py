@@ -124,17 +124,24 @@ class InstrumentRegistry:
         segments = self._settings.instrument_segments
         logger.info("Refreshing instrument registry | segments=%s", ",".join(segments))
 
-        async def _download(segment: str) -> List[Dict[str, object]]:
+        async def _download(segment: str) -> tuple[str, List[Dict[str, object]], bool]:
             try:
                 instruments = await client.fetch_instruments(segment)
                 logger.debug("Fetched %d instruments for segment=%s", len(instruments), segment)
-                return instruments
+                return (segment, instruments, True)
             except Exception as exc:
                 logger.exception("Failed to fetch instruments for segment=%s: %s", segment, exc)
-                return []
+                return (segment, [], False)
 
         downloads = await asyncio.gather(*[_download(segment) for segment in segments])
-        payload = dict(zip(segments, downloads))
+
+        # Only include segments that were successfully fetched
+        payload = {}
+        for segment, instruments, success in downloads:
+            if success:
+                payload[segment] = instruments
+            else:
+                logger.warning("Skipping refresh for segment %s due to fetch failure", segment)
 
         async with self._lock:
             await self._apply_refresh(payload)
@@ -335,7 +342,6 @@ class InstrumentRegistry:
     def cache_metadata(self, metadata: InstrumentMetadata) -> None:
         ttl = timedelta(seconds=self._settings.instrument_cache_ttl_seconds)
         self._cache[metadata.instrument_token] = metadata
-        self._cache_by_token[metadata.instrument_token] = metadata
         self._cache_expiry[metadata.instrument_token] = datetime.now(timezone.utc) + ttl
 
     # ------------------------------------------------------------------ internals

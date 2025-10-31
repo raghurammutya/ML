@@ -556,11 +556,28 @@ class MultiAccountTickerLoop:
 
     async def _stream_underlying(self) -> None:
         try:
+            last_mode = None
             while not self._stop_event.is_set():
-                if self._is_market_hours():
-                    await self._emit_live_underlying()
+                is_market_hours = self._is_market_hours()
+                if is_market_hours:
+                    current_mode = "LIVE"
+                elif self._settings.enable_mock_data:
+                    current_mode = "MOCK"
                 else:
+                    current_mode = "DISABLED"
+
+                # Log mode transitions
+                if current_mode != last_mode:
+                    logger.info("Underlying stream switching to %s mode", current_mode)
+                    last_mode = current_mode
+
+                if is_market_hours:
+                    await self._emit_live_underlying()
+                elif self._settings.enable_mock_data:
                     await self._emit_mock_underlying()
+                else:
+                    # Mock data disabled, just wait
+                    pass
 
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), settings.stream_interval_seconds)
@@ -616,10 +633,21 @@ class MultiAccountTickerLoop:
         async with self._orchestrator.borrow(account_id) as client:
             await client.ensure_session()
             while not self._stop_event.is_set():
-                if self._is_market_hours():
+                is_market_hours = self._is_market_hours()
+                if is_market_hours:
+                    logger.debug("Account %s switching to LIVE stream mode", account_id)
                     await self._run_live_stream(client, account_id, instruments, tokens, token_map)
-                else:
+                    logger.debug("Account %s exited LIVE stream mode", account_id)
+                elif self._settings.enable_mock_data:
+                    logger.debug("Account %s switching to MOCK stream mode", account_id)
                     await self._run_mock_stream(client, account_id, instruments)
+                    logger.debug("Account %s exited MOCK stream mode", account_id)
+                else:
+                    logger.debug("Account %s: Mock data disabled, waiting for market hours", account_id)
+                    await asyncio.sleep(30)  # Wait 30 seconds before checking again
+
+                # Small delay to prevent tight loop during mode transitions
+                await asyncio.sleep(0.5)
 
     async def _run_live_stream(
         self,
@@ -633,9 +661,15 @@ class MultiAccountTickerLoop:
             await asyncio.sleep(settings.stream_interval_seconds)
             return
 
+        # Reset mock state when entering live mode
         self._reset_mock_state()
+        logger.info("Account %s: Starting LIVE data stream (market hours active)", account_id)
 
         async def on_ticks(_account: str, ticks: List[Dict[str, Any]]) -> None:
+            # Only process ticks if still in market hours
+            if not self._is_market_hours():
+                logger.debug("Ignoring ticks - market hours ended")
+                return
             logger.debug("Received %d ticks from %s", len(ticks), _account)
             await self._handle_ticks(account_id, token_map, ticks)
 
@@ -651,7 +685,7 @@ class MultiAccountTickerLoop:
             while self._is_market_hours() and not self._stop_event.is_set():
                 await asyncio.sleep(min(settings.stream_interval_seconds, 1.0))
         finally:
-            logger.debug("Stopping live stream for account %s", account_id)
+            logger.info("Account %s: Stopping LIVE data stream (market hours ended)", account_id)
             try:
                 await client.unsubscribe_tokens(tokens)
             except Exception as exc:
@@ -660,6 +694,9 @@ class MultiAccountTickerLoop:
                 await client.stop_stream()
             except Exception as exc:
                 logger.exception("Stop stream failed for account %s: %s", account_id, exc)
+
+            # Ensure a clean transition - wait for any pending callbacks to complete
+            await asyncio.sleep(0.5)
 
     async def _run_mock_stream(
         self,
@@ -671,22 +708,30 @@ class MultiAccountTickerLoop:
             await asyncio.sleep(settings.stream_interval_seconds)
             return
 
+        logger.info("Account %s: Starting MOCK data stream (outside market hours)", account_id)
         await self._ensure_mock_option_seed(client, instruments)
 
-        while not self._is_market_hours() and not self._stop_event.is_set():
-            await self._ensure_mock_option_seed(client, instruments)
-            emitted = 0
-            for instrument in instruments:
-                snapshot = self._generate_mock_option_snapshot(instrument)
-                if snapshot:
-                    await publish_option_snapshot(snapshot)
-                    emitted += 1
-            if emitted:
-                logger.debug("Published %d mock option snapshots for account %s", emitted, account_id)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), settings.stream_interval_seconds)
-            except asyncio.TimeoutError:
-                continue
+        try:
+            while not self._is_market_hours() and not self._stop_event.is_set():
+                await self._ensure_mock_option_seed(client, instruments)
+                emitted = 0
+                for instrument in instruments:
+                    # Double-check market hours before each emission
+                    if self._is_market_hours():
+                        logger.debug("Market hours started during mock emission - stopping")
+                        break
+                    snapshot = self._generate_mock_option_snapshot(instrument)
+                    if snapshot:
+                        await publish_option_snapshot(snapshot)
+                        emitted += 1
+                if emitted:
+                    logger.debug("Published %d mock option snapshots for account %s", emitted, account_id)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), settings.stream_interval_seconds)
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            logger.info("Account %s: Stopping MOCK data stream (market hours started)", account_id)
 
     async def _handle_ticks(self, account_id: str, lookup: Dict[int, Instrument], ticks: List[Dict[str, Any]]) -> None:
         if ticks:
@@ -733,6 +778,16 @@ class MultiAccountTickerLoop:
         if self._orchestrator is None:
             self._orchestrator = orchestrator
         return orchestrator.list_accounts()
+
+    def borrow_client(self, account_id: Optional[str] = None):
+        """
+        Borrow a Kite client for the specified account.
+        Returns an async context manager (AccountLease).
+        """
+        orchestrator = self._orchestrator or SessionOrchestrator()
+        if self._orchestrator is None:
+            self._orchestrator = orchestrator
+        return orchestrator.borrow(account_id)
 
     async def _emit_historical_bootstrap(self, client: KiteClient, instruments: List[Instrument]) -> None:
         if settings.historical_days <= 0:

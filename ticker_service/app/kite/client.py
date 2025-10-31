@@ -332,6 +332,614 @@ class KiteClient:
         self._loop = None
         logger.info("Kite ticker stopped for account %s", self.account_id)
 
+    # ------------------------------------------------------------------ Order Management APIs
+    async def place_order(
+        self,
+        exchange: str,
+        tradingsymbol: str,
+        transaction_type: str,
+        quantity: int,
+        product: str,
+        order_type: str,
+        variety: str = "regular",
+        price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
+        validity: str = "DAY",
+        disclosed_quantity: Optional[int] = None,
+        squareoff: Optional[float] = None,
+        stoploss: Optional[float] = None,
+        trailing_stoploss: Optional[float] = None,
+        tag: Optional[str] = None,
+    ) -> str:
+        """
+        Place an order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _place() -> str:
+            params = {
+                "variety": variety,
+                "exchange": exchange,
+                "tradingsymbol": tradingsymbol,
+                "transaction_type": transaction_type,
+                "quantity": quantity,
+                "product": product,
+                "order_type": order_type,
+                "validity": validity,
+            }
+            if price is not None:
+                params["price"] = price
+            if trigger_price is not None:
+                params["trigger_price"] = trigger_price
+            if disclosed_quantity is not None:
+                params["disclosed_quantity"] = disclosed_quantity
+            if squareoff is not None:
+                params["squareoff"] = squareoff
+            if stoploss is not None:
+                params["stoploss"] = stoploss
+            if trailing_stoploss is not None:
+                params["trailing_stoploss"] = trailing_stoploss
+            if tag is not None:
+                params["tag"] = tag
+
+            return self._kite.place_order(**params)
+
+        return await asyncio.to_thread(_place)
+
+    async def modify_order(
+        self,
+        variety: str,
+        order_id: str,
+        quantity: Optional[int] = None,
+        price: Optional[float] = None,
+        order_type: Optional[str] = None,
+        trigger_price: Optional[float] = None,
+        validity: Optional[str] = None,
+        disclosed_quantity: Optional[int] = None,
+        parent_order_id: Optional[str] = None,
+    ) -> str:
+        """
+        Modify a pending order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _modify() -> str:
+            params = {
+                "variety": variety,
+                "order_id": order_id,
+            }
+            if quantity is not None:
+                params["quantity"] = quantity
+            if price is not None:
+                params["price"] = price
+            if order_type is not None:
+                params["order_type"] = order_type
+            if trigger_price is not None:
+                params["trigger_price"] = trigger_price
+            if validity is not None:
+                params["validity"] = validity
+            if disclosed_quantity is not None:
+                params["disclosed_quantity"] = disclosed_quantity
+            if parent_order_id is not None:
+                params["parent_order_id"] = parent_order_id
+
+            return self._kite.modify_order(**params)
+
+        return await asyncio.to_thread(_modify)
+
+    async def cancel_order(self, variety: str, order_id: str, parent_order_id: Optional[str] = None) -> str:
+        """
+        Cancel a pending order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _cancel() -> str:
+            params = {
+                "variety": variety,
+                "order_id": order_id,
+            }
+            if parent_order_id is not None:
+                params["parent_order_id"] = parent_order_id
+
+            return self._kite.cancel_order(**params)
+
+        return await asyncio.to_thread(_cancel)
+
+    async def exit_order(self, variety: str, order_id: str, parent_order_id: Optional[str] = None) -> str:
+        """
+        Exit a cover order or bracket order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _exit() -> str:
+            params = {
+                "variety": variety,
+                "order_id": order_id,
+            }
+            if parent_order_id is not None:
+                params["parent_order_id"] = parent_order_id
+
+            return self._kite.exit_order(**params)
+
+        return await asyncio.to_thread(_exit)
+
+    async def orders(self) -> List[Dict[str, Any]]:
+        """
+        Get list of all orders for the day.
+        """
+        await self.ensure_session()
+
+        def _orders() -> List[Dict[str, Any]]:
+            return self._kite.orders()
+
+        return await asyncio.to_thread(_orders)
+
+    async def order_history(self, order_id: str) -> List[Dict[str, Any]]:
+        """
+        Get history/trail of a specific order.
+        """
+        await self.ensure_session()
+
+        def _history() -> List[Dict[str, Any]]:
+            return self._kite.order_history(order_id)
+
+        return await asyncio.to_thread(_history)
+
+    async def order_trades(self, order_id: str) -> List[Dict[str, Any]]:
+        """
+        Get list of trades executed for an order.
+        """
+        await self.ensure_session()
+
+        def _trades() -> List[Dict[str, Any]]:
+            return self._kite.order_trades(order_id)
+
+        return await asyncio.to_thread(_trades)
+
+    async def trades(self) -> List[Dict[str, Any]]:
+        """
+        Get all trades for the day.
+        """
+        await self.ensure_session()
+
+        def _trades() -> List[Dict[str, Any]]:
+            return self._kite.trades()
+
+        return await asyncio.to_thread(_trades)
+
+    async def order_margins(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Calculate margins for a list of orders (basket).
+        """
+        await self.ensure_session()
+
+        def _margins() -> List[Dict[str, Any]]:
+            return self._kite.order_margins(orders)
+
+        return await asyncio.to_thread(_margins)
+
+    async def basket_order_margins(self, orders: List[Dict[str, Any]], consider_positions: bool = True) -> Dict[str, Any]:
+        """
+        Calculate total margins required for a basket of orders.
+        """
+        await self.ensure_session()
+
+        def _basket_margins() -> Dict[str, Any]:
+            return self._kite.basket_order_margins(orders, consider_positions=consider_positions)
+
+        return await asyncio.to_thread(_basket_margins)
+
+    # ------------------------------------------------------------------ Portfolio APIs
+    async def holdings(self) -> List[Dict[str, Any]]:
+        """
+        Get list of long-term equity holdings.
+        """
+        await self.ensure_session()
+
+        def _holdings() -> List[Dict[str, Any]]:
+            return self._kite.holdings()
+
+        return await asyncio.to_thread(_holdings)
+
+    async def positions(self) -> Dict[str, Any]:
+        """
+        Get net and day positions.
+        """
+        await self.ensure_session()
+
+        def _positions() -> Dict[str, Any]:
+            return self._kite.positions()
+
+        return await asyncio.to_thread(_positions)
+
+    async def convert_position(
+        self,
+        exchange: str,
+        tradingsymbol: str,
+        transaction_type: str,
+        position_type: str,
+        quantity: int,
+        old_product: str,
+        new_product: str,
+    ) -> bool:
+        """
+        Convert position between product types.
+        """
+        await self.ensure_session()
+
+        def _convert() -> bool:
+            return self._kite.convert_position(
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=transaction_type,
+                position_type=position_type,
+                quantity=quantity,
+                old_product=old_product,
+                new_product=new_product,
+            )
+
+        return await asyncio.to_thread(_convert)
+
+    # ------------------------------------------------------------------ User & Account APIs
+    async def profile(self) -> Dict[str, Any]:
+        """
+        Get user profile details.
+        """
+        await self.ensure_session()
+
+        def _profile() -> Dict[str, Any]:
+            return self._kite.profile()
+
+        return await asyncio.to_thread(_profile)
+
+    async def margins(self, segment: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get account margins and cash balances.
+
+        Args:
+            segment: Optional segment filter ("equity" or "commodity")
+        """
+        await self.ensure_session()
+
+        def _margins() -> Dict[str, Any]:
+            if segment:
+                return self._kite.margins(segment)
+            return self._kite.margins()
+
+        return await asyncio.to_thread(_margins)
+
+    # ------------------------------------------------------------------ GTT APIs
+    async def place_gtt(
+        self,
+        trigger_type: str,
+        tradingsymbol: str,
+        exchange: str,
+        trigger_values: List[float],
+        last_price: float,
+        orders: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Place a GTT (Good Till Triggered) order.
+
+        Returns: gtt_id
+        """
+        await self.ensure_session()
+
+        def _place_gtt() -> int:
+            return self._kite.place_gtt(
+                trigger_type=trigger_type,
+                tradingsymbol=tradingsymbol,
+                exchange=exchange,
+                trigger_values=trigger_values,
+                last_price=last_price,
+                orders=orders,
+            )
+
+        return await asyncio.to_thread(_place_gtt)
+
+    async def get_gtt(self, gtt_id: int) -> Dict[str, Any]:
+        """
+        Get details of a specific GTT.
+        """
+        await self.ensure_session()
+
+        def _get_gtt() -> Dict[str, Any]:
+            return self._kite.get_gtt(gtt_id)
+
+        return await asyncio.to_thread(_get_gtt)
+
+    async def get_gtts(self) -> List[Dict[str, Any]]:
+        """
+        Get list of all active GTTs.
+        """
+        await self.ensure_session()
+
+        def _get_gtts() -> List[Dict[str, Any]]:
+            return self._kite.get_gtts()
+
+        return await asyncio.to_thread(_get_gtts)
+
+    async def modify_gtt(
+        self,
+        gtt_id: int,
+        trigger_type: str,
+        tradingsymbol: str,
+        exchange: str,
+        trigger_values: List[float],
+        last_price: float,
+        orders: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Modify a GTT order.
+
+        Returns: gtt_id
+        """
+        await self.ensure_session()
+
+        def _modify_gtt() -> int:
+            return self._kite.modify_gtt(
+                gtt_id=gtt_id,
+                trigger_type=trigger_type,
+                tradingsymbol=tradingsymbol,
+                exchange=exchange,
+                trigger_values=trigger_values,
+                last_price=last_price,
+                orders=orders,
+            )
+
+        return await asyncio.to_thread(_modify_gtt)
+
+    async def delete_gtt(self, gtt_id: int) -> int:
+        """
+        Cancel a GTT order.
+
+        Returns: gtt_id
+        """
+        await self.ensure_session()
+
+        def _delete_gtt() -> int:
+            return self._kite.delete_gtt(gtt_id)
+
+        return await asyncio.to_thread(_delete_gtt)
+
+    async def gtt_trigger_range(self, transaction_type: str, exchange: str, tradingsymbol: str) -> Dict[str, Any]:
+        """
+        Get trigger range for GTT orders.
+        """
+        await self.ensure_session()
+
+        def _trigger_range() -> Dict[str, Any]:
+            return self._kite.gtt_trigger_range(
+                transaction_type=transaction_type,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+            )
+
+        return await asyncio.to_thread(_trigger_range)
+
+    # ------------------------------------------------------------------ Mutual Funds APIs
+    async def place_mf_order(
+        self,
+        tradingsymbol: str,
+        transaction_type: str,
+        amount: Optional[float] = None,
+        quantity: Optional[float] = None,
+        tag: Optional[str] = None,
+    ) -> str:
+        """
+        Place a mutual fund order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _place_mf() -> str:
+            params = {
+                "tradingsymbol": tradingsymbol,
+                "transaction_type": transaction_type,
+            }
+            if amount is not None:
+                params["amount"] = amount
+            if quantity is not None:
+                params["quantity"] = quantity
+            if tag is not None:
+                params["tag"] = tag
+
+            return self._kite.place_mf_order(**params)
+
+        return await asyncio.to_thread(_place_mf)
+
+    async def cancel_mf_order(self, order_id: str) -> str:
+        """
+        Cancel a pending mutual fund order.
+
+        Returns: order_id
+        """
+        await self.ensure_session()
+
+        def _cancel_mf() -> str:
+            return self._kite.cancel_mf_order(order_id)
+
+        return await asyncio.to_thread(_cancel_mf)
+
+    async def mf_orders(self, order_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all mutual fund orders or details of a specific order.
+        """
+        await self.ensure_session()
+
+        def _mf_orders() -> List[Dict[str, Any]]:
+            if order_id:
+                return self._kite.mf_orders(order_id)
+            return self._kite.mf_orders()
+
+        return await asyncio.to_thread(_mf_orders)
+
+    async def place_mf_sip(
+        self,
+        tradingsymbol: str,
+        amount: float,
+        frequency: str,
+        initial_amount: Optional[float] = None,
+        installments: Optional[int] = None,
+        installment_day: Optional[int] = None,
+        tag: Optional[str] = None,
+    ) -> str:
+        """
+        Place a mutual fund SIP.
+
+        Returns: sip_id
+        """
+        await self.ensure_session()
+
+        def _place_sip() -> str:
+            params = {
+                "tradingsymbol": tradingsymbol,
+                "amount": amount,
+                "frequency": frequency,
+            }
+            if initial_amount is not None:
+                params["initial_amount"] = initial_amount
+            if installments is not None:
+                params["installments"] = installments
+            if installment_day is not None:
+                params["installment_day"] = installment_day
+            if tag is not None:
+                params["tag"] = tag
+
+            return self._kite.place_mf_sip(**params)
+
+        return await asyncio.to_thread(_place_sip)
+
+    async def modify_mf_sip(
+        self,
+        sip_id: str,
+        amount: Optional[float] = None,
+        frequency: Optional[str] = None,
+        installments: Optional[int] = None,
+        installment_day: Optional[int] = None,
+        status: Optional[str] = None,
+    ) -> str:
+        """
+        Modify an active mutual fund SIP.
+
+        Returns: sip_id
+        """
+        await self.ensure_session()
+
+        def _modify_sip() -> str:
+            params = {"sip_id": sip_id}
+            if amount is not None:
+                params["amount"] = amount
+            if frequency is not None:
+                params["frequency"] = frequency
+            if installments is not None:
+                params["installments"] = installments
+            if installment_day is not None:
+                params["installment_day"] = installment_day
+            if status is not None:
+                params["status"] = status
+
+            return self._kite.modify_mf_sip(**params)
+
+        return await asyncio.to_thread(_modify_sip)
+
+    async def cancel_mf_sip(self, sip_id: str) -> str:
+        """
+        Cancel an active mutual fund SIP.
+
+        Returns: sip_id
+        """
+        await self.ensure_session()
+
+        def _cancel_sip() -> str:
+            return self._kite.cancel_mf_sip(sip_id)
+
+        return await asyncio.to_thread(_cancel_sip)
+
+    async def mf_sips(self, sip_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all mutual fund SIPs or details of a specific SIP.
+        """
+        await self.ensure_session()
+
+        def _mf_sips() -> List[Dict[str, Any]]:
+            if sip_id:
+                return self._kite.mf_sips(sip_id)
+            return self._kite.mf_sips()
+
+        return await asyncio.to_thread(_mf_sips)
+
+    async def mf_holdings(self) -> List[Dict[str, Any]]:
+        """
+        Get mutual fund holdings.
+        """
+        await self.ensure_session()
+
+        def _mf_holdings() -> List[Dict[str, Any]]:
+            return self._kite.mf_holdings()
+
+        return await asyncio.to_thread(_mf_holdings)
+
+    async def mf_instruments(self) -> List[Dict[str, Any]]:
+        """
+        Get list of all mutual fund instruments.
+        """
+        await self.ensure_session()
+
+        def _mf_instruments() -> List[Dict[str, Any]]:
+            return self._kite.mf_instruments()
+
+        return await asyncio.to_thread(_mf_instruments)
+
+    # ------------------------------------------------------------------ Session Management APIs
+    async def invalidate_access_token(self) -> bool:
+        """
+        Invalidate the current access token.
+        """
+        await self.ensure_session()
+
+        def _invalidate() -> bool:
+            return self._kite.invalidate_access_token()
+
+        return await asyncio.to_thread(_invalidate)
+
+    async def invalidate_refresh_token(self, refresh_token: str) -> bool:
+        """
+        Invalidate the refresh token.
+        """
+        await self.ensure_session()
+
+        def _invalidate_refresh() -> bool:
+            return self._kite.invalidate_refresh_token(refresh_token)
+
+        return await asyncio.to_thread(_invalidate_refresh)
+
+    async def renew_access_token(self, refresh_token: str, api_secret: str) -> Dict[str, Any]:
+        """
+        Renew access token using refresh token.
+
+        Returns: dict with access_token
+        """
+        def _renew() -> Dict[str, Any]:
+            return self._kite.renew_access_token(refresh_token, api_secret)
+
+        return await asyncio.to_thread(_renew)
+
+    def set_session_expiry_hook(self, callback: Callable[[], None]) -> None:
+        """
+        Set callback for session expiry.
+        """
+        self._kite.set_session_expiry_hook(callback)
+
     # ------------------------------------------------------------------ internals
     def _ensure_ticker(self) -> None:
         if self._ticker_running:
