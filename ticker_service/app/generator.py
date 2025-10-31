@@ -345,6 +345,7 @@ class MultiAccountTickerLoop:
             "close": round(new_close, 2),
             "volume": volume,
             "ts": int(time.time()),
+            "is_mock": True,
         }
 
     async def _ensure_mock_option_seed(self, client: KiteClient, instruments: Iterable[Instrument]) -> None:
@@ -451,6 +452,7 @@ class MultiAccountTickerLoop:
             theta=state.theta,
             vega=state.vega,
             timestamp=int(time.time()),
+            is_mock=True,
         )
 
     @staticmethod
@@ -729,7 +731,7 @@ class MultiAccountTickerLoop:
                         break
                     snapshot = self._generate_mock_option_snapshot(instrument)
                     if snapshot:
-                        await publish_option_snapshot(snapshot)
+                        await publish_option_snapshot(snapshot, is_mock=True)
                         emitted += 1
                 if emitted:
                     logger.debug("Published %d mock option snapshots for account %s", emitted, account_id)

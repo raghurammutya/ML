@@ -12,14 +12,17 @@ from .schema import OptionSnapshot
 settings = get_settings()
 
 
-async def publish_option_snapshot(snapshot: OptionSnapshot) -> None:
+async def publish_option_snapshot(snapshot: OptionSnapshot, is_mock: bool = False) -> None:
     channel = f"{settings.publish_channel_prefix}:options"
-    message = json.dumps(snapshot.to_payload())
+    payload = snapshot.to_payload()
+    payload["is_mock"] = is_mock
+    message = json.dumps(payload)
     await redis_publisher.publish(channel, message)
-    logger.debug("Published option snapshot to %s", channel)
+    logger.debug("Published option snapshot to %s (is_mock=%s)", channel, is_mock)
 
 
-async def publish_underlying_bar(bar: Dict[str, Any]) -> None:
+async def publish_underlying_bar(bar: Dict[str, Any], is_mock: bool = False) -> None:
     channel = f"{settings.publish_channel_prefix}:underlying"
+    bar["is_mock"] = is_mock
     await redis_publisher.publish(channel, json.dumps(bar))
-    logger.debug("Published underlying bar to %s", channel)
+    logger.debug("Published underlying bar to %s (is_mock=%s)", channel, is_mock)
