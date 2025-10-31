@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     instrument_refresh_check_seconds: int = Field(
         default=1_800, description="Background poll interval for registry refresh checks (seconds)"
     )
-    instrument_segments: List[str] = Field(default_factory=lambda: ["NFO", "NSE","BSE", "NFO-OPT","NFO-FUT","MCX","CDS"])
+    instrument_segments: List[str] = Field(default_factory=lambda: ["NFO", "NSE", "BSE", "MCX", "CDS"])
     instrument_cache_ttl_seconds: int = Field(
         default=300,
         description="Lifetime for instrument lookup cache (seconds)",
@@ -73,6 +73,36 @@ class Settings(BaseSettings):
     mock_volume_variation: float = Field(
         default=0.15,
         description="Maximum proportional variation applied to mock volumes/OI.",
+    )
+    enable_mock_data: bool = Field(
+        default=True,
+        description="Enable mock data generation outside market hours. Set to False to disable all mock data.",
+    )
+
+    # OrderExecutor configuration
+    order_executor_worker_poll_interval: float = Field(
+        default=1.0,
+        description="Interval in seconds for OrderExecutor worker to poll for pending tasks",
+    )
+    order_executor_worker_error_backoff: float = Field(
+        default=5.0,
+        description="Backoff delay in seconds after OrderExecutor worker encounters an error",
+    )
+    order_executor_max_tasks: int = Field(
+        default=10000,
+        description="Maximum number of tasks to keep in memory before cleanup",
+    )
+
+    # API Authentication configuration
+    api_key_enabled: bool = Field(
+        default=False,
+        env="API_KEY_ENABLED",
+        description="Enable API key authentication. Set to True to require X-API-Key header.",
+    )
+    api_key: str = Field(
+        default="",
+        env="API_KEY",
+        description="API key for authenticating requests. Required when api_key_enabled=True.",
     )
 
     model_config = {

@@ -4,27 +4,97 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+import re
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from .config import get_settings
 from .generator import ticker_loop
 from .instrument_registry import instrument_registry
+from .order_executor import get_executor, init_executor
 from .redis_client import redis_publisher
+from .routes_account import router as account_router
+from .routes_gtt import router as gtt_router
+from .routes_mf import router as mf_router
+from .routes_orders import router as orders_router
+from .routes_portfolio import router as portfolio_router
 from .subscription_store import SubscriptionRecord, subscription_store
 
 settings = get_settings()
 
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+
+
+# PII Sanitization Filter for Logs
+def sanitize_pii(record: dict) -> bool:
+    """
+    Sanitize personally identifiable information from log messages.
+    Redacts: email addresses, phone numbers, and common PII patterns.
+    """
+    if "message" in record:
+        message = record["message"]
+        # Redact email addresses
+        message = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL_REDACTED]', message)
+        # Redact phone numbers (Indian format: 10 digits)
+        message = re.sub(r'\b\d{10}\b', '[PHONE_REDACTED]', message)
+        # Redact potential API keys/tokens (long hex strings)
+        message = re.sub(r'\b[a-fA-F0-9]{32,}\b', '[TOKEN_REDACTED]', message)
+        record["message"] = message
+    return True
+
+
+# Configure loguru with PII filter
+logger.remove()  # Remove default handler
+logger.add(
+    sink=lambda msg: print(msg, end=""),
+    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    filter=sanitize_pii,
+    colorize=True
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     logger.info("Starting %s", settings.app_name)
     await redis_publisher.connect()
     await ticker_loop.start()
+
+    # Initialize OrderExecutor with config values
+    init_executor(
+        max_tasks=settings.order_executor_max_tasks,
+        worker_poll_interval=settings.order_executor_worker_poll_interval,
+        worker_error_backoff=settings.order_executor_worker_error_backoff
+    )
+
+    # Start OrderExecutor worker with client factory
+    executor = get_executor()
+    executor_task = asyncio.create_task(executor.start_worker(ticker_loop.borrow_client))
+    logger.info("OrderExecutor worker started with config: max_tasks=%d, poll_interval=%.1fs, error_backoff=%.1fs",
+                settings.order_executor_max_tasks,
+                settings.order_executor_worker_poll_interval,
+                settings.order_executor_worker_error_backoff)
+
     try:
         yield
     finally:
+        # Stop order executor
+        await executor.stop_worker()
+        try:
+            await asyncio.wait_for(executor_task, timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("OrderExecutor worker did not stop within timeout")
+            executor_task.cancel()
+        logger.info("OrderExecutor worker stopped")
+
         await ticker_loop.stop()
         await redis_publisher.close()
         await instrument_registry.close()
@@ -32,6 +102,61 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ticker Service", lifespan=lifespan)
+
+# Add rate limiter state and exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# Standardized error response handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Global exception handler that returns standardized error responses.
+
+    Response format:
+    {
+        "error": {
+            "type": "ErrorClassName",
+            "message": "Error description",
+            "timestamp": "2025-10-31T07:30:00.000Z"
+        }
+    }
+    """
+    # Handle HTTPException separately to preserve status codes
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "type": "HTTPException",
+                    "message": exc.detail,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+
+    # Log unexpected errors
+    logger.exception(f"Unhandled exception in {request.method} {request.url.path}")
+
+    # Return generic 500 error
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+
+# Include all API routers
+app.include_router(orders_router)
+app.include_router(portfolio_router)
+app.include_router(account_router)
+app.include_router(gtt_router)
+app.include_router(mf_router)
 
 
 class SubscriptionRequest(BaseModel):
@@ -73,12 +198,52 @@ def _to_timestamp(dt: datetime) -> int:
 
 
 @app.get("/health")
-async def health() -> dict[str, object]:
-    return {
+@limiter.limit("60/minute")
+async def health(request: Request) -> dict[str, object]:
+    """
+    Enhanced health check that verifies all critical dependencies.
+    """
+    health_status = {
         "status": "ok",
         "environment": settings.environment,
         "ticker": ticker_loop.runtime_state(),
+        "dependencies": {}
     }
+
+    # Check Redis connectivity
+    try:
+        import json
+        test_message = json.dumps({"timestamp": datetime.now(timezone.utc).isoformat()})
+        await redis_publisher.publish("health:check", test_message)
+        health_status["dependencies"]["redis"] = "ok"
+    except Exception as exc:
+        logger.error(f"Redis health check failed: {exc}")
+        health_status["dependencies"]["redis"] = f"error: {str(exc)}"
+        health_status["status"] = "degraded"
+
+    # Check database connectivity
+    try:
+        from .subscription_store import subscription_store
+        _ = await subscription_store.list_active()
+        health_status["dependencies"]["database"] = "ok"
+    except Exception as exc:
+        logger.error(f"Database health check failed: {exc}")
+        health_status["dependencies"]["database"] = f"error: {str(exc)}"
+        health_status["status"] = "degraded"
+
+    # Check instrument registry
+    try:
+        # Check if instruments cache is populated
+        registry_ok = hasattr(instrument_registry, '_instruments') and instrument_registry._instruments is not None
+        health_status["dependencies"]["instrument_registry"] = "ok" if registry_ok else "not_loaded"
+        if not registry_ok:
+            health_status["status"] = "degraded"
+    except Exception as exc:
+        logger.error(f"Instrument registry health check failed: {exc}")
+        health_status["dependencies"]["instrument_registry"] = f"error: {str(exc)}"
+        health_status["status"] = "degraded"
+
+    return health_status
 
 
 @app.post("/admin/instrument-refresh")
@@ -94,17 +259,40 @@ async def instrument_refresh(force: bool = False) -> dict[str, object]:
 
 
 @app.get("/subscriptions", response_model=List[SubscriptionResponse])
-async def list_subscriptions(status: Optional[str] = None) -> List[SubscriptionResponse]:
+@limiter.limit("100/minute")
+async def list_subscriptions(
+    request: Request,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[SubscriptionResponse]:
+    """
+    List subscriptions with pagination support.
+
+    Args:
+        status: Filter by status ('active' or 'inactive')
+        limit: Maximum number of records to return (default: 100, max: 1000)
+        offset: Number of records to skip (default: 0)
+    """
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be non-negative")
+
     status_normalised = status.lower() if status else None
     if status_normalised not in (None, "active", "inactive"):
         raise HTTPException(status_code=400, detail="status must be 'active', 'inactive', or omitted")
+
     if status_normalised == "active":
         records = await subscription_store.list_active()
     else:
         records = await subscription_store.list_all()
         if status_normalised == "inactive":
             records = [record for record in records if record.status == "inactive"]
-    return [_record_to_response(record) for record in records]
+
+    # Apply pagination
+    paginated_records = records[offset:offset + limit]
+    return [_record_to_response(record) for record in paginated_records]
 
 
 @app.post("/subscriptions", response_model=SubscriptionResponse, status_code=201)
