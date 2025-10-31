@@ -68,11 +68,13 @@ class Settings(BaseSettings):
     log_level: str = "info"
     log_format: str = "json"
     
-    # CORS
-    cors_origins: list[str] = ["*"]
+    # CORS Configuration
+    # Security: In production, specify exact origins instead of "*"
+    # Example: ["https://your-frontend.com", "https://app.yourdomain.com"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
     cors_credentials: bool = True
-    cors_methods: list[str] = ["*"]
-    cors_headers: list[str] = ["*"]
+    cors_methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+    cors_headers: list[str] = ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
     
     class Config:
         env_file = ".env"

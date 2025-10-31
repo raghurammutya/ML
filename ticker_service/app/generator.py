@@ -191,11 +191,18 @@ class MultiAccountTickerLoop:
         continuous: bool = False,
         oi: bool = False,
     ) -> List[Dict[str, Any]]:
+        from .kite_failover import borrow_with_failover
+
         orchestrator = self._orchestrator or SessionOrchestrator()
         if self._orchestrator is None:
             self._orchestrator = orchestrator
-        lease = orchestrator.borrow(account_id) if account_id else orchestrator.borrow()
-        async with lease as client:
+
+        # Use failover mechanism to automatically try next account on API limits
+        async with borrow_with_failover(
+            orchestrator,
+            operation=f"history_fetch[{instrument_token}]",
+            preferred_account=account_id
+        ) as client:
             return await client.fetch_historical(
                 instrument_token=instrument_token,
                 from_ts=from_ts,

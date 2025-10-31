@@ -121,20 +121,17 @@ class UDFHandler:
                     return HistoryResponse(s="error", errmsg=f"Invalid resolution: {resolution}")
                 
                 # Get data
-                print(f"UDF handler START: {symbol}, {from_timestamp}, {to_timestamp}, {resolution}")
-                logger.error(f"UDF handler START: {symbol}, {from_timestamp}, {to_timestamp}, {resolution}")
-                
+                logger.debug(f"UDF history request: symbol={symbol}, from={from_timestamp}, to={to_timestamp}, resolution={resolution}")
+
                 result = await self.data_manager.get_history(
                     symbol, from_timestamp, to_timestamp, resolution
                 )
-                
-                print(f"UDF handler END: received {len(result.get('t', []))} timestamps")
-                logger.error(f"UDF handler END: received {len(result.get('t', []))} timestamps")
-                
-                # Debug: Print first few timestamps
+
+                logger.debug(f"UDF history response: {len(result.get('t', []))} bars returned for {symbol}")
+
+                # Debug: Log first few timestamps
                 if result.get('t'):
-                    print(f"DEBUG: First 3 timestamps: {result['t'][:3]}")
-                    logger.error(f"TIMESTAMP DEBUG: {result['t'][:3]}")
+                    logger.debug(f"First 3 timestamps for {symbol}: {result['t'][:3]}")
                 
                 # Track metrics
                 duration = time.time() - start_time

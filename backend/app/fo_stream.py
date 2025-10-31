@@ -155,13 +155,21 @@ class FOAggregator:
         except (TypeError, ValueError):
             volume_val = 0.0
 
+        # Use lock to protect data collection and conversion
+        # This prevents race conditions between collection and persistence
         async with self._lock:
             self._last_underlying[symbol] = close_val
             self._update_underlying_buffers(symbol, close_val, volume_val, ts)
             underlying_flush = self._collect_underlying_flush(ts)
             flush_payloads = self._collect_flush_payloads(ts)
 
-        await self._persist_underlying_bars(self._convert_underlying_items(underlying_flush))
+            # Convert data while holding lock to ensure consistency
+            underlying_converted = self._convert_underlying_items(underlying_flush)
+
+        # Persist after releasing lock
+        # Note: flush_payloads data is already removed from buffers (via pop()),
+        # so it's safe to persist after lock release
+        await self._persist_underlying_bars(underlying_converted)
         await self._persist_batches(flush_payloads)
 
     async def handle_option(self, payload: Dict[str, object]) -> None:
@@ -236,7 +244,6 @@ class FOAggregator:
             for tf, key, bucket in items:
                 persist = tf in self._persist_timeframes
                 await self._persist_bucket(tf, key, bucket, persist)
-
 
     async def _persist_bucket(self, timeframe: str, key: Tuple[str, date, int], bucket: StrikeBucket, persist: bool) -> None:
         symbol, expiry, bucket_ts = key
@@ -400,8 +407,6 @@ class FOAggregator:
                 await self._dm.upsert_underlying_bars(items)
             except Exception as exc:
                 logger.error("Failed to upsert underlying bars: %s", exc, exc_info=True)
-
-
 
     def _convert_underlying_items(
         self,

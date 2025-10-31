@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 import asyncpg
 
 from .config import get_settings
+from .utils import normalize_symbol, get_symbol_variants, normalize_timeframe
 
 logger = logging.getLogger("app.database")
 
@@ -57,83 +58,23 @@ def _bucket_label(raw: str | None) -> str:
     if any(k in s for k in ("bull", "buy", "long")):
         return "Bullish"
     return "Neutral"
+# Legacy function aliases for backward compatibility
+# Use shared utils instead: from .utils import normalize_symbol, get_symbol_variants
 def _normalize_symbol(symbol: str) -> str:
-    """
-    Canonicalise an incoming symbol string by trimming whitespace, removing
-    exchange prefixes and squashing spaces. Known aliases (e.g. NIFTY50) are
-    folded into their canonical counterparts, but other symbols are left as-is
-    once normalised.
-    """
-    s = (symbol or "").strip().upper()
-    if not s:
-        return ""
-    if ":" in s:
-        s = s.split(":")[-1]
-    if s.startswith("^"):
-        s = s[1:]
-    s = s.replace(" ", "")
-    aliases = {
-        "NSEI": "NIFTY50",
-        "NIFTY": "NIFTY50",
-    }
-    return aliases.get(s, s)
+    """Deprecated: Use utils.normalize_symbol() instead."""
+    return normalize_symbol(symbol)
 
 
 def _symbol_variants(symbol: str) -> List[str]:
-    """
-    Return the canonical symbol alongside any common aliases so we can
-    gracefully query mixed historical datasets (e.g. FO tables that still
-    use NIFTY while the canonical minute bars now use NIFTY50).
-    """
-    primary = _normalize_symbol(symbol)
-    aliases: Dict[str, Set[str]] = {
-        "NIFTY50": {"NIFTY"},
-        "NIFTY": {"NIFTY50"},
-    }
-    variants = {primary}
-    variants.update(aliases.get(primary, set()))
-    return list(variants)
+    """Deprecated: Use utils.get_symbol_variants() instead."""
+    return get_symbol_variants(symbol)
 
 
+# Legacy function alias for backward compatibility
+# Use shared utils instead: from .utils import normalize_timeframe
 def _normalize_timeframe(resolution: str) -> str:
-    """
-    Convert UI resolution into DB timeframe strings.
-    Common DB formats: '1min', '2min', '5min', '15min', '30min', '1hour', '1day'.
-    """
-    r = str(resolution).strip().lower()
-    
-    # Handle special cases first
-    if r in {"60", "1h", "60min", "1hour"}:
-        return "1hour"
-    if r in {"1d", "d", "day", "1day"}:
-        return "1day"
-    
-    # Handle minute intervals
-    if r.isdigit():
-        minutes = int(r)
-        if minutes <= 30:
-            return f"{minutes}min"  # '1' -> '1min', '15' -> '15min'
-        elif minutes == 60:
-            return "1hour"
-        else:
-            return f"{minutes}min"  # fallback
-    
-    if r.endswith("m") and r[:-1].isdigit():
-        return f"{int(r[:-1])}min"  # '15m' -> '15min'
-    
-    # Seconds like "120", "300", "900", …
-    if r.isdigit() and int(r) in (60, 120, 180, 300, 600, 900, 1800, 3600):
-        seconds = int(r)
-        if seconds == 3600:
-            return "1hour"
-        else:
-            return f"{seconds//60}min"
-    
-    # Already like 'Xmin'
-    if r.endswith("min") and r[:-3].isdigit():
-        return r
-
-    return r
+    """Deprecated: Use utils.normalize_timeframe() instead."""
+    return normalize_timeframe(resolution)
 
 
 def _timeframe_to_resolution(resolution: str) -> int:
@@ -578,138 +519,6 @@ class DataManager:
         return {"marks": marks}
 
     # ---------- FO DATA ----------
-    async def upsert_fo_strike_rows(self, rows: List[Dict[str, Any]]) -> None:
-        if not rows:
-            return
-        sql = """
-            INSERT INTO fo_option_strike_bars (
-                bucket_time,
-                timeframe,
-                symbol,
-                expiry,
-                strike,
-                underlying_close,
-                call_iv_avg,
-                put_iv_avg,
-                call_delta_avg,
-                put_delta_avg,
-                call_gamma_avg,
-                put_gamma_avg,
-                call_theta_avg,
-                put_theta_avg,
-                call_vega_avg,
-                put_vega_avg,
-                call_volume,
-                put_volume,
-                call_count,
-                put_count,
-                call_oi_sum,
-                put_oi_sum
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
-            )
-            ON CONFLICT (symbol, expiry, timeframe, bucket_time, strike)
-            DO UPDATE SET
-                underlying_close = EXCLUDED.underlying_close,
-                call_iv_avg = EXCLUDED.call_iv_avg,
-                put_iv_avg = EXCLUDED.put_iv_avg,
-                call_delta_avg = EXCLUDED.call_delta_avg,
-                put_delta_avg = EXCLUDED.put_delta_avg,
-                call_gamma_avg = EXCLUDED.call_gamma_avg,
-                put_gamma_avg = EXCLUDED.put_gamma_avg,
-                call_theta_avg = EXCLUDED.call_theta_avg,
-                put_theta_avg = EXCLUDED.put_theta_avg,
-                call_vega_avg = EXCLUDED.call_vega_avg,
-                put_vega_avg = EXCLUDED.put_vega_avg,
-                call_volume = EXCLUDED.call_volume,
-                put_volume = EXCLUDED.put_volume,
-                call_count = EXCLUDED.call_count,
-                put_count = EXCLUDED.put_count,
-                call_oi_sum = EXCLUDED.call_oi_sum,
-                put_oi_sum = EXCLUDED.put_oi_sum,
-                updated_at = NOW()
-        """
-        records = []
-        for row in rows:
-            call = row["call"]
-            put = row["put"]
-            call_oi = call.get("oi") if isinstance(call, dict) else None
-            put_oi = put.get("oi") if isinstance(put, dict) else None
-            records.append((
-                row["bucket_time"],
-                _normalize_timeframe(row["timeframe"]),
-                _normalize_symbol(row["symbol"]),
-                row["expiry"],
-                float(row["strike"]),
-                row.get("underlying_close"),
-                call.get("iv"),
-                put.get("iv"),
-                call.get("delta"),
-                put.get("delta"),
-                call.get("gamma"),
-                put.get("gamma"),
-                call.get("theta"),
-                put.get("theta"),
-                call.get("vega"),
-                put.get("vega"),
-                call.get("volume"),
-                put.get("volume"),
-                call.get("count"),
-                put.get("count"),
-                float(call_oi) if call_oi is not None else None,
-                float(put_oi) if put_oi is not None else None,
-            ))
-        async with self.pool.acquire() as conn:
-            await conn.executemany(sql, records)
-
-    async def upsert_fo_expiry_metrics(self, rows: List[Dict[str, Any]]) -> None:
-        if not rows:
-            return
-        sql = """
-            INSERT INTO fo_expiry_metrics (
-                bucket_time,
-                timeframe,
-                symbol,
-                expiry,
-                underlying_close,
-                total_call_volume,
-                total_put_volume,
-                total_call_oi,
-                total_put_oi,
-                pcr,
-                max_pain_strike
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
-            )
-            ON CONFLICT (symbol, expiry, timeframe, bucket_time)
-            DO UPDATE SET
-                underlying_close = EXCLUDED.underlying_close,
-                total_call_volume = EXCLUDED.total_call_volume,
-                total_put_volume = EXCLUDED.total_put_volume,
-                total_call_oi = EXCLUDED.total_call_oi,
-                total_put_oi = EXCLUDED.total_put_oi,
-                pcr = EXCLUDED.pcr,
-                max_pain_strike = EXCLUDED.max_pain_strike,
-                updated_at = NOW()
-        """
-        records = [
-            (
-                row["bucket_time"],
-                _normalize_timeframe(row["timeframe"]),
-                _normalize_symbol(row["symbol"]),
-                row["expiry"],
-                row.get("underlying_close"),
-                row.get("total_call_volume"),
-                row.get("total_put_volume"),
-                row.get("total_call_oi"),
-                row.get("total_put_oi"),
-                row.get("pcr"),
-                row.get("max_pain_strike"),
-            )
-            for row in rows
-        ]
-        async with self.pool.acquire() as conn:
-            await conn.executemany(sql, records)
 
     async def upsert_underlying_bars(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:

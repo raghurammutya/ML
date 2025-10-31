@@ -1,11 +1,12 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 import asyncio
 import logging
 from datetime import datetime, timedelta, date
 import asyncpg
 
-from ..database import create_pool
+from ..database import DataManager
+from .indicators import get_data_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,7 +19,8 @@ async def get_historical_series(
     expiry: Optional[str] = Query(None, description="Expiry date (YYYY-MM-DD)"),
     timeframe: str = Query("1min", description="Timeframe (1min, 5min, 15min, etc.)"),
     start: Optional[str] = Query(None, description="Start time (ISO format)"),
-    end: Optional[str] = Query(None, description="End time (ISO format)")
+    end: Optional[str] = Query(None, description="End time (ISO format)"),
+    data_manager: DataManager = Depends(get_data_manager)
 ):
     """
     Fetch historical series data for popup charts.
@@ -37,11 +39,11 @@ async def get_historical_series(
         else:
             end_time = datetime.utcnow()
 
-        pool = await create_pool()
-        if not pool:
+        # Use shared pool from DataManager (no pool leak!)
+        if not data_manager.pool:
             raise HTTPException(status_code=500, detail="Database connection unavailable")
 
-        async with pool.acquire() as conn:
+        async with data_manager.pool.acquire() as conn:
             # Handle strike-based queries (vertical panels)
             if strike and expiry:
                 # Query option candles and metrics for specific strike

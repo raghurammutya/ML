@@ -124,29 +124,32 @@ async def create_label(
         metadata_dict['timeframe'] = _normalize_timeframe(metadata_dict['timeframe'])
         
         label_id = str(uuid.uuid4())
-        
+
         async with pool.acquire() as conn:
-            # Insert new label with metadata-only
-            await conn.execute("""
-                INSERT INTO ml_labels (id, user_id, symbol, label_type, metadata, tags)
-                VALUES ($1, $2, $3, $4, $5, $6)
-            """, 
-                label_id, 
-                current_user, 
-                symbol_normalized, 
-                label_data.label_type, 
-                json.dumps(metadata_dict),
-                label_data.tags or []
-            )
-        
-        # Broadcast WebSocket delta
-        await broadcast_label_delta("label.create", {
-            "id": label_id,
-            "user_id": current_user,
-            "symbol": symbol_normalized,
-            "label_type": label_data.label_type,
-            "metadata": metadata_dict
-        })
+            # Use transaction to ensure atomicity
+            async with conn.transaction():
+                # Insert new label with metadata-only
+                await conn.execute("""
+                    INSERT INTO ml_labels (id, user_id, symbol, label_type, metadata, tags)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                    label_id,
+                    current_user,
+                    symbol_normalized,
+                    label_data.label_type,
+                    json.dumps(metadata_dict),
+                    label_data.tags or []
+                )
+
+                # Broadcast WebSocket delta within transaction
+                # If broadcast fails, transaction will rollback
+                await broadcast_label_delta("label.create", {
+                    "id": label_id,
+                    "user_id": current_user,
+                    "symbol": symbol_normalized,
+                    "label_type": label_data.label_type,
+                    "metadata": metadata_dict
+                })
         
         logger.info(f"Created label {label_id} for {symbol_normalized}")
         return LabelResponse(id=label_id, success=True, message="Label created")
@@ -169,64 +172,66 @@ async def update_label(
         current_user = get_current_user()
         
         async with pool.acquire() as conn:
-            # Check if label exists and belongs to user
-            existing = await conn.fetchrow("""
-                SELECT metadata FROM ml_labels 
-                WHERE id = $1 AND user_id = $2
-            """, label_id, current_user)
-            
-            if not existing:
-                raise HTTPException(404, "Label not found")
-            
-            # Merge metadata if provided
-            current_metadata = json.loads(existing['metadata'])
-            if updates.metadata:
-                current_metadata.update(updates.metadata.dict(exclude_unset=True))
-            
-            # Prepare update query
-            update_fields = []
-            params = []
-            param_count = 1
-            
-            if updates.label_type:
-                update_fields.append(f"label_type = ${param_count}")
-                params.append(updates.label_type)
-                param_count += 1
-            
-            if updates.metadata:
-                update_fields.append(f"metadata = ${param_count}")
-                params.append(json.dumps(current_metadata))
-                param_count += 1
-            
-            if updates.tags is not None:
-                update_fields.append(f"tags = ${param_count}")
-                params.append(updates.tags)
-                param_count += 1
-            
-            update_fields.append(f"updated_at = NOW()")
-            params.extend([label_id, current_user])
-            
-            if update_fields:
-                query = f"""
-                    UPDATE ml_labels 
-                    SET {', '.join(update_fields)}
-                    WHERE id = ${param_count} AND user_id = ${param_count + 1}
-                """
-                await conn.execute(query, *params)
-        
-        # Broadcast WebSocket delta
-        patch_data = {}
-        if updates.label_type:
-            patch_data["label_type"] = updates.label_type
-        if updates.metadata:
-            patch_data["metadata"] = updates.metadata.dict(exclude_unset=True)
-        if updates.tags is not None:
-            patch_data["tags"] = updates.tags
-            
-        await broadcast_label_delta("label.update", {
-            "id": label_id,
-            "patch": patch_data
-        })
+            # Use transaction for atomicity
+            async with conn.transaction():
+                # Check if label exists and belongs to user
+                existing = await conn.fetchrow("""
+                    SELECT metadata FROM ml_labels
+                    WHERE id = $1 AND user_id = $2
+                """, label_id, current_user)
+
+                if not existing:
+                    raise HTTPException(404, "Label not found")
+
+                # Merge metadata if provided
+                current_metadata = json.loads(existing['metadata'])
+                if updates.metadata:
+                    current_metadata.update(updates.metadata.dict(exclude_unset=True))
+
+                # Prepare update query
+                update_fields = []
+                params = []
+                param_count = 1
+
+                if updates.label_type:
+                    update_fields.append(f"label_type = ${param_count}")
+                    params.append(updates.label_type)
+                    param_count += 1
+
+                if updates.metadata:
+                    update_fields.append(f"metadata = ${param_count}")
+                    params.append(json.dumps(current_metadata))
+                    param_count += 1
+
+                if updates.tags is not None:
+                    update_fields.append(f"tags = ${param_count}")
+                    params.append(updates.tags)
+                    param_count += 1
+
+                update_fields.append(f"updated_at = NOW()")
+                params.extend([label_id, current_user])
+
+                if update_fields:
+                    query = f"""
+                        UPDATE ml_labels
+                        SET {', '.join(update_fields)}
+                        WHERE id = ${param_count} AND user_id = ${param_count + 1}
+                    """
+                    await conn.execute(query, *params)
+
+                # Broadcast WebSocket delta within transaction
+                patch_data = {}
+                if updates.label_type:
+                    patch_data["label_type"] = updates.label_type
+                if updates.metadata:
+                    patch_data["metadata"] = updates.metadata.dict(exclude_unset=True)
+                if updates.tags is not None:
+                    patch_data["tags"] = updates.tags
+
+                await broadcast_label_delta("label.update", {
+                    "id": label_id,
+                    "patch": patch_data
+                })
         
         logger.info(f"Updated label {label_id}")
         return LabelResponse(id=label_id, success=True, message="Label updated")
@@ -248,46 +253,49 @@ async def delete_label(
         current_user = get_current_user()
         
         async with pool.acquire() as conn:
-            if label_data.id:
-                # Delete by ID
-                result = await conn.execute("""
-                    DELETE FROM ml_labels
-                    WHERE id = $1 AND user_id = $2
-                """, label_data.id, current_user)
-                label_id = label_data.id
-            else:
-                # Delete by symbol/timeframe/timestamp (legacy support)
-                if not all([label_data.symbol, label_data.timeframe, label_data.timestamp]):
-                    raise HTTPException(400, "Either id or symbol+timeframe+timestamp required")
+            # Use transaction for atomicity
+            async with conn.transaction():
+                if label_data.id:
+                    # Delete by ID
+                    result = await conn.execute("""
+                        DELETE FROM ml_labels
+                        WHERE id = $1 AND user_id = $2
+                    """, label_data.id, current_user)
+                    label_id = label_data.id
+                else:
+                    # Delete by symbol/timeframe/timestamp (legacy support)
+                    if not all([label_data.symbol, label_data.timeframe, label_data.timestamp]):
+                        raise HTTPException(400, "Either id or symbol+timeframe+timestamp required")
+
+                    symbol_normalized = _normalize_symbol(label_data.symbol)
+                    timeframe = _normalize_timeframe(label_data.timeframe)
+                    timestamp_utc = datetime.fromtimestamp(label_data.timestamp).isoformat() + "Z"
+
+                    # Find label by metadata
+                    label_row = await conn.fetchrow("""
+                        SELECT id FROM ml_labels
+                        WHERE user_id = $1 AND symbol = $2
+                        AND metadata->>'timeframe' = $3
+                        AND metadata->>'nearest_candle_timestamp_utc' = $4
+                    """, current_user, symbol_normalized, timeframe, timestamp_utc)
+
+                    if not label_row:
+                        return LabelResponse(success=False, message="No label found to delete")
                 
-                symbol_normalized = _normalize_symbol(label_data.symbol)
-                timeframe = _normalize_timeframe(label_data.timeframe)
-                timestamp_utc = datetime.fromtimestamp(label_data.timestamp).isoformat() + "Z"
-                
-                # Find label by metadata
-                label_row = await conn.fetchrow("""
-                    SELECT id FROM ml_labels
-                    WHERE user_id = $1 AND symbol = $2 
-                    AND metadata->>'timeframe' = $3
-                    AND metadata->>'nearest_candle_timestamp_utc' = $4
-                """, current_user, symbol_normalized, timeframe, timestamp_utc)
-                
-                if not label_row:
-                    return LabelResponse(success=False, message="No label found to delete")
-                
-                label_id = label_row['id']
-                result = await conn.execute("""
-                    DELETE FROM ml_labels WHERE id = $1
-                """, label_id)
-            
-            rows_deleted = int(result.split()[-1])
-            
+                    label_id = label_row['id']
+                    result = await conn.execute("""
+                        DELETE FROM ml_labels WHERE id = $1
+                    """, label_id)
+
+                rows_deleted = int(result.split()[-1])
+
+                if rows_deleted > 0:
+                    # Broadcast WebSocket delta within transaction
+                    await broadcast_label_delta("label.delete", {
+                        "id": label_id
+                    })
+
         if rows_deleted > 0:
-            # Broadcast WebSocket delta
-            await broadcast_label_delta("label.delete", {
-                "id": label_id
-            })
-            
             logger.info(f"Deleted label {label_id}")
             return LabelResponse(success=True, message="Label deleted")
         else:

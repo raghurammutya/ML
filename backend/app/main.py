@@ -25,7 +25,7 @@ from .backfill import BackfillManager
 from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts
 
 # -------- logging --------
 logging.basicConfig(
@@ -176,6 +176,7 @@ async def lifespan(app: FastAPI):
 
         app.include_router(nifty_monitor.router)
         app.include_router(replay.router)
+        app.include_router(accounts.router)
 
         if settings.fo_stream_enabled:
             fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
@@ -214,6 +215,9 @@ async def lifespan(app: FastAPI):
         if ticker_client:
             await ticker_client.close()
 
+        # Cleanup AccountService HTTP client
+        await accounts.cleanup_account_service()
+
         logger.info("Shutdown complete")
 
 
@@ -224,25 +228,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS - Configure allowed origins for security
+# In production, ensure cors_origins in config.py contains only trusted domains
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_credentials,
     allow_methods=settings.cors_methods,
     allow_headers=settings.cors_headers,
+    max_age=600,  # Cache preflight requests for 10 minutes
 )
+
+# Custom middleware for correlation ID tracking and request logging
+from .middleware import CorrelationIdMiddleware, RequestLoggingMiddleware, ErrorHandlingMiddleware
+
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(CorrelationIdMiddleware)
 
 
 # -------- middleware --------
 @app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
+async def add_process_time_and_metrics(request: Request, call_next):
+    """Add metrics tracking (keeps existing functionality)."""
     start = time.time()
     resp = await call_next(request)
     dur = time.time() - start
 
     track_request_metrics(request.method, request.url.path, resp.status_code, dur)
-    resp.headers["X-Process-Time"] = str(dur)
+    # Note: X-Process-Time is now added by RequestLoggingMiddleware
     return resp
 
 

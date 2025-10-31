@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 import logging
 import asyncpg
 
-from ..database import create_pool, _normalize_symbol, _normalize_timeframe
+from ..database import DataManager, _normalize_symbol, _normalize_timeframe
+from .indicators import get_data_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/replay", tags=["replay"])
@@ -18,7 +19,8 @@ async def get_replay_window(
     end: str = Query(..., description="End time (ISO format)"),
     expiries: str = Query(..., description="Comma-separated expiry dates"),
     strikes: Optional[str] = Query(None, description="Comma-separated strikes"),
-    panels: str = Query(..., description="Comma-separated panel IDs")
+    panels: str = Query(..., description="Comma-separated panel IDs"),
+    data_manager: DataManager = Depends(get_data_manager)
 ):
     """
     Fetch historical window for replay mode.
@@ -35,11 +37,11 @@ async def get_replay_window(
         normalized_tf = _normalize_timeframe(timeframe)
         symbol_db = _normalize_symbol(underlying)
 
-        pool = await create_pool()
-        if not pool:
+        # Use shared pool from DataManager (no pool leak!)
+        if not data_manager.pool:
             raise HTTPException(status_code=500, detail="Database connection unavailable")
 
-        async with pool.acquire() as conn:
+        async with data_manager.pool.acquire() as conn:
             # Fetch price series (underlying candles)
             price_query = """
                 SELECT
