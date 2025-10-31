@@ -26,7 +26,9 @@ from .routes_gtt import router as gtt_router
 from .routes_mf import router as mf_router
 from .routes_orders import router as orders_router
 from .routes_portfolio import router as portfolio_router
+from .routes_trading_accounts import router as trading_accounts_router
 from .subscription_store import SubscriptionRecord, subscription_store
+from .account_store import initialize_account_store, get_account_store
 
 settings = get_settings()
 
@@ -65,9 +67,25 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+    import os
 
     logger.info("Starting %s", settings.app_name)
     await redis_publisher.connect()
+
+    # Initialize Account Store for dynamic account management
+    try:
+        # Build database connection string from settings
+        db_conn_string = (
+            f"postgresql://{settings.instrument_db_user}:{settings.instrument_db_password}"
+            f"@{settings.instrument_db_host}:{settings.instrument_db_port}/{settings.instrument_db_name}"
+        )
+        encryption_key = os.getenv("ACCOUNT_ENCRYPTION_KEY")
+        await initialize_account_store(db_conn_string, encryption_key)
+        logger.info("Account store initialized")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize account store: {exc}")
+        logger.warning("Trading account management endpoints will not be available")
+
     await ticker_loop.start()
 
     # Initialize OrderExecutor with config values
@@ -100,6 +118,15 @@ async def lifespan(app: FastAPI):
         await ticker_loop.stop()
         await redis_publisher.close()
         await instrument_registry.close()
+
+        # Close account store
+        try:
+            account_store = get_account_store()
+            await account_store.close()
+            logger.info("Account store closed")
+        except RuntimeError:
+            pass  # Account store was not initialized
+
         logger.info("Shutdown complete")
 
 
@@ -166,6 +193,9 @@ app.include_router(mf_router)
 # Include advanced features router
 from .routes_advanced import router as advanced_router
 app.include_router(advanced_router)
+
+# Include trading accounts management router
+app.include_router(trading_accounts_router)
 
 
 class SubscriptionRequest(BaseModel):

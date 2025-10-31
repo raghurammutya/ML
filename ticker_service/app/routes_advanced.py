@@ -340,3 +340,114 @@ async def websocket_stats():
     return {
         "total_connections": order_stream_manager.get_connection_count()
     }
+
+
+# ============================================================================
+# Mock Data Control
+# ============================================================================
+
+@router.post("/mock-data/enable", dependencies=[Depends(verify_api_key)])
+async def enable_mock_data():
+    """
+    Enable mock data generation outside market hours.
+
+    When enabled, the ticker service will generate simulated market data
+    when markets are closed (outside of market_open_time to market_close_time).
+
+    This is useful for:
+    - Testing and development outside market hours
+    - Demo environments
+    - Continuous data flow for UI testing
+
+    Returns:
+        {
+            "success": true,
+            "mock_data_enabled": true,
+            "message": "Mock data generation enabled"
+        }
+    """
+    from .config import get_settings
+
+    settings = get_settings()
+    settings.enable_mock_data = True
+
+    logger.info("Mock data generation enabled via API")
+
+    return {
+        "success": True,
+        "mock_data_enabled": True,
+        "message": "Mock data generation enabled. Simulated data will be published outside market hours."
+    }
+
+
+@router.post("/mock-data/disable", dependencies=[Depends(verify_api_key)])
+async def disable_mock_data():
+    """
+    Disable mock data generation outside market hours.
+
+    When disabled, the ticker service will NOT generate any data outside market hours.
+    Only real market data during trading hours will be published.
+
+    Use this in production to ensure only real market data is used.
+
+    Returns:
+        {
+            "success": true,
+            "mock_data_enabled": false,
+            "message": "Mock data generation disabled"
+        }
+    """
+    from .config import get_settings
+
+    settings = get_settings()
+    settings.enable_mock_data = False
+
+    logger.info("Mock data generation disabled via API")
+
+    return {
+        "success": True,
+        "mock_data_enabled": False,
+        "message": "Mock data generation disabled. No data will be published outside market hours."
+    }
+
+
+@router.get("/mock-data/status")
+async def get_mock_data_status():
+    """
+    Get current mock data generation status.
+
+    Returns the current state of mock data generation and market hours information.
+
+    Returns:
+        {
+            "mock_data_enabled": true,
+            "market_hours": {
+                "open": "09:15",
+                "close": "15:30",
+                "timezone": "Asia/Kolkata"
+            },
+            "is_market_hours": false
+        }
+    """
+    from .config import get_settings
+    from .generator import ticker_loop
+
+    settings = get_settings()
+
+    # Get current market hours status
+    is_market_hours = ticker_loop._is_market_hours() if hasattr(ticker_loop, '_is_market_hours') else None
+
+    return {
+        "mock_data_enabled": settings.enable_mock_data,
+        "market_hours": {
+            "open": settings.market_open_time.strftime("%H:%M"),
+            "close": settings.market_close_time.strftime("%H:%M"),
+            "timezone": settings.market_timezone
+        },
+        "is_market_hours": is_market_hours,
+        "mock_config": {
+            "price_variation_bps": settings.mock_price_variation_bps,
+            "volume_variation": settings.mock_volume_variation,
+            "history_minutes": settings.mock_history_minutes
+        }
+    }

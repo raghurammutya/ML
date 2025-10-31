@@ -207,3 +207,71 @@ class AccountRequest(BaseModel):
 class MarginSegmentRequest(BaseModel):
     segment: Optional[str] = Field(None, description="equity or commodity")
     account_id: str = Field(default="primary")
+
+
+# ------------------------------------------------------------------ Account Management Models
+class CreateTradingAccountRequest(BaseModel):
+    account_id: str = Field(..., description="Unique account identifier", min_length=1, max_length=50)
+    api_key: str = Field(..., description="Kite Connect API key", min_length=1)
+    api_secret: Optional[str] = Field(None, description="Kite Connect API secret")
+    access_token: Optional[str] = Field(None, description="Access token for API authentication")
+    username: Optional[str] = Field(None, description="Kite login username")
+    password: Optional[str] = Field(None, description="Kite login password")
+    totp_key: Optional[str] = Field(None, description="TOTP key for 2FA")
+    token_dir: Optional[str] = Field(None, description="Directory path for storing tokens")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+
+class UpdateTradingAccountRequest(BaseModel):
+    api_key: Optional[str] = Field(None, description="Kite Connect API key")
+    api_secret: Optional[str] = Field(None, description="Kite Connect API secret")
+    access_token: Optional[str] = Field(None, description="Access token for API authentication")
+    username: Optional[str] = Field(None, description="Kite login username")
+    password: Optional[str] = Field(None, description="Kite login password")
+    totp_key: Optional[str] = Field(None, description="TOTP key for 2FA")
+    token_dir: Optional[str] = Field(None, description="Directory path for storing tokens")
+    is_active: Optional[bool] = Field(None, description="Whether account is active")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+
+class TradingAccountResponse(BaseModel):
+    account_id: str
+    api_key: str  # Will be masked in response
+    api_secret: Optional[str] = None  # Will be masked in response
+    access_token: Optional[str] = None  # Will be masked in response
+    username: Optional[str] = None
+    password: Optional[str] = None  # Will be masked in response
+    totp_key: Optional[str] = None  # Will be masked in response
+    token_dir: Optional[str] = None
+    is_active: bool
+    created_at: str
+    updated_at: str
+    metadata: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_db(cls, account: Dict[str, Any], mask_sensitive: bool = True) -> "TradingAccountResponse":
+        """Create response from database account, optionally masking sensitive fields"""
+        if mask_sensitive:
+            return cls(
+                account_id=account["account_id"],
+                api_key=cls._mask_string(account.get("api_key", "")),
+                api_secret=cls._mask_string(account.get("api_secret")) if account.get("api_secret") else None,
+                access_token=cls._mask_string(account.get("access_token")) if account.get("access_token") else None,
+                username=account.get("username"),
+                password=cls._mask_string(account.get("password")) if account.get("password") else None,
+                totp_key=cls._mask_string(account.get("totp_key")) if account.get("totp_key") else None,
+                token_dir=account.get("token_dir"),
+                is_active=account["is_active"],
+                created_at=account["created_at"],
+                updated_at=account["updated_at"],
+                metadata=account.get("metadata")
+            )
+        else:
+            return cls(**account)
+
+    @staticmethod
+    def _mask_string(value: str) -> str:
+        """Mask sensitive string, showing first 4 and last 4 characters"""
+        if not value or len(value) <= 8:
+            return "****"
+        return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"

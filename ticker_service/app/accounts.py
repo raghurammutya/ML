@@ -300,3 +300,73 @@ class SessionOrchestrator:
             }
             for session in self._rotation
         ]
+
+    async def reload_accounts(self, accounts_from_db: List[Dict[str, Any]]) -> None:
+        """
+        Reload trading accounts from database dynamically.
+
+        This allows adding/removing accounts without service restart.
+
+        Args:
+            accounts_from_db: List of account dicts from database with decrypted credentials
+        """
+        from pathlib import Path
+
+        logger.info(f"Reloading accounts from database ({len(accounts_from_db)} accounts)")
+
+        # Convert database accounts to KiteAccount objects
+        new_accounts: Dict[str, KiteAccount] = {}
+        for db_account in accounts_from_db:
+            if not db_account.get("is_active", True):
+                logger.debug(f"Skipping inactive account: {db_account['account_id']}")
+                continue
+
+            # Convert to KiteAccount
+            account_id = db_account["account_id"]
+            token_dir = db_account.get("token_dir")
+            if token_dir:
+                token_dir = Path(token_dir)
+            else:
+                # Default token directory
+                token_dir = Path(__file__).parent.parent / "tokens"
+
+            new_accounts[account_id] = KiteAccount(
+                account_id=account_id,
+                api_key=db_account["api_key"],
+                api_secret=db_account.get("api_secret"),
+                access_token=db_account.get("access_token"),
+                username=db_account.get("username"),
+                password=db_account.get("password"),
+                totp_key=db_account.get("totp_key"),
+                token_dir=token_dir
+            )
+            logger.debug(f"Loaded account {account_id} from database")
+
+        if not new_accounts:
+            raise RuntimeError("No active accounts loaded from database")
+
+        # Close old sessions (release connections, cleanup)
+        old_account_ids = set(self._accounts.keys())
+        new_account_ids = set(new_accounts.keys())
+
+        removed_accounts = old_account_ids - new_account_ids
+        added_accounts = new_account_ids - old_account_ids
+
+        logger.info(f"Accounts removed: {removed_accounts or 'none'}")
+        logger.info(f"Accounts added: {added_accounts or 'none'}")
+
+        # Update internal state
+        self._accounts = new_accounts
+        self._sessions.clear()
+
+        # Create new sessions
+        for account_id, account in self._accounts.items():
+            client = KiteClient.from_account(account)
+            self._sessions[account_id] = AccountSession(account_id=account_id, client=client)
+            logger.debug(f"Created new session for account {account_id}")
+
+        # Update rotation list
+        self._rotation = list(self._sessions.values())
+        self._rr_index = 0
+
+        logger.info(f"Account reload complete. Active accounts: {', '.join(self.list_accounts())}")
