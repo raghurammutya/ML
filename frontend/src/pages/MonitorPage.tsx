@@ -5,6 +5,9 @@ import HorizontalPanel from '../components/nifty-monitor/HorizontalPanel'
 import VerticalPanel from '../components/nifty-monitor/VerticalPanel'
 import { MonitorSyncProvider } from '../components/nifty-monitor/MonitorSyncContext'
 import DerivativesChartPopup from '../components/ShowChartPopup/DerivativesChartPopup'
+import ReplayControls from '../components/nifty-monitor/ReplayControls'
+import ReplayWatermark from '../components/nifty-monitor/ReplayWatermark'
+import { useReplayMode } from '../hooks/useReplayMode'
 import type {
   FoIndicatorDefinition,
   FoMoneynessSeries,
@@ -134,6 +137,30 @@ const MonitorPage = () => {
   const verticalLoadIdRef = useRef(0)
   const sessionIdRef = useRef<string | null>(null)
   const canonicalSymbol = useMemo(() => normalizeSymbol(symbol), [symbol])
+
+  // Sprint 3: Replay mode and performance mode
+  const [performanceMode, setPerformanceMode] = useState(false)
+
+  // Collect panel IDs for replay mode
+  const activePanelIds = useMemo(() => {
+    const ids: string[] = []
+    Object.entries(panelState).forEach(([id, state]) => {
+      if (state.enabled) {
+        const indicator = indicators.find(ind => ind.id === id)
+        if (indicator) {
+          ids.push(`${indicator.option_side}_${indicator.indicator}`)
+        }
+      }
+    })
+    return ids
+  }, [panelState, indicators])
+
+  const { state: replayState, controls: replayControls, speedPresets } = useReplayMode(
+    canonicalSymbol,
+    `${timeframe}min`,
+    selectedExpiries,
+    activePanelIds
+  )
 
   const extractPrice = useCallback((payload: Record<string, unknown> | null | undefined): number | null => {
     if (!payload || typeof payload !== 'object') return null
@@ -696,6 +723,26 @@ const MonitorPage = () => {
                     ? 'Starting…'
                     : 'Idle'}
             </div>
+
+            {/* Sprint 3: Replay Mode Button */}
+            <button
+              className="monitor-chip"
+              style={{ cursor: 'pointer', fontWeight: replayState.isActive ? '600' : '400' }}
+              onClick={replayState.isActive ? replayControls.exit : replayControls.enter}
+              title={replayState.isActive ? 'Exit Replay Mode' : 'Enter Replay Mode'}
+            >
+              {replayState.isActive ? '⏸ Replay Active' : '▶️ Replay'}
+            </button>
+
+            {/* Sprint 3: Performance Mode Toggle */}
+            <button
+              className={performanceMode ? 'perf-mode-toggle perf-mode-toggle--active' : 'perf-mode-toggle'}
+              onClick={() => setPerformanceMode(!performanceMode)}
+              title={performanceMode ? 'Disable Performance Mode' : 'Enable Performance Mode'}
+            >
+              {performanceMode ? '⚡ Performance ON' : '🎯 Full Quality'}
+            </button>
+
             <div className="monitor-timeframes">
               {TIMEFRAMES.map(tf => (
                 <button
@@ -747,8 +794,11 @@ const MonitorPage = () => {
               )}
             </div>
 
-            <div className="monitor-main">
+            <div className="monitor-main" style={{ position: 'relative' }}>
               <div className="monitor-chart-wrapper">
+                {/* Sprint 3: Replay Mode Watermark */}
+                {replayState.isActive && <ReplayWatermark />}
+
                 <UnderlyingChart symbol={symbol} timeframe={timeframe} />
               </div>
               {verticalOrder.filter(id => panelState[id]?.enabled).length > 0 && (
@@ -825,6 +875,23 @@ const MonitorPage = () => {
           timestamp={showDerivativesPopup.timestamp}
           onClose={() => setShowDerivativesPopup(null)}
           onPin={handlePopupPin}
+        />
+      )}
+
+      {/* Sprint 3: Replay Mode Controls */}
+      {replayState.isActive && (
+        <ReplayControls
+          controls={replayControls}
+          isPlaying={replayState.isPlaying}
+          currentSpeed={replayState.playbackSpeed}
+          speedPresets={speedPresets}
+          cursorTime={replayState.cursorUtc}
+          isEndOfData={
+            replayState.bufferedData !== null &&
+            replayState.cursorUtc !== null &&
+            replayState.bufferedData.timestamps.indexOf(replayState.cursorUtc) ===
+              replayState.bufferedData.timestamps.length - 1
+          }
         />
       )}
     </MonitorSyncProvider>

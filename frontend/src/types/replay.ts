@@ -14,7 +14,7 @@ export interface ReplayState {
   bufferedData: {
     timestamps: string[]
     candles: any[]
-    panels: Record<string, any[]>
+    panels: Record<string, any>
   } | null
 }
 
