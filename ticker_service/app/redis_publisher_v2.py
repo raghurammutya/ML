@@ -11,6 +11,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ class CircuitState(Enum):
 
 @dataclass
 class CircuitBreaker:
-    """Circuit breaker for Redis connection"""
+    """Thread-safe circuit breaker for Redis connection"""
     failure_threshold: int = 5
     recovery_timeout: float = 30.0
     success_threshold: int = 2
@@ -44,50 +45,55 @@ class CircuitBreaker:
         self.failure_count = 0
         self.success_count = 0
         self.last_failure_time: Optional[float] = None
+        self._lock = threading.Lock()  # Protect state transitions
 
     def record_success(self):
-        """Record successful operation"""
-        self.failure_count = 0
+        """Record successful operation (thread-safe)"""
+        with self._lock:
+            self.failure_count = 0
 
-        if self.state == CircuitState.HALF_OPEN:
-            self.success_count += 1
-            if self.success_count >= self.success_threshold:
-                logger.info("Circuit breaker recovered - closing circuit")
-                self.state = CircuitState.CLOSED
-                self.success_count = 0
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    logger.info("Circuit breaker recovered - closing circuit")
+                    self.state = CircuitState.CLOSED
+                    self.success_count = 0
 
     def record_failure(self):
-        """Record failed operation"""
-        self.failure_count += 1
-        self.last_failure_time = time.time()
-        self.success_count = 0
+        """Record failed operation (thread-safe)"""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            self.success_count = 0
 
-        if self.failure_count >= self.failure_threshold:
-            if self.state != CircuitState.OPEN:
-                logger.error(
-                    f"Circuit breaker threshold reached ({self.failure_count} failures) - opening circuit"
-                )
-            self.state = CircuitState.OPEN
+            if self.failure_count >= self.failure_threshold:
+                if self.state != CircuitState.OPEN:
+                    logger.error(
+                        f"Circuit breaker threshold reached ({self.failure_count} failures) - opening circuit"
+                    )
+                self.state = CircuitState.OPEN
 
     def can_attempt(self) -> bool:
-        """Check if operation should be attempted"""
-        if self.state == CircuitState.CLOSED:
+        """Check if operation should be attempted (thread-safe)"""
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+
+            if self.state == CircuitState.OPEN:
+                # Check if recovery timeout has passed
+                if self.last_failure_time and (time.time() - self.last_failure_time) >= self.recovery_timeout:
+                    logger.info("Circuit breaker recovery timeout passed - entering half-open state")
+                    self.state = CircuitState.HALF_OPEN
+                    return True
+                return False
+
+            # HALF_OPEN state
             return True
 
-        if self.state == CircuitState.OPEN:
-            # Check if recovery timeout has passed
-            if self.last_failure_time and (time.time() - self.last_failure_time) >= self.recovery_timeout:
-                logger.info("Circuit breaker recovery timeout passed - entering half-open state")
-                self.state = CircuitState.HALF_OPEN
-                return True
-            return False
-
-        # HALF_OPEN state
-        return True
-
     def get_state(self) -> CircuitState:
-        """Get current circuit state"""
-        return self.state
+        """Get current circuit state (thread-safe)"""
+        with self._lock:
+            return self.state
 
 
 class ResilientRedisPublisher:

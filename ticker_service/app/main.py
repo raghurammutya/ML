@@ -103,9 +103,17 @@ async def lifespan(app: FastAPI):
                 settings.order_executor_worker_poll_interval,
                 settings.order_executor_worker_error_backoff)
 
+    # Start daily rate limit reset scheduler
+    from .kite_rate_limiter import get_rate_limiter
+    rate_limiter = get_rate_limiter()
+    rate_limiter.start_daily_reset_scheduler(asyncio.get_running_loop())
+
     try:
         yield
     finally:
+        # Stop rate limiter scheduler
+        rate_limiter.stop_daily_reset_scheduler()
+
         # Stop order executor
         await executor.stop_worker()
         try:

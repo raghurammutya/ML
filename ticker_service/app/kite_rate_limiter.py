@@ -19,12 +19,15 @@ Daily Limits:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, time as dtime, timedelta
 from enum import Enum
 from typing import Deque, Dict, Optional
 
+import pytz
 from loguru import logger
 
 
@@ -257,10 +260,15 @@ class KiteRateLimiter:
                     max_requests=config.requests_per_day
                 )
 
-        # Statistics
+        # Statistics (protected by lock for thread safety)
+        self._stats_lock = threading.Lock()
         self.total_requests = 0
         self.total_wait_time = 0.0
         self.rate_limited_count = 0
+
+        # Daily reset scheduler
+        self._reset_task: Optional[asyncio.Task] = None
+        self._market_timezone = pytz.timezone('Asia/Kolkata')
 
     async def acquire(
         self,
@@ -280,7 +288,10 @@ class KiteRateLimiter:
             True if request allowed, False if rate limited and wait=False
         """
         start_time = time.monotonic()
-        self.total_requests += 1
+
+        # Increment request counter (thread-safe)
+        with self._stats_lock:
+            self.total_requests += 1
 
         # Check per-second limit
         per_second = self.per_second_limiters.get(endpoint)
@@ -292,12 +303,14 @@ class KiteRateLimiter:
                         f"Rate limit timeout for {endpoint.value}: per-second limit "
                         f"({KITE_RATE_LIMITS[endpoint].requests_per_second} req/sec)"
                     )
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
             else:
                 if not await per_second.acquire():
                     logger.debug(f"Rate limited: {endpoint.value} (per-second)")
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
 
         # Check per-minute limit
@@ -311,12 +324,14 @@ class KiteRateLimiter:
                         f"Rate limit timeout for {endpoint.value}: per-minute limit "
                         f"({KITE_RATE_LIMITS[endpoint].requests_per_minute} req/min)"
                     )
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
             else:
                 if not await per_minute.acquire():
                     logger.debug(f"Rate limited: {endpoint.value} (per-minute)")
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
 
         # Check per-day limit
@@ -330,30 +345,39 @@ class KiteRateLimiter:
                         f"Rate limit timeout for {endpoint.value}: daily limit "
                         f"({KITE_RATE_LIMITS[endpoint].requests_per_day} req/day) reached!"
                     )
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
             else:
                 if not await per_day.acquire():
                     logger.error(f"Daily rate limit reached for {endpoint.value}!")
-                    self.rate_limited_count += 1
+                    with self._stats_lock:
+                        self.rate_limited_count += 1
                     return False
 
-        # Track wait time
+        # Track wait time (thread-safe)
         elapsed = time.monotonic() - start_time
         if elapsed > 0.001:  # Only track significant waits
-            self.total_wait_time += elapsed
+            with self._stats_lock:
+                self.total_wait_time += elapsed
             logger.debug(f"Rate limit wait: {endpoint.value} ({elapsed:.3f}s)")
 
         return True
 
     def get_stats(self) -> dict:
-        """Get rate limiter statistics"""
+        """Get rate limiter statistics (thread-safe)"""
+        # Read statistics with lock to ensure consistency
+        with self._stats_lock:
+            total_requests = self.total_requests
+            total_wait_time = self.total_wait_time
+            rate_limited_count = self.rate_limited_count
+
         stats = {
-            "total_requests": self.total_requests,
-            "total_wait_time_seconds": round(self.total_wait_time, 2),
-            "rate_limited_count": self.rate_limited_count,
-            "avg_wait_time_ms": round((self.total_wait_time / self.total_requests * 1000), 2)
-            if self.total_requests > 0
+            "total_requests": total_requests,
+            "total_wait_time_seconds": round(total_wait_time, 2),
+            "rate_limited_count": rate_limited_count,
+            "avg_wait_time_ms": round((total_wait_time / total_requests * 1000), 2)
+            if total_requests > 0
             else 0,
             "endpoints": {}
         }
@@ -379,8 +403,60 @@ class KiteRateLimiter:
 
         return stats
 
+    def start_daily_reset_scheduler(self, loop: asyncio.AbstractEventLoop):
+        """
+        Start background task to reset daily limits at market close (15:30 IST).
+
+        Args:
+            loop: Event loop to run the scheduler task
+        """
+        if self._reset_task is None:
+            self._reset_task = loop.create_task(self._daily_reset_loop())
+            logger.info("Daily rate limit reset scheduler started (resets at 15:30 IST)")
+
+    async def _daily_reset_loop(self):
+        """Background task that resets daily limits at 15:30 IST every day"""
+        while True:
+            try:
+                # Calculate time until next market close (15:30 IST)
+                now = datetime.now(self._market_timezone)
+                market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+                # If we're past market close today, schedule for tomorrow
+                if now >= market_close:
+                    market_close = market_close + timedelta(days=1)
+
+                # Wait until market close
+                wait_seconds = (market_close - now).total_seconds()
+                logger.info(
+                    "Next daily rate limit reset scheduled for %s (in %.1f hours)",
+                    market_close.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                    wait_seconds / 3600
+                )
+
+                await asyncio.sleep(wait_seconds)
+
+                # Reset daily limits
+                self.reset_daily_stats()
+                logger.info("Daily rate limits reset at market close (15:30 IST)")
+
+            except asyncio.CancelledError:
+                logger.info("Daily rate limit reset scheduler cancelled")
+                break
+            except Exception as e:
+                logger.exception("Error in daily reset scheduler: %s", e)
+                # Wait 1 hour before retrying on error
+                await asyncio.sleep(3600)
+
+    def stop_daily_reset_scheduler(self):
+        """Stop the daily reset scheduler"""
+        if self._reset_task:
+            self._reset_task.cancel()
+            self._reset_task = None
+            logger.info("Daily rate limit reset scheduler stopped")
+
     def reset_daily_stats(self):
-        """Reset daily statistics (typically called at midnight)"""
+        """Reset daily statistics (called at market close by scheduler)"""
         logger.info("Resetting daily rate limit statistics")
         for limiter in self.per_day_limiters.values():
             limiter.requests.clear()

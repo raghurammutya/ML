@@ -95,11 +95,19 @@ class KiteWebSocketPool:
         self.total_subscriptions = 0
         self.total_unsubscriptions = 0
 
+        # Health monitoring
+        self._health_check_task: Optional[asyncio.Task] = None
+        self._last_tick_time: Dict[int, float] = {}  # connection_id -> timestamp
+
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Initialize the pool with the event loop"""
+        """Initialize the pool with the event loop and start health monitoring"""
         self._loop = loop
+
+        # Start health check task
+        self._health_check_task = loop.create_task(self._health_check_loop())
+
         logger.info(
-            "WebSocket pool started for account %s (max per connection: %d)",
+            "WebSocket pool started for account %s (max per connection: %d, health monitoring: enabled)",
             self.account_id,
             self.max_instruments_per_connection,
         )
@@ -131,7 +139,10 @@ class KiteWebSocketPool:
 
         # Set up callbacks
         def _on_connect(ws, response=None):
-            connection.connected = True
+            # Thread-safe state update
+            with self._pool_lock:
+                connection.connected = True
+
             logger.info(
                 "WebSocket connection #%d connected for account %s",
                 connection_id,
@@ -141,7 +152,10 @@ class KiteWebSocketPool:
             self._sync_connection_subscriptions(connection)
 
         def _on_close(ws, code, reason):
-            connection.connected = False
+            # Thread-safe state update
+            with self._pool_lock:
+                connection.connected = False
+
             logger.warning(
                 "WebSocket connection #%d closed for account %s (code=%s reason=%s)",
                 connection_id,
@@ -158,7 +172,19 @@ class KiteWebSocketPool:
                 code,
                 reason,
             )
-            if self._error_handler and self._loop:
+
+            # Validate event loop exists and is not closed
+            if not self._error_handler:
+                return
+
+            if not self._loop or self._loop.is_closed():
+                logger.warning(
+                    "Cannot dispatch error callback for connection #%d: event loop unavailable",
+                    connection_id
+                )
+                return
+
+            try:
                 asyncio.run_coroutine_threadsafe(
                     self._error_handler(
                         self.account_id,
@@ -166,12 +192,38 @@ class KiteWebSocketPool:
                     ),
                     self._loop,
                 )
+            except Exception as e:
+                logger.exception(
+                    "Failed to dispatch error callback for connection #%d: %s",
+                    connection_id,
+                    e
+                )
 
         def _on_ticks(ws, ticks):
-            if self._tick_handler and self._loop:
+            # Update heartbeat timestamp
+            self._last_tick_time[connection_id] = time.time()
+
+            # Validate event loop exists and is not closed
+            if not self._tick_handler:
+                return
+
+            if not self._loop or self._loop.is_closed():
+                logger.warning(
+                    "Cannot dispatch ticks for connection #%d: event loop unavailable",
+                    connection_id
+                )
+                return
+
+            try:
                 asyncio.run_coroutine_threadsafe(
                     self._tick_handler(self.account_id, ticks),
                     self._loop,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to dispatch ticks from connection #%d: %s",
+                    connection_id,
+                    e
                 )
 
         ticker.on_connect = _on_connect
@@ -245,52 +297,66 @@ class KiteWebSocketPool:
         if not tokens:
             return
 
+        # Phase 1: Determine which tokens need subscription and assign to connections
+        # Hold lock for entire state mutation to prevent race conditions
+        pending_subscriptions = []  # List of (token, connection_id, connection)
+
         with self._pool_lock:
             self._target_tokens.update(tokens)
 
-        # Group tokens into batches that fit within connection capacity
-        tokens_to_subscribe = [t for t in tokens if t not in self._token_to_connection]
+            # Determine which tokens need subscription (while holding lock)
+            tokens_to_subscribe = [t for t in tokens if t not in self._token_to_connection]
 
-        if not tokens_to_subscribe:
-            logger.debug("All tokens already subscribed for account %s", self.account_id)
-            return
+            if not tokens_to_subscribe:
+                logger.debug("All tokens already subscribed for account %s", self.account_id)
+                return
 
-        logger.info(
-            "Subscribing to %d new tokens for account %s (total target: %d)",
-            len(tokens_to_subscribe),
-            self.account_id,
-            len(self._target_tokens),
-        )
+            logger.info(
+                "Subscribing to %d new tokens for account %s (total target: %d)",
+                len(tokens_to_subscribe),
+                self.account_id,
+                len(self._target_tokens),
+            )
 
-        # Distribute tokens across connections
-        for token in tokens_to_subscribe:
-            connection = self._get_or_create_connection_for_tokens(1)
+            # Distribute tokens across connections (while holding lock)
+            for token in tokens_to_subscribe:
+                connection = self._get_or_create_connection_for_tokens(1)
 
-            # Add token to connection
-            connection.subscribed_tokens.add(token)
-            self._token_to_connection[token] = connection.connection_id
+                # Add token to connection metadata
+                connection.subscribed_tokens.add(token)
+                self._token_to_connection[token] = connection.connection_id
 
-            # Subscribe if connection is ready
-            if connection.connected and hasattr(connection.ticker, "ws"):
-                try:
-                    connection.ticker.subscribe([token])
+                # Track for actual subscription outside lock
+                if connection.connected and hasattr(connection.ticker, "ws"):
+                    pending_subscriptions.append((token, connection.connection_id, connection))
 
-                    # Set mode
-                    mode = self.ticker_mode.upper()
-                    if mode == "FULL":
-                        connection.ticker.set_mode(connection.ticker.MODE_FULL, [token])
-                    elif mode == "QUOTE":
-                        connection.ticker.set_mode(connection.ticker.MODE_QUOTE, [token])
-                    else:
-                        connection.ticker.set_mode(connection.ticker.MODE_LTP, [token])
+        # Phase 2: Perform actual network I/O outside lock
+        # This prevents holding lock during potentially slow network operations
+        for token, conn_id, connection in pending_subscriptions:
+            try:
+                connection.ticker.subscribe([token])
 
-                    self.total_subscriptions += 1
-                except Exception:
-                    logger.exception(
-                        "Failed to subscribe token %d on connection #%d",
-                        token,
-                        connection.connection_id,
-                    )
+                # Set mode
+                mode = self.ticker_mode.upper()
+                if mode == "FULL":
+                    connection.ticker.set_mode(connection.ticker.MODE_FULL, [token])
+                elif mode == "QUOTE":
+                    connection.ticker.set_mode(connection.ticker.MODE_QUOTE, [token])
+                else:
+                    connection.ticker.set_mode(connection.ticker.MODE_LTP, [token])
+
+                self.total_subscriptions += 1
+            except Exception:
+                logger.exception(
+                    "Failed to subscribe token %d on connection #%d",
+                    token,
+                    conn_id,
+                )
+                # Remove from tracking on failure
+                with self._pool_lock:
+                    connection.subscribed_tokens.discard(token)
+                    if token in self._token_to_connection:
+                        del self._token_to_connection[token]
 
         logger.info(
             "Subscription complete for account %s: %d tokens across %d connections",
@@ -337,23 +403,108 @@ class KiteWebSocketPool:
             connection.subscribed_tokens.discard(token)
             del self._token_to_connection[token]
 
+    async def _health_check_loop(self):
+        """Background task that monitors connection health and detects stale connections"""
+        logger.info("Connection health monitoring started for account %s", self.account_id)
+
+        while True:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+                now = time.time()
+                with self._pool_lock:
+                    connections_to_check = list(self._connections)
+
+                for connection in connections_to_check:
+                    if not connection.connected:
+                        continue
+
+                    # Check if we've received ticks recently (60 second threshold)
+                    last_tick = self._last_tick_time.get(connection.connection_id, now)
+                    time_since_tick = now - last_tick
+
+                    if time_since_tick > 60:
+                        logger.warning(
+                            "Connection #%d appears stale (no ticks for %.1fs). May need reconnection.",
+                            connection.connection_id,
+                            time_since_tick
+                        )
+                        # Note: KiteTicker handles reconnection automatically
+                        # We just log the warning for monitoring purposes
+
+            except asyncio.CancelledError:
+                logger.info("Connection health monitoring stopped for account %s", self.account_id)
+                break
+            except Exception as e:
+                logger.exception("Error in health check loop: %s", e)
+                # Continue checking after error
+
     def stop_all(self) -> None:
-        """Stop all WebSocket connections"""
+        """Stop all WebSocket connections with forced cleanup to prevent resource leaks"""
         logger.info("Stopping all WebSocket connections for account %s", self.account_id)
+
+        # Stop health check task
+        if self._health_check_task:
+            self._health_check_task.cancel()
+            self._health_check_task = None
+            logger.debug("Health check task cancelled")
 
         with self._pool_lock:
             self._target_tokens.clear()
             self._token_to_connection.clear()
 
             for connection in self._connections:
+                conn_id = connection.connection_id
+
                 try:
+                    # Step 1: Try graceful close
+                    logger.debug("Closing connection #%d gracefully", conn_id)
                     connection.ticker.close()
-                except Exception:
-                    logger.exception(
-                        "Failed to close connection #%d for account %s",
-                        connection.connection_id,
-                        self.account_id,
+
+                    # Step 2: Wait for thread termination (with timeout)
+                    if hasattr(connection.ticker, '_thread') and connection.ticker._thread:
+                        logger.debug("Waiting for connection #%d thread to terminate", conn_id)
+                        connection.ticker._thread.join(timeout=5.0)
+
+                        if connection.ticker._thread.is_alive():
+                            logger.warning(
+                                "Connection #%d thread did not terminate within timeout",
+                                conn_id
+                            )
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to close connection #%d gracefully: %s. Forcing cleanup.",
+                        conn_id,
+                        str(e)
                     )
+
+                    # Step 3: Force cleanup on failure
+                    try:
+                        # Force close underlying WebSocket if accessible
+                        if hasattr(connection.ticker, 'ws') and connection.ticker.ws:
+                            logger.debug("Force closing WebSocket for connection #%d", conn_id)
+                            connection.ticker.ws.close()
+
+                        # Force stop the thread if accessible
+                        if hasattr(connection.ticker, '_thread') and connection.ticker._thread:
+                            # Note: Can't force kill threads in Python, but we tried graceful shutdown
+                            logger.warning(
+                                "Connection #%d thread may still be running after forced close",
+                                conn_id
+                            )
+                    except Exception as force_error:
+                        logger.exception(
+                            "Failed to force close connection #%d: %s",
+                            conn_id,
+                            str(force_error)
+                        )
+
+                finally:
+                    # Step 4: Always clean up connection state regardless of errors
+                    connection.connected = False
+                    connection.subscribed_tokens.clear()
+                    logger.debug("Connection #%d state cleaned up", conn_id)
 
             self._connections.clear()
 
