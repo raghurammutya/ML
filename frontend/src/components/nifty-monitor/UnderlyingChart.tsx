@@ -4,14 +4,15 @@ import { useMonitorSync } from './MonitorSyncContext'
 import { ChartLabels } from '../chart-labels/ChartLabels'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Label } from '../../types/labels'
-import { 
-  createLabel, 
-  deleteLabel, 
-  fetchLabels, 
-  connectLabelStream, 
-  subscribeLabelStream, 
+import ShowChartPopup from '../ShowChartPopup/DerivativesChartPopup'
+import {
+  createLabel,
+  deleteLabel,
+  fetchLabels,
+  connectLabelStream,
+  subscribeLabelStream,
   parseLabelMessage,
-  timestampToUTC 
+  timestampToUTC
 } from '../../services/labels'
 
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
@@ -79,6 +80,12 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const [loading, setLoading] = useState(false)
   const [labels, setLabels] = useState<Label[]>([])
+  const [showChartPopup, setShowChartPopup] = useState<{
+    underlying: string
+    strike: number
+    timestamp: string
+    expiry: string
+  } | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const { setTimeRange, setCrosshairTime, setPriceRange } = useMonitorSync()
 
@@ -127,10 +134,10 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     try {
       const label = labels.find(l => l.id === labelId);
       if (!label) return;
-      
+
       const timestamp = new Date(label.metadata.nearest_candle_timestamp_utc).getTime() / 1000;
       await deleteLabel(labelId, symbol, timeframe, timestamp);
-      
+
       // Remove from local state optimistically
       setLabels(prev => prev.filter(l => l.id !== labelId));
     } catch (error) {
@@ -139,9 +146,21 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
   }, [labels, symbol, timeframe]);
 
   const handleShowChart = useCallback((labelId: string) => {
-    // Show Chart popup implementation will be added in Sprint 2
-    console.log('Show chart requested for label:', labelId);
-  }, []);
+    const label = labels.find(l => l.id === labelId);
+    if (!label) return;
+
+    // Extract metadata from label
+    const timestamp = label.metadata.nearest_candle_timestamp_utc;
+    const expiry = (label.metadata as any).expiry || '2025-11-27'; // Default expiry
+    const strike = (label.metadata as any).strike || 24000; // Default strike based on NIFTY
+
+    setShowChartPopup({
+      underlying: symbol,
+      strike,
+      timestamp,
+      expiry
+    });
+  }, [labels, symbol]);
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -269,7 +288,7 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
       console.info('Skipping label WebSocket in development mode');
       return;
     }
-    
+
     const connectWS = () => {
       try {
         const ws = connectLabelStream();
@@ -285,7 +304,7 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
           if (!message) return;
 
           console.log('Label message received:', message);
-          
+
           switch (message.type) {
             case 'label.create':
               // Refresh labels after create
@@ -324,6 +343,12 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     };
   }, [symbol, timeframe]);
 
+  const handlePinPopup = useCallback((pinnedState: any) => {
+    // Update the label with pinned cursor state
+    console.log('Pinning popup with state:', pinnedState);
+    // This will be implemented when we add the pinnedCursorState field to labels
+  }, []);
+
   return (
     <div className="monitor-card">
       <div className="monitor-card__header">
@@ -334,7 +359,7 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
         {loading && <span className="monitor-card__badge">Loading…</span>}
       </div>
       <div ref={containerRef} style={{ width: '100%', height: CHART_HEIGHT }} />
-      <ErrorBoundary fallback={<div style={{padding: '10px', color: '#666'}}>Labels temporarily unavailable</div>}>
+      <ErrorBoundary fallback={<div style={{ padding: '10px', color: '#666' }}>Labels temporarily unavailable</div>}>
         <ChartLabels
           chart={chartRef.current}
           series={seriesRef.current}
@@ -347,6 +372,18 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
           onShowChart={handleShowChart}
         />
       </ErrorBoundary>
+
+      {/* Show Chart Popup */}
+      {showChartPopup && (
+        <ShowChartPopup
+          underlying={showChartPopup.underlying}
+          strike={showChartPopup.strike}
+          timestamp={Number(showChartPopup.timestamp)}
+          expiry={showChartPopup.expiry}
+          onClose={() => setShowChartPopup(null)}
+          onPin={handlePinPopup}
+        />
+      )}
     </div>
   )
 }

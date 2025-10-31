@@ -113,3 +113,69 @@ export const timestampToUTC = (timestamp: number): string => {
 export const utcToTimestamp = (utc: string): number => {
   return new Date(utc).getTime() / 1000;
 };
+
+// Popup subscription helpers
+export interface PopupSubscribeMessage {
+  action: 'subscribe_popup'
+  underlying: string
+  strike: number
+  expiry: string
+  timeframe: string
+}
+
+export interface PopupUpdateMessage {
+  type: 'popup_update'
+  seq: number
+  timestamp: string
+  candle: {
+    o: number
+    h: number
+    l: number
+    c: number
+    v: number
+  }
+  metrics: {
+    iv: number
+    delta: number
+    gamma: number
+    theta: number
+    vega: number
+    premium: number
+    oi: number
+    oi_delta: number
+  }
+}
+
+// Create popup WebSocket subscription
+export const subscribePopup = (
+  ws: WebSocket,
+  underlying: string,
+  strike: number,
+  expiry: string,
+  timeframe: string = '1m'
+): void => {
+  if (ws.readyState === WebSocket.OPEN) {
+    const message: PopupSubscribeMessage = {
+      action: 'subscribe_popup',
+      underlying,
+      strike,
+      expiry,
+      timeframe
+    };
+    ws.send(JSON.stringify(message));
+  }
+};
+
+// Parse popup update messages
+export const parsePopupMessage = (data: string): PopupUpdateMessage | null => {
+  try {
+    const message = JSON.parse(data);
+    if (message.type === 'popup_update') {
+      return message as PopupUpdateMessage;
+    }
+    return null;
+  } catch (error) {
+    console.error('Failed to parse popup message:', error);
+    return null;
+  }
+};

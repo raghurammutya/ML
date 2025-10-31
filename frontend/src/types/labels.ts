@@ -5,6 +5,8 @@ export interface LabelMetadata {
   nearest_candle_timestamp_utc: string;
   sample_offset_seconds: number;
   price?: number;
+  strike?: number;
+  bucket?: string;
   pinnedCursorState?: {
     timestamp: string;
     replay_mode: boolean;

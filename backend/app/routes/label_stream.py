@@ -25,14 +25,14 @@ async def websocket_endpoint(websocket: WebSocket):
     
     # Client state
     subscriptions: Dict[str, Any] = {}
-    client_queue = asyncio.Queue()
-    
+
     # Subscribe to labels hub
     if labels_hub:
-        await labels_hub.subscribe(client_queue)
+        client_queue = await labels_hub.subscribe()
         logger.info("Client subscribed to labels hub")
     else:
         logger.warning("Labels hub not available")
+        client_queue = asyncio.Queue()  # Fallback queue if hub not available
     
     async def send_heartbeat():
         """Send periodic heartbeat to keep connection alive"""

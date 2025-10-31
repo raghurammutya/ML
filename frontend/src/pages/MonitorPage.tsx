@@ -4,6 +4,7 @@ import PanelManager from '../components/nifty-monitor/PanelManager'
 import HorizontalPanel from '../components/nifty-monitor/HorizontalPanel'
 import VerticalPanel from '../components/nifty-monitor/VerticalPanel'
 import { MonitorSyncProvider } from '../components/nifty-monitor/MonitorSyncContext'
+import DerivativesChartPopup from '../components/ShowChartPopup/DerivativesChartPopup'
 import type {
   FoIndicatorDefinition,
   FoMoneynessSeries,
@@ -122,6 +123,13 @@ const MonitorPage = () => {
   const [searchResults, setSearchResults] = useState<MonitorSearchResult[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
+  const [showDerivativesPopup, setShowDerivativesPopup] = useState<{
+    underlying: string
+    strike?: number
+    bucket?: string
+    expiry: string
+    timestamp: number
+  } | null>(null)
   const horizontalLoadIdRef = useRef(0)
   const verticalLoadIdRef = useRef(0)
   const sessionIdRef = useRef<string | null>(null)
@@ -370,6 +378,10 @@ const MonitorPage = () => {
     ws.onerror = () => setMonitorConnectionStatus('disconnected')
     ws.onmessage = event => {
       try {
+        // Skip non-JSON messages like "ping"
+        if (typeof event.data !== 'string' || !event.data.startsWith('{')) {
+          return
+        }
         const message: MonitorStreamMessage = JSON.parse(event.data)
         if (!message || typeof message !== 'object') return
         const channel = message.channel
@@ -442,6 +454,10 @@ const MonitorPage = () => {
     ws.onerror = () => setFoConnectionStatus('disconnected')
     ws.onmessage = (event) => {
       try {
+        // Skip non-JSON messages like "ping"
+        if (typeof event.data !== 'string' || !event.data.startsWith('{')) {
+          return
+        }
         const payload: FoRealtimeBucket = JSON.parse(event.data)
         if (payload.type !== 'fo_bucket') return
         if (payload.timeframe !== timeframe) return
@@ -563,6 +579,57 @@ const MonitorPage = () => {
     setSearchResults([])
     setSearchError(null)
   }
+
+  // Handler for horizontal panel Show Chart
+  const handleHorizontalPanelShowChart = useCallback((context: { bucket: string; expiry: string; timestamp: number; underlying: string }) => {
+    setShowDerivativesPopup({
+      underlying: context.underlying,
+      bucket: context.bucket,
+      expiry: context.expiry,
+      timestamp: context.timestamp
+    })
+  }, [])
+
+  // Handler for vertical panel Show Chart
+  const handleVerticalPanelShowChart = useCallback((context: { strike: number; expiry: string; timestamp: number; underlying: string }) => {
+    setShowDerivativesPopup({
+      underlying: context.underlying,
+      strike: context.strike,
+      expiry: context.expiry,
+      timestamp: context.timestamp
+    })
+  }, [])
+
+  // Handler for popup pin state
+  const handlePopupPin = useCallback(async (pinnedState: any) => {
+    console.log('Popup pinned with state:', pinnedState)
+
+    if (!showDerivativesPopup) return
+
+    try {
+      // Import labels service
+      const { createLabel } = await import('../services/labels')
+
+      // Create a label with pinned cursor state
+      const label = await createLabel({
+        symbol: showDerivativesPopup.underlying,
+        label_type: 'neutral',
+        metadata: {
+          timeframe: timeframe + 'm',
+          nearest_candle_timestamp_utc: new Date(showDerivativesPopup.timestamp * 1000).toISOString(),
+          sample_offset_seconds: 0,
+          strike: showDerivativesPopup.strike,
+          bucket: showDerivativesPopup.bucket,
+          pinnedCursorState: pinnedState
+        },
+        tags: ['pinned', 'popup']
+      })
+
+      console.log('Pinned state saved to label:', label.id)
+    } catch (error) {
+      console.error('Failed to save pinned state:', error)
+    }
+  }, [showDerivativesPopup, timeframe])
 
   return (
     <MonitorSyncProvider>
@@ -698,6 +765,7 @@ const MonitorPage = () => {
                         collapsed={panelState[id]?.collapsed ?? false}
                         onToggleCollapse={() => toggleCollapse(id)}
                         height={CHART_HEIGHT}
+                        onShowChart={handleVerticalPanelShowChart}
                       />
                     )
                   })}
@@ -718,6 +786,7 @@ const MonitorPage = () => {
                   colorMap={colorMap}
                   collapsed={panelState[id]?.collapsed ?? false}
                   onToggleCollapse={() => toggleCollapse(id)}
+                  onShowChart={handleHorizontalPanelShowChart}
                 />
               )
             })}
@@ -745,6 +814,19 @@ const MonitorPage = () => {
           </div>
         </div>
       </div>
+      
+      {/* Derivatives Chart Popup */}
+      {showDerivativesPopup && (
+        <DerivativesChartPopup
+          underlying={showDerivativesPopup.underlying}
+          strike={showDerivativesPopup.strike}
+          bucket={showDerivativesPopup.bucket}
+          expiry={showDerivativesPopup.expiry}
+          timestamp={showDerivativesPopup.timestamp}
+          onClose={() => setShowDerivativesPopup(null)}
+          onPin={handlePopupPin}
+        />
+      )}
     </MonitorSyncProvider>
   )
 }

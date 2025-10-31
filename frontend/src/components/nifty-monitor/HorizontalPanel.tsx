@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useCallback, useState, useEffect } from 'react'
 import { ResponsiveContainer, LineChart, Line, YAxis, XAxis, Tooltip, ReferenceLine } from 'recharts'
 import type { FoIndicatorDefinition, FoMoneynessSeries } from '../../types'
 import { useMonitorSync } from './MonitorSyncContext'
@@ -9,6 +9,7 @@ export interface HorizontalPanelProps {
   colorMap: Record<string, string>
   collapsed: boolean
   onToggleCollapse: () => void
+  onShowChart?: (context: { bucket: string; expiry: string; timestamp: number; underlying: string }) => void
 }
 
 interface CombinedRow {
@@ -72,15 +73,57 @@ const TooltipContent = ({ active, payload }: any) => {
   )
 }
 
-const HorizontalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse }: HorizontalPanelProps) => {
+const HorizontalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, onShowChart }: HorizontalPanelProps) => {
   const combined = useMemo(() => combineSeries(data), [data])
   const { crosshairTime, timeRange } = useMonitorSync()
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; timestamp: number } | null>(null)
+
   const filtered = useMemo(() => {
     if (!timeRange) return combined
     const windowed = combined.filter(point => point.time >= timeRange.from && point.time <= timeRange.to)
     return windowed.length ? windowed : combined
   }, [combined, timeRange])
   const crosshairX = typeof crosshairTime === 'number' ? crosshairTime : undefined
+
+  const handleContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault()
+
+    // Use crosshairTime if available, otherwise use current time
+    const timestamp = crosshairTime || Math.floor(Date.now() / 1000)
+
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      timestamp: timestamp
+    })
+  }, [crosshairTime])
+
+  const handleShowChart = useCallback(() => {
+    if (!onShowChart || !contextMenu) return
+
+    const firstExpiry = Object.keys(colorMap)[0]
+    if (!firstExpiry) return
+
+    onShowChart({
+      bucket: 'ATM',
+      expiry: firstExpiry,
+      timestamp: contextMenu.timestamp,
+      underlying: 'NIFTY'
+    })
+    setContextMenu(null)
+  }, [onShowChart, contextMenu, colorMap])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const handleClick = () => setContextMenu(null)
+    const handleEscape = (e: KeyboardEvent) => e.key === 'Escape' && setContextMenu(null)
+    window.addEventListener('click', handleClick)
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('click', handleClick)
+      window.removeEventListener('keydown', handleEscape)
+    }
+  }, [contextMenu])
 
   return (
     <div className="monitor-card">
@@ -94,7 +137,7 @@ const HorizontalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse }:
         </button>
       </div>
       {!collapsed && (
-        <div style={{ width: '100%', height: 180 }}>
+        <div style={{ width: '100%', height: 180 }} onContextMenu={handleContextMenu}>
           <ResponsiveContainer>
             <LineChart data={filtered} margin={{ top: 6, right: 8, bottom: 2, left: 0 }}>
               <XAxis
@@ -124,6 +167,83 @@ const HorizontalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse }:
               ))}
             </LineChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+            backgroundColor: '#1e222d',
+            border: '1px solid #2f3b52',
+            borderRadius: '6px',
+            padding: '4px 0',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            zIndex: 9999,
+            minWidth: '180px'
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              borderRadius: '4px',
+              transition: 'background-color 0.15s',
+              color: '#d1d4dc'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2f3b52'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onClick={() => { console.log('Copy value'); setContextMenu(null) }}
+          >
+            📋 Copy value
+          </div>
+          <div
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              borderRadius: '4px',
+              transition: 'background-color 0.15s',
+              color: '#d1d4dc'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2f3b52'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onClick={() => { console.log('Add Alert'); setContextMenu(null) }}
+          >
+            🔔 Add Alert
+          </div>
+          <div
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              borderRadius: '4px',
+              transition: 'background-color 0.15s',
+              color: '#d1d4dc'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2f3b52'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onClick={() => { console.log('Settings'); setContextMenu(null) }}
+          >
+            ⚙️ Settings
+          </div>
+          <hr style={{ borderColor: '#2f3b52', margin: '6px 0' }} />
+          <div
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              borderRadius: '4px',
+              transition: 'background-color 0.15s',
+              color: '#d1d4dc'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2f3b52'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            onClick={handleShowChart}
+          >
+            📊 Show Chart
+          </div>
         </div>
       )}
     </div>

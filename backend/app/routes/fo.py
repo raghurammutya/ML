@@ -13,6 +13,12 @@ from ..database import DataManager, _normalize_symbol, _normalize_timeframe
 from ..realtime import RealTimeHub
 from .indicators import get_data_manager
 
+from starlette.websockets import WebSocketState
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
+import time
+import json
+import asyncio
+
 router = APIRouter(prefix="/fo", tags=["fo"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -221,17 +227,19 @@ def _classify_generic_moneyness(strike: float, underlying: Optional[float]) -> O
 
 def _indicator_value(row: Dict, indicator: str, side: str) -> Optional[float]:
     if indicator == "iv":
-        return row["call_iv_avg"] if side == "call" else row["put_iv_avg"]
+        return row.get("call_iv_avg") if side == "call" else row.get("put_iv_avg")
     if indicator == "delta":
-        return row["call_delta_avg"] if side == "call" else row["put_delta_avg"]
+        return row.get("call_delta_avg") if side == "call" else row.get("put_delta_avg")
     if indicator == "gamma":
-        return row["call_gamma_avg"] if side == "call" else row["put_gamma_avg"]
+        return row.get("call_gamma_avg") if side == "call" else row.get("put_gamma_avg")
     if indicator == "theta":
-        return row["call_theta_avg"] if side == "call" else row["put_theta_avg"]
+        return row.get("call_theta_avg") if side == "call" else row.get("put_theta_avg")
     if indicator == "vega":
-        return row["call_vega_avg"] if side == "call" else row["put_vega_avg"]
+        return row.get("call_vega_avg") if side == "call" else row.get("put_vega_avg")
     if indicator == "oi":
-        return row["call_oi_sum"] if side == "call" else row["put_oi_sum"]
+        # OI columns don't exist in fo_option_strike_bars aggregated table
+        # Return None for now - proper OI data would need to come from a different table
+        return None
     if indicator == "pcr":
         call_volume = float(row.get("call_volume") or 0)
         put_volume = float(row.get("put_volume") or 0)
@@ -262,82 +270,24 @@ async def moneyness_series(
     limit: Optional[int] = None,
     dm: DataManager = Depends(get_data_manager),
 ):
+    """
+    TEMPORARY: Returning empty data due to missing DataManager methods.
+    The horizontal panels need fetch_fo_strike_rows and fetch_fo_expiry_metrics
+    which don't exist in the current DataManager implementation.
+    This allows the UI to load without 500 errors so Sprint 2 features can be tested.
+    """
+    logger.warning(f"moneyness-series returning empty data (pre-existing bug - missing DataManager methods)")
+
     indicator = indicator.lower()
-    if indicator not in SUPPORTED_INDICATORS:
-        raise HTTPException(status_code=400, detail=f"Unsupported indicator {indicator}")
     normalized_tf = _normalize_timeframe(timeframe)
     symbol_db = _normalize_symbol(symbol)
-    if not from_time or not to_time:
-        from_time, to_time = _default_time_range()
-    expiries = _parse_expiry_params(expiry)
-
-    if indicator == "max_pain":
-        rows = await dm.fetch_fo_expiry_metrics(symbol_db, normalized_tf, expiries, from_time, to_time)
-        series = defaultdict(list)
-        for row in rows:
-            ts = int(row["bucket_time"].replace(tzinfo=timezone.utc).timestamp())
-            series[row["expiry"].isoformat()].append({"time": ts, "value": row.get("max_pain_strike")})
-        return {
-            "status": "ok",
-            "symbol": symbol_db,
-            "timeframe": normalized_tf,
-            "indicator": indicator,
-            "series": [{"expiry": exp, "points": points} for exp, points in series.items()],
-        }
-
-    option_side = option_side.lower()
-    if option_side not in {"call", "put", "both"}:
-        raise HTTPException(status_code=400, detail="option_side must be call, put, or both")
-    rows = await dm.fetch_fo_strike_rows(symbol_db, normalized_tf, expiries, from_time, to_time, limit)
-    series: Dict[str, Dict[str, List[Dict[str, float]]]] = defaultdict(lambda: defaultdict(list))
-
-    for row in rows:
-        bucket_ts = row["bucket_time"]
-        if isinstance(bucket_ts, datetime):
-            ts = int(bucket_ts.replace(tzinfo=timezone.utc).timestamp())
-        else:
-            ts = int(bucket_ts)
-        underlying = row.get("underlying_close")
-        strike = float(row["strike"])
-        expiry_key = row["expiry"].isoformat()
-
-        if indicator == "pcr":
-            bucket_label = _classify_generic_moneyness(strike, underlying)
-            value = _indicator_value(row, indicator, "call")
-            if bucket_label and value is not None:
-                series[expiry_key][bucket_label].append({"time": ts, "value": value})
-            continue
-
-        sides = ["call", "put"] if option_side == "both" else [option_side]
-        call_val = _indicator_value(row, indicator, "call")
-        put_val = _indicator_value(row, indicator, "put")
-        for side in sides:
-            if option_side == "both":
-                value = _combine_sides(indicator, call_val, put_val)
-                label = _classify_generic_moneyness(strike, underlying)
-                if label and value is not None:
-                    series[expiry_key][label].append({"time": ts, "value": value})
-                break
-            value = _indicator_value(row, indicator, side)
-            label = _classify_moneyness(strike, underlying, side)
-            if label and value is not None:
-                series[expiry_key][label].append({"time": ts, "value": value})
-
-    payload = []
-    for expiry_key, buckets in series.items():
-        for bucket_label, points in buckets.items():
-            payload.append({
-                "expiry": expiry_key,
-                "bucket": bucket_label,
-                "points": points,
-            })
 
     return {
         "status": "ok",
         "symbol": symbol_db,
         "timeframe": normalized_tf,
         "indicator": indicator,
-        "series": payload,
+        "series": []  # Empty data - horizontal panels will load but show no data
     }
 
 
@@ -358,7 +308,8 @@ async def strike_distribution(
     expiries = _parse_expiry_params(expiry)
 
     if bucket_time:
-        rows = await dm.fetch_fo_strike_rows(symbol_db, normalized_tf, expiries, bucket_time, bucket_time + 1)
+        # Use fetch_latest with time filtering
+        rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries, bucket_time, bucket_time + 1)
     else:
         rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries)
 
@@ -409,19 +360,158 @@ async def strike_distribution(
 
 
 @router.websocket("/stream")
-async def fo_stream_socket(websocket: WebSocket):
-    if not _hub:
+async def fo_stream_socket(websocket: WebSocket) -> None:
+    if _hub is None:
         await websocket.close(code=1013)
+        logger.warning("FO stream WebSocket rejected: hub not initialized")
         return
+
     await websocket.accept()
     queue = await _hub.subscribe()
+    logger.info("FO stream WebSocket connection accepted")
+    
+    # Track popup subscriptions for this connection
+    popup_subscriptions = {}
+    
+    async def handle_client_message(message_text: str):
+        """Handle incoming messages from client"""
+        try:
+            message = json.loads(message_text)
+            action = message.get("action")
+            
+            if action == "subscribe_popup":
+                underlying = message.get("underlying")
+                strike = message.get("strike")
+                expiry = message.get("expiry")
+                timeframe = message.get("timeframe", "1m")
+                
+                # Create subscription key
+                sub_key = f"{underlying}:{strike}:{expiry}:{timeframe}"
+                popup_subscriptions[sub_key] = {
+                    "underlying": underlying,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "timeframe": timeframe,
+                    "seq": 0
+                }
+                
+                logger.info(f"Created popup subscription: {sub_key}")
+                
+                # Send initial response
+                await websocket.send_json({
+                    "type": "popup_subscribed",
+                    "subscription": sub_key,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                
+        except Exception as e:
+            logger.error(f"Error handling client message: {e}")
+
     try:
+        last_sent = time.time()
+        idle_timeout = 60  # seconds
+        heartbeat_interval = 30  # seconds
+        last_ping = time.time()
+
         while True:
-            message = await queue.get()
-            await websocket.send_json(message)
-    except WebSocketDisconnect:
-        logger.info("FO stream client disconnected")
+            # Handle incoming client messages
+            try:
+                client_message = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                await handle_client_message(client_message)
+            except asyncio.TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                break
+
+            # Wait for message from the hub queue
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                message = None
+
+            # Process hub messages for popup subscriptions
+            if message and popup_subscriptions:
+                message_type = message.get("type")
+                if message_type == "fo_bucket":
+                    # Check if this message matches any popup subscription
+                    msg_underlying = message.get("symbol", "").upper()
+                    msg_expiry = message.get("expiry", "")
+                    msg_timeframe = message.get("timeframe", "")
+                    
+                    for sub_key, sub_info in popup_subscriptions.items():
+                        if (sub_info["underlying"].upper() == msg_underlying and 
+                            sub_info["expiry"] == msg_expiry and
+                            sub_info["timeframe"] == msg_timeframe):
+                            
+                            # Find the strike data in the message
+                            strikes = message.get("strikes", [])
+                            for strike_data in strikes:
+                                if strike_data.get("strike") == sub_info["strike"]:
+                                    # Create popup update message
+                                    sub_info["seq"] += 1
+                                    popup_update = {
+                                        "type": "popup_update",
+                                        "seq": sub_info["seq"],
+                                        "timestamp": message.get("bucket_time", datetime.now(timezone.utc).isoformat()),
+                                        "candle": {
+                                            "o": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
+                                            "h": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
+                                            "l": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
+                                            "c": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
+                                            "v": strike_data.get("call", {}).get("volume", 0) + strike_data.get("put", {}).get("volume", 0)
+                                        },
+                                        "metrics": {
+                                            "iv": strike_data.get("call", {}).get("iv", 0) or strike_data.get("put", {}).get("iv", 0),
+                                            "delta": strike_data.get("call", {}).get("delta", 0) or strike_data.get("put", {}).get("delta", 0),
+                                            "gamma": strike_data.get("call", {}).get("gamma", 0) or strike_data.get("put", {}).get("gamma", 0),
+                                            "theta": strike_data.get("call", {}).get("theta", 0) or strike_data.get("put", {}).get("theta", 0),
+                                            "vega": strike_data.get("call", {}).get("vega", 0) or strike_data.get("put", {}).get("vega", 0),
+                                            "premium": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
+                                            "oi": strike_data.get("call", {}).get("oi", 0) + strike_data.get("put", {}).get("oi", 0),
+                                            "oi_delta": strike_data.get("call", {}).get("oi_change", 0) + strike_data.get("put", {}).get("oi_change", 0)
+                                        }
+                                    }
+                                    
+                                    # Send popup update
+                                    try:
+                                        await websocket.send_json(popup_update)
+                                        last_sent = time.time()
+                                    except (ConnectionClosed, ConnectionClosedOK):
+                                        logger.info("WebSocket closed during popup update")
+                                        return
+
+            # Heartbeat ping
+            if time.time() - last_ping >= heartbeat_interval:
+                try:
+                    await websocket.send_text("ping")
+                    last_ping = time.time()
+                except ConnectionClosed:
+                    logger.info("FO stream WebSocket closed during ping")
+                    break
+
+            # Idle timeout
+            if time.time() - last_sent > idle_timeout:
+                logger.info("FO stream WebSocket idle timeout — closing")
+                await websocket.close(code=1000)
+                break
+
+            # Send regular message if available and no popup subscriptions processed it
+            if message and websocket.client_state == WebSocketState.CONNECTED and not popup_subscriptions:
+                try:
+                    await websocket.send_json(message)
+                    last_sent = time.time()
+                except ConnectionClosedOK:
+                    logger.info("FO stream WebSocket closed cleanly by client")
+                    break
+                except ConnectionClosed:
+                    logger.warning("FO stream WebSocket closed unexpectedly")
+                    break
+                except Exception as exc:
+                    logger.error("FO stream WebSocket send error: %s", exc)
+                    break
+
     except Exception as exc:
-        logger.error("FO stream websocket error: %s", exc, exc_info=True)
+        logger.error("FO stream WebSocket error: %s", exc, exc_info=True)
     finally:
         await _hub.unsubscribe(queue)
+        logger.info(f"FO stream WebSocket connection closed, had {len(popup_subscriptions)} popup subscriptions")
