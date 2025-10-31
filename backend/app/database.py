@@ -140,9 +140,17 @@ LABEL_COLORS: Dict[str, str] = {
 }
 
 FO_STRIKE_TABLES: Dict[str, str] = {
+    # 1min: Base table with all columns including call_oi_sum and put_oi_sum
     "1min": "fo_option_strike_bars",
-    "5min": "fo_option_strike_bars_5min",
-    "15min": "fo_option_strike_bars_15min",
+
+    # 5min/15min: Enriched views that wrap TimescaleDB continuous aggregates
+    # Background: Continuous aggregates were created before OI columns were added to base table.
+    # TimescaleDB doesn't automatically include columns added after aggregate creation.
+    # Solution: Enriched views LEFT JOIN with 1min base table to fetch OI columns.
+    # See migration: 013_create_fo_enriched_views.sql
+    # Performance: Slight overhead from JOIN, but ensures data completeness.
+    "5min": "fo_option_strike_bars_5min_enriched",   # Wraps fo_option_strike_bars_5min
+    "15min": "fo_option_strike_bars_15min_enriched",  # Wraps fo_option_strike_bars_15min
 }
 
 FO_EXPIRY_TABLES: Dict[str, str] = {
@@ -478,23 +486,26 @@ class DataManager:
         timeframe = _normalize_timeframe(resolution)
         from_s, to_s = _as_epoch_seconds(from_timestamp, to_timestamp)
 
-        neutral_clause = "" if include_neutral else "AND label IS NOT NULL AND label <> 'Neutral'"
+        neutral_clause = "" if include_neutral else "AND label_type <> 'Neutral'"
 
         # Convert IST timestamps to UTC epochs for TradingView
-        # Database stores naive timestamps representing IST (UTC+5:30)
+        # Database stores timestamps in metadata->nearest_candle_timestamp_utc (UTC)
+        # We subtract 19800 seconds (5.5 hours) for IST adjustment
+        # Only show user-created labels (confidence = 1.0, displayed as 100%)
         sql = f"""
             SELECT
-            (EXTRACT(EPOCH FROM time)::bigint - 19800) AS time_s,
-            label,
-            label_confidence
-            FROM ml_labeled_data
+            (EXTRACT(EPOCH FROM (metadata->>'nearest_candle_timestamp_utc')::timestamptz)::bigint - 19800) AS time_s,
+            label_type as label,
+            COALESCE((metadata->>'confidence')::numeric, 1.0) as label_confidence
+            FROM ml_labels
             WHERE symbol=$1
-            AND timeframe=$2
-            AND time BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes') 
+            AND metadata->>'timeframe'=$2
+            AND (metadata->>'nearest_candle_timestamp_utc')::timestamptz BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes')
                          AND (to_timestamp($4) + interval '5 hours 30 minutes')
-            AND label IS NOT NULL
+            AND label_type IS NOT NULL
+            AND COALESCE((metadata->>'confidence')::numeric, 1.0) = 1.0
             {neutral_clause}
-            ORDER BY time ASC
+            ORDER BY time_s ASC
             LIMIT $5
         """
 
@@ -524,6 +535,7 @@ class DataManager:
         if not rows:
             return
 
+        # Write to minute_bars table (underlying OHLC data)
         minute_sql = """
             INSERT INTO minute_bars (
                 time,
@@ -548,44 +560,20 @@ class DataManager:
                 metadata = EXCLUDED.metadata
         """
 
-        ml_sql = """
-            INSERT INTO ml_labeled_data (
-                symbol,
-                timeframe,
-                time,
-                open,
-                high,
-                low,
-                close,
-                volume
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8
-            )
-            ON CONFLICT (symbol, timeframe, time)
-            DO UPDATE SET
-                open   = EXCLUDED.open,
-                high   = EXCLUDED.high,
-                low    = EXCLUDED.low,
-                close  = EXCLUDED.close,
-                volume = EXCLUDED.volume,
-                updated_at = NOW()
-        """
-
         minute_records: List[tuple] = []
-        ml_records: List[tuple] = []
         for row in rows:
             symbol_norm = _normalize_symbol(row["symbol"])
-            timeframe_norm = _normalize_timeframe(row["timeframe"])
-            resolution_value = _timeframe_to_resolution(timeframe_norm)
             time_value = row["time"]
-            metadata = row.get("metadata") or {}
-            metadata_json = metadata if isinstance(metadata, str) else json.dumps(metadata)
+            resolution = _timeframe_to_resolution(row.get("timeframe", "1min"))
+            metadata_json = row.get("metadata", {})
+            if not isinstance(metadata_json, str):
+                metadata_json = json.dumps(metadata_json)
 
             minute_records.append(
                 (
                     time_value,
                     symbol_norm,
-                    resolution_value,
+                    resolution,
                     row["open"],
                     row["high"],
                     row["low"],
@@ -594,30 +582,13 @@ class DataManager:
                     metadata_json,
                 )
             )
-            ml_records.append(
-                (
-                    symbol_norm,
-                    timeframe_norm,
-                    time_value,
-                    row["open"],
-                    row["high"],
-                    row["low"],
-                    row["close"],
-                    row.get("volume", 0),
-                )
-            )
 
         # Sort to ensure deterministic lock order
-        minute_records.sort(key=lambda r: (r[1], r[2], r[0]))  # (symbol, resolution, time)
-        ml_records.sort(key=lambda r: (r[0], r[1], r[2]))      # (symbol, timeframe, time)
+        minute_records.sort(key=lambda r: (r[0], r[1], r[2]))  # (time, symbol, resolution)
 
         async with self.pool.acquire() as conn:
-            # Separate transactions to reduce lock overlap
             async with conn.transaction():
                 await _executemany_with_deadlock_retry(conn, minute_sql, minute_records)
-
-            async with conn.transaction():
-                await _executemany_with_deadlock_retry(conn, ml_sql, ml_records)
     
     async def upsert_futures_bars(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
@@ -785,16 +756,19 @@ class DataManager:
     ):
         tf = _normalize_timeframe(timeframe)
         symbol_variants = _symbol_variants(symbol)
-        params: List[Any] = [symbol_variants, tf]
+        table_name = _fo_strike_table(tf)
+
+        # Build query parameters
+        params: List[Any] = [symbol_variants]
         if expiries:
             params.append(expiries)
-        table_name = _fo_strike_table(tf)
+
+        # Query latest data from the appropriate table/view
         query = f"""
             WITH latest AS (
                 SELECT expiry, MAX(bucket_time) AS bucket_time
                 FROM {table_name}
                 WHERE symbol = ANY($1::text[])
-                  AND timeframe = $2
                 GROUP BY expiry
             )
             SELECT s.*
@@ -803,8 +777,7 @@ class DataManager:
               ON s.expiry = l.expiry
              AND s.bucket_time = l.bucket_time
             WHERE s.symbol = ANY($1::text[])
-              AND s.timeframe = $2
-              {"AND s.expiry = ANY($3)" if expiries else ""}
+              {"AND s.expiry = ANY($2)" if expiries else ""}
             ORDER BY s.expiry ASC, s.strike ASC
         """
         async with self.pool.acquire() as conn:

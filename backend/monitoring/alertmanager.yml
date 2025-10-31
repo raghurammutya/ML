@@ -1,0 +1,59 @@
+global:
+  resolve_timeout: 5m
+  # Slack webhook (configure when ready)
+  # slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+
+# Route alerts to receivers
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: 'default'
+
+  # Child routes
+  routes:
+    # Critical alerts to PagerDuty
+    - match:
+        severity: critical
+      receiver: 'pagerduty'
+      continue: true
+
+    # All alerts to Slack
+    - match_re:
+        severity: '(warning|critical)'
+      receiver: 'slack'
+
+# Receivers - notification destinations
+receivers:
+  # Default receiver (logs only)
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook'
+        send_resolved: true
+
+  # Slack notifications
+  - name: 'slack'
+    slack_configs:
+      - channel: '#tradingview-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        # Uncomment and configure when ready
+        # api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+
+  # PagerDuty for critical alerts
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - routing_key: 'YOUR_PAGERDUTY_ROUTING_KEY'
+        description: '{{ .GroupLabels.alertname }}'
+        severity: '{{ .CommonLabels.severity }}'
+        # Uncomment when PagerDuty is configured
+
+# Inhibition rules - silence dependent alerts
+inhibit_rules:
+  # If database is down, don't alert on dependent services
+  - source_match:
+      alertname: 'DatabaseUnhealthy'
+    target_match_re:
+      alertname: '(SlowQueryDetected|HighAPILatency)'
+    equal: ['component']

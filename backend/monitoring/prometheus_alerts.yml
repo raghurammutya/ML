@@ -1,0 +1,216 @@
+groups:
+  # ============================================================================
+  # BACKPRESSURE ALERTS
+  # ============================================================================
+  - name: backpressure
+    interval: 30s
+    rules:
+      - alert: HighEventLoopLag
+        expr: backpressure_event_loop_lag_seconds > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: async
+        annotations:
+          summary: "High event loop lag detected"
+          description: "Event loop lag is {{ $value }}s (threshold: 0.1s). This indicates the event loop is overloaded."
+
+      - alert: CriticalEventLoopLag
+        expr: backpressure_event_loop_lag_seconds > 0.5
+        for: 1m
+        labels:
+          severity: critical
+          component: async
+        annotations:
+          summary: "Critical event loop lag"
+          description: "Event loop lag is {{ $value }}s (threshold: 0.5s). Immediate action required."
+
+      - alert: DatabasePoolExhausted
+        expr: backpressure_db_queue_size > 10
+        for: 2m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "{{ $value }} requests waiting for database connections. Consider increasing pool size."
+
+      - alert: HighAsyncTaskCount
+        expr: backpressure_async_tasks_pending{task_type="total"} > 500
+        for: 3m
+        labels:
+          severity: warning
+          component: async
+        annotations:
+          summary: "High number of pending async tasks"
+          description: "{{ $value }} async tasks pending. Possible task leak or slow processing."
+
+  # ============================================================================
+  # MEMORY LEAK ALERTS
+  # ============================================================================
+  - name: memory_leaks
+    interval: 60s
+    rules:
+      - alert: HighMemoryUsage
+        expr: (memory_rss_bytes / 1024 / 1024 / 1024) > 4
+        for: 5m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "High memory usage"
+          description: "Application using {{ $value }}GB of memory (threshold: 4GB)"
+
+      - alert: MemoryLeakSuspected
+        expr: memory_growth_rate_bytes_per_second > (1024 * 1024)
+        for: 10m
+        labels:
+          severity: critical
+          component: memory
+        annotations:
+          summary: "Memory leak suspected"
+          description: "Memory growing at {{ $value | humanize }}B/s for 10+ minutes. Investigate immediately."
+
+      - alert: HighGarbageCollectionRate
+        expr: rate(memory_gc_collections_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "High garbage collection rate"
+          description: "GC running {{ $value }} times/sec. May impact performance."
+
+  # ============================================================================
+  # API PERFORMANCE ALERTS
+  # ============================================================================
+  - name: api_performance
+    interval: 30s
+    rules:
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.95, rate(tradingview_request_duration_seconds_bucket[5m])) > 1
+        for: 3m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API latency"
+          description: "P95 latency is {{ $value }}s (threshold: 1s) for endpoint {{ $labels.endpoint }}"
+
+      - alert: CriticalAPILatency
+        expr: histogram_quantile(0.95, rate(tradingview_request_duration_seconds_bucket[5m])) > 5
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Critical API latency"
+          description: "P95 latency is {{ $value }}s (threshold: 5s) for endpoint {{ $labels.endpoint }}. Immediate action required."
+
+      - alert: HighErrorRate
+        expr: rate(error_rate_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API error rate"
+          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.endpoint }}"
+
+      - alert: SlowQueryDetected
+        expr: rate(slow_query_count_total[5m]) > 1
+        for: 3m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Slow queries detected"
+          description: "{{ $value }} slow queries/sec for {{ $labels.query_type }}. Optimize queries or add indexes."
+
+  # ============================================================================
+  # RATE LIMITING ALERTS
+  # ============================================================================
+  - name: rate_limiting
+    interval: 60s
+    rules:
+      - alert: HighRateLimitBlockRate
+        expr: rate(rate_limit_blocks_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: rate_limiting
+        annotations:
+          summary: "High rate limit block rate"
+          description: "{{ $value }} requests/sec being blocked for {{ $labels.tier }} tier on {{ $labels.endpoint }}"
+
+      - alert: PossibleDDoSAttack
+        expr: rate(rate_limit_blocks_total[1m]) > 100
+        for: 2m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Possible DDoS attack detected"
+          description: "{{ $value }} requests/sec being blocked. Possible attack on {{ $labels.endpoint }}"
+
+  # ============================================================================
+  # DEPENDENCY HEALTH ALERTS
+  # ============================================================================
+  - name: dependencies
+    interval: 60s
+    rules:
+      - alert: DatabaseUnhealthy
+        expr: dependency_health_status{dependency="database"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database unhealthy"
+          description: "Database health check failing. Application cannot function."
+
+      - alert: RedisUnhealthy
+        expr: dependency_health_status{dependency="redis"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis unhealthy"
+          description: "Redis health check failing. Caching and rate limiting affected."
+
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state{service!=""} == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: resilience
+        annotations:
+          summary: "Circuit breaker opened for {{ $labels.service }}"
+          description: "Circuit breaker for {{ $labels.service }} is OPEN. Service unavailable."
+
+  # ============================================================================
+  # WEBSOCKET ALERTS
+  # ============================================================================
+  - name: websockets
+    interval: 60s
+    rules:
+      - alert: HighWebSocketConnections
+        expr: sum(websocket_connections_active) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: websocket
+        annotations:
+          summary: "High number of WebSocket connections"
+          description: "{{ $value }} active WebSocket connections. Monitor for resource exhaustion."
+
+      - alert: WebSocketConnectionSpike
+        expr: rate(websocket_connections_active[1m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          component: websocket
+        annotations:
+          summary: "WebSocket connection spike"
+          description: "{{ $value }} new connections/sec. Possible bot activity."
