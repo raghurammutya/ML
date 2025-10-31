@@ -30,6 +30,7 @@ class OptionSnapshot:
     vega: float
     timestamp: int
     oi: int | None = None
+    is_mock: bool = False
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -52,4 +53,5 @@ class OptionSnapshot:
             "theta": self.theta,
             "vega": self.vega,
             "ts": self.timestamp,
+            "is_mock": self.is_mock,
         }

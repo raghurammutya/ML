@@ -139,6 +139,10 @@ class FOAggregator:
         return ts - (ts % seconds)
 
     async def handle_underlying(self, payload: Dict[str, object]) -> None:
+        # Skip mock data - don't store it in the database
+        if payload.get("is_mock"):
+            return
+
         symbol = str(payload.get("symbol") or self._settings.fo_underlying)
         close = payload.get("close") or payload.get("price") or payload.get("last_price")
         if close is None:
@@ -173,6 +177,10 @@ class FOAggregator:
         await self._persist_batches(flush_payloads)
 
     async def handle_option(self, payload: Dict[str, object]) -> None:
+        # Skip mock data - don't store it in the database
+        if payload.get("is_mock"):
+            return
+
         expiry = _parse_expiry(str(payload.get("expiry", "")))
         if not expiry:
             return

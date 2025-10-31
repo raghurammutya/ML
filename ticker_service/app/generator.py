@@ -731,7 +731,7 @@ class MultiAccountTickerLoop:
                         break
                     snapshot = self._generate_mock_option_snapshot(instrument)
                     if snapshot:
-                        await publish_option_snapshot(snapshot, is_mock=True)
+                        await publish_option_snapshot(snapshot)
                         emitted += 1
                 if emitted:
                     logger.debug("Published %d mock option snapshots for account %s", emitted, account_id)
