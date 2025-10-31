@@ -327,16 +327,25 @@ DEFAULT_UX = {
   - call_vega_avg, put_vega_avg
 
 ### Testing Checklist (Sprint 3)
-- [ ] Replay button triggers window fetch and enters replay mode
-- [ ] Watermark appears on main chart
-- [ ] Play advances cursor smoothly at selected speed
-- [ ] Step forward/backward moves exactly one candle
-- [ ] Right-of-cursor content is de-emphasized
-- [ ] All panels show synchronized timestamp
-- [ ] Exit replay returns to live mode
-- [ ] Performance mode toggle changes UI state
-- [ ] Backend /replay/window endpoint returns valid data
-- [ ] Speed selector cycles through presets correctly
+- [x] Replay button triggers window fetch and enters replay mode
+- [x] Watermark appears on main chart
+- [x] Play advances cursor smoothly at selected speed
+- [x] Step forward/backward moves exactly one candle
+- [ ] Right-of-cursor content is de-emphasized (requires chart integration)
+- [ ] All panels show synchronized timestamp (requires chart cursor overlay)
+- [x] Exit replay returns to live mode
+- [x] Performance mode toggle changes UI state
+- [x] Backend /replay/window endpoint returns valid data
+- [x] Speed selector cycles through presets correctly
+
+### Sprint 3 UI Integration (Completed)
+- [x] useReplayMode hook integrated into MonitorPage
+- [x] Replay button in header controls
+- [x] Performance mode toggle in header
+- [x] ReplayWatermark overlay conditional rendering
+- [x] ReplayControls floating toolbar with all controls
+- [x] TypeScript type fixes for bufferedData
+- [x] Frontend built and deployed successfully
 
 ### Known Limitations
 - Grid layout drag-and-drop not yet implemented (requires react-grid-layout)
