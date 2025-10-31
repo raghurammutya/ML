@@ -25,7 +25,8 @@ from .backfill import BackfillManager
 from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts
+from .order_stream import OrderStreamManager
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws
 
 # -------- logging --------
 logging.basicConfig(
@@ -47,6 +48,8 @@ nifty_monitor_stream: Optional[NiftyMonitorStream] = None
 monitor_hub: Optional[RealTimeHub] = None
 labels_hub: Optional[RealTimeHub] = None
 backfill_manager: Optional[BackfillManager] = None
+order_hub: Optional[RealTimeHub] = None
+order_stream_manager: Optional[OrderStreamManager] = None
 
 background_tasks = []  # supervised background tasks
 
@@ -106,6 +109,8 @@ async def lifespan(app: FastAPI):
     global nifty_monitor_stream
     global monitor_hub
     global backfill_manager
+    global order_hub
+    global order_stream_manager
 
     try:
         logger.info("Starting TradingView ML Visualization API")
@@ -135,9 +140,11 @@ async def lifespan(app: FastAPI):
         real_time_hub = RealTimeHub()
         monitor_hub = RealTimeHub()
         labels_hub = RealTimeHub()
+        order_hub = RealTimeHub()  # New: for order updates
         fo.set_realtime_hub(real_time_hub)
         labels.set_realtime_hub(labels_hub)
         label_stream.set_realtime_hub(labels_hub)
+        order_ws.set_order_hub(order_hub)  # New: set order hub for WebSocket routes
 
         # Routes
         udf_handler = UDFHandler(data_manager)        # uses DB manager (not cache)
@@ -177,6 +184,7 @@ async def lifespan(app: FastAPI):
         app.include_router(nifty_monitor.router)
         app.include_router(replay.router)
         app.include_router(accounts.router)
+        app.include_router(order_ws.router)  # New: WebSocket routes for order updates
 
         if settings.fo_stream_enabled:
             fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
@@ -188,6 +196,11 @@ async def lifespan(app: FastAPI):
         if backfill_manager and settings.backfill_enabled:
             background_tasks.append(asyncio.create_task(backfill_manager.run()))
             logger.info("Backfill manager loop started")
+
+        # Order stream manager (Phase 4A: WebSocket order streaming)
+        order_stream_manager = OrderStreamManager(settings.ticker_service_url, order_hub)
+        await order_stream_manager.start()
+        logger.info("Order stream manager started")
 
         # Supervise background tasks
         background_tasks.append(asyncio.create_task(task_supervisor()))
@@ -208,6 +221,8 @@ async def lifespan(app: FastAPI):
             await fo_stream_consumer.shutdown()
         if backfill_manager:
             await backfill_manager.shutdown()
+        if order_stream_manager:
+            await order_stream_manager.stop()
         if data_manager:
             await data_manager.close()
         if redis_client:

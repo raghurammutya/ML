@@ -125,6 +125,21 @@ class SyncRequest(BaseModel):
     force: bool = Field(default=False, description="Force sync even if recently synced")
 
 
+class BatchOrderRequest(BaseModel):
+    """Request model for placing multiple orders atomically."""
+    orders: List[OrderRequest] = Field(..., min_items=1, max_items=10, description="List of orders to place")
+    rollback_on_failure: bool = Field(default=True, description="Cancel all orders if any fails")
+
+    @validator('orders')
+    def validate_orders_count(cls, v):
+        """Validate order count is within limits."""
+        if len(v) > 10:
+            raise ValueError('Maximum 10 orders per batch')
+        if len(v) == 0:
+            raise ValueError('At least 1 order required')
+        return v
+
+
 # ============================================================================
 # Trading Accounts Endpoints
 # ============================================================================
@@ -337,6 +352,114 @@ async def place_order(
         raise
     except Exception as e:
         logger.error(f"Error placing order for {account_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{account_id}/batch-orders")
+async def place_batch_orders(
+    account_id: str,
+    batch_request: BatchOrderRequest,
+    service: AccountService = Depends(get_account_service)
+) -> Dict[str, Any]:
+    """
+    Place multiple orders atomically (all-or-nothing execution).
+
+    This endpoint allows placing multiple orders simultaneously with automatic
+    rollback if any order fails. Ideal for multi-leg strategies like:
+    - Option spreads (bull call spread, bear put spread)
+    - Iron condors (4-leg position)
+    - Straddles/Strangles (buy call + put)
+    - Portfolio rebalancing
+
+    Args:
+        account_id: Account identifier (user_id)
+        batch_request: Batch order specification with rollback flag
+
+    Returns:
+        Batch execution result with order IDs and status
+
+    Example Request:
+        {
+            "orders": [
+                {
+                    "tradingsymbol": "NIFTY25NOVFUT",
+                    "exchange": "NFO",
+                    "transaction_type": "BUY",
+                    "quantity": 50,
+                    "order_type": "MARKET",
+                    "product": "NRML"
+                },
+                {
+                    "tradingsymbol": "BANKNIFTY25NOVFUT",
+                    "exchange": "NFO",
+                    "transaction_type": "SELL",
+                    "quantity": 25,
+                    "order_type": "LIMIT",
+                    "product": "NRML",
+                    "price": 45500.0
+                }
+            ],
+            "rollback_on_failure": true
+        }
+
+    Example Response:
+        {
+            "status": "success",
+            "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+            "total_orders": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "order_ids": ["230405000123456", "230405000123457"]
+        }
+    """
+    try:
+        # Convert OrderRequest models to dicts
+        orders_data = []
+        for order in batch_request.orders:
+            order_dict = {
+                "tradingsymbol": order.tradingsymbol,
+                "exchange": order.exchange,
+                "transaction_type": order.transaction_type,
+                "quantity": order.quantity,
+                "order_type": order.order_type,
+                "product": order.product,
+            }
+            if order.price is not None:
+                order_dict["price"] = order.price
+            if order.trigger_price is not None:
+                order_dict["trigger_price"] = order.trigger_price
+            if order.validity:
+                order_dict["validity"] = order.validity
+            if order.disclosed_quantity is not None:
+                order_dict["disclosed_quantity"] = order.disclosed_quantity
+            if order.tag:
+                order_dict["tag"] = order.tag
+
+            orders_data.append(order_dict)
+
+        # Place batch orders via service
+        result = await service.place_batch_orders(
+            account_id=account_id,
+            orders=orders_data,
+            rollback_on_failure=batch_request.rollback_on_failure
+        )
+
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "Batch order placement failed")
+            )
+
+        return {
+            "status": "success",
+            "account_id": account_id,
+            **result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error placing batch orders for {account_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

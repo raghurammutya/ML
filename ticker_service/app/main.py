@@ -163,6 +163,10 @@ app.include_router(account_router)
 app.include_router(gtt_router)
 app.include_router(mf_router)
 
+# Include advanced features router
+from .routes_advanced import router as advanced_router
+app.include_router(advanced_router)
+
 
 class SubscriptionRequest(BaseModel):
     instrument_token: int = Field(ge=1)

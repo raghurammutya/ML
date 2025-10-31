@@ -615,6 +615,99 @@ class AccountService:
                 "error": str(e)
             }
 
+    async def place_batch_orders(
+        self,
+        account_id: str,
+        orders: List[Dict[str, Any]],
+        rollback_on_failure: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Place multiple orders atomically via ticker_service batch endpoint.
+
+        Args:
+            account_id: Account identifier (user_id)
+            orders: List of order specifications (each dict contains order parameters)
+            rollback_on_failure: If True, cancel all orders if any fails (default: True)
+
+        Returns:
+            Batch result: {
+                batch_id, success, total_orders, succeeded, failed,
+                created_at, completed_at, order_ids (list), errors (list)
+            }
+
+        Example:
+            orders = [
+                {
+                    "tradingsymbol": "NIFTY25NOVFUT",
+                    "exchange": "NFO",
+                    "transaction_type": "BUY",
+                    "quantity": 50,
+                    "order_type": "MARKET",
+                    "product": "NRML"
+                },
+                {
+                    "tradingsymbol": "BANKNIFTY25NOVFUT",
+                    "exchange": "NFO",
+                    "transaction_type": "SELL",
+                    "quantity": 25,
+                    "order_type": "LIMIT",
+                    "product": "NRML",
+                    "price": 45500.0
+                }
+            ]
+        """
+        try:
+            payload = {
+                "orders": orders,
+                "account_id": account_id,
+                "rollback_on_failure": rollback_on_failure
+            }
+
+            logger.info(f"Placing batch of {len(orders)} orders for account {account_id}")
+
+            # Call ticker_service batch orders endpoint
+            response = await self._http.post("/advanced/batch-orders", json=payload)
+            response.raise_for_status()
+
+            result = response.json()
+
+            # Sync orders to update database with all new orders
+            await self.sync_account(account_id)
+
+            batch_id = result.get("batch_id")
+            succeeded = result.get("succeeded", 0)
+            failed = result.get("failed", 0)
+
+            logger.info(
+                f"Batch order completed: batch_id={batch_id}, "
+                f"succeeded={succeeded}, failed={failed}"
+            )
+
+            return result
+
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.text
+            logger.error(
+                f"HTTP error placing batch orders: {e.response.status_code} - {error_detail}"
+            )
+            return {
+                "success": False,
+                "total_orders": len(orders),
+                "succeeded": 0,
+                "failed": len(orders),
+                "error": f"HTTP {e.response.status_code}: {error_detail}"
+            }
+
+        except Exception as e:
+            logger.error(f"Error placing batch orders: {e}", exc_info=True)
+            return {
+                "success": False,
+                "total_orders": len(orders),
+                "succeeded": 0,
+                "failed": len(orders),
+                "error": str(e)
+            }
+
     # ============================================================================
     # Holdings
     # ============================================================================
