@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     stream_interval_seconds: float = Field(default=1.0)
     publish_channel_prefix: str = Field(default="ticker:nifty")
     ticker_mode: str = Field(default="full", description="Ticker mode to request from KiteTicker (full|quote|ltp)")
+    max_instruments_per_ws_connection: int = Field(
+        default=1000,
+        description="Maximum instruments per WebSocket connection. Pool will create additional connections when limit reached.",
+    )
     enabled_panels: List[str] = Field(
         default_factory=lambda: [
             "pcr",

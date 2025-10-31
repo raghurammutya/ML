@@ -370,3 +370,18 @@ class SessionOrchestrator:
         self._rr_index = 0
 
         logger.info(f"Account reload complete. Active accounts: {', '.join(self.list_accounts())}")
+
+
+# Global orchestrator singleton
+_orchestrator_instance: SessionOrchestrator | None = None
+
+
+def get_orchestrator() -> SessionOrchestrator:
+    """
+    Get the global SessionOrchestrator singleton instance.
+    Creates one if it doesn't exist yet.
+    """
+    global _orchestrator_instance
+    if _orchestrator_instance is None:
+        _orchestrator_instance = SessionOrchestrator()
+    return _orchestrator_instance

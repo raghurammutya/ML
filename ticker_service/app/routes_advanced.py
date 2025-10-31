@@ -602,3 +602,136 @@ async def reset_circuit_breaker():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset circuit breaker: {e}")
+
+
+# ============================================================================
+# Kite API Rate Limiting
+# ============================================================================
+
+@router.get("/rate-limit/stats")
+async def get_rate_limit_stats():
+    """
+    Get Kite API rate limiting statistics.
+
+    Returns statistics for all rate-limited endpoints including:
+    - Total requests made
+    - Total wait time due to rate limiting
+    - Current usage per endpoint (per-minute and per-day counters)
+    - Average wait time per request
+
+    Useful for monitoring API usage and identifying rate limit bottlenecks.
+    """
+    from .kite_rate_limiter import get_rate_limiter
+
+    rate_limiter = get_rate_limiter()
+    return rate_limiter.get_stats()
+
+
+@router.get("/rate-limit/config")
+async def get_rate_limit_config():
+    """
+    Get Kite API rate limit configuration.
+
+    Returns the official Kite Connect API rate limits as documented at:
+    https://kite.trade/docs/connect/v3/exceptions/#api-rate-limit
+
+    Rate Limits:
+    - Quote endpoint: 1 req/sec
+    - Historical data: 3 req/sec
+    - Order placement: 10 req/sec, 200 req/min, 3000 req/day
+    - Order modifications: 10 req/sec
+    - Order cancellations: 10 req/sec
+    - Other endpoints: 10 req/sec
+    """
+    from .kite_rate_limiter import KITE_RATE_LIMITS
+
+    return {
+        "documentation_url": "https://kite.trade/docs/connect/v3/exceptions/#api-rate-limit",
+        "limits": {
+            endpoint.value: {
+                "requests_per_second": config.requests_per_second,
+                "requests_per_minute": config.requests_per_minute,
+                "requests_per_day": config.requests_per_day
+            }
+            for endpoint, config in KITE_RATE_LIMITS.items()
+        }
+    }
+
+
+# ============================================================================
+# WebSocket Connection Pool Monitoring
+# ============================================================================
+
+@router.get("/websocket-pool/stats")
+async def get_websocket_pool_stats():
+    """
+    Get WebSocket connection pool statistics for all accounts.
+
+    Returns detailed information about WebSocket connections including:
+    - Total number of active connections per account
+    - Subscribed instruments count per connection
+    - Connection capacity and utilization
+    - Total connections created (lifetime counter)
+    - Total subscriptions/unsubscriptions
+
+    This is useful for monitoring WebSocket scaling behavior and ensuring
+    the pool is properly distributing load across multiple connections.
+
+    Note: Each WebSocket connection can handle up to 1000 instruments (configurable).
+    The pool automatically creates additional connections when this limit is reached.
+    """
+    from .accounts import get_orchestrator
+
+    orchestrator = get_orchestrator()
+    all_stats = {}
+
+    # Get stats from all accounts
+    for account_id, session in orchestrator._sessions.items():
+        pool_stats = session.client.get_pool_stats()
+        if pool_stats:
+            all_stats[account_id] = pool_stats
+
+    return {
+        "total_accounts": len(all_stats),
+        "accounts": all_stats,
+        "note": "Each connection can handle up to max_instruments_per_ws_connection instruments (default: 1000)"
+    }
+
+
+@router.get("/websocket-pool/stats/{account_id}")
+async def get_websocket_pool_stats_for_account(account_id: str):
+    """
+    Get WebSocket connection pool statistics for a specific account.
+
+    Returns detailed information about WebSocket connections for the specified account:
+    - Number of active connections
+    - Subscribed instruments per connection
+    - Connection health status
+    - Capacity utilization per connection
+    - Statistics (total connections created, subscriptions, unsubscriptions)
+
+    Args:
+        account_id: The account ID to get statistics for
+
+    Raises:
+        404: If account not found or has no active WebSocket pool
+    """
+    from .accounts import get_orchestrator
+
+    orchestrator = get_orchestrator()
+    session = orchestrator._sessions.get(account_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Account '{account_id}' not found"
+        )
+
+    pool_stats = session.client.get_pool_stats()
+    if not pool_stats:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Account '{account_id}' has no active WebSocket pool"
+        )
+
+    return pool_stats

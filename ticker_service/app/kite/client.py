@@ -13,6 +13,8 @@ from loguru import logger
 
 from ..config import get_settings
 from ..schema import Instrument
+from ..kite_rate_limiter import get_rate_limiter, KiteEndpoint
+from .websocket_pool import KiteWebSocketPool
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from ..accounts import KiteAccount
@@ -69,16 +71,11 @@ class KiteClient:
         )
 
         self._settings = get_settings()
-        self._ticker: KiteTicker | None = None
-        self._ticker_connected = False
-        self._ticker_running = False
-        self._ticker_mode: str | None = None
+        self._ws_pool: KiteWebSocketPool | None = None
+        self._pool_started = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tick_handler: TickHandler | None = None
         self._error_handler: ErrorHandler | None = None
-        self._subscription_lock = threading.Lock()
-        self._target_tokens: Set[int] = set()
-        self._subscribed_tokens: Set[int] = set()
 
     @classmethod
     def from_account(cls, account: "KiteAccount") -> "KiteClient":
@@ -140,6 +137,10 @@ class KiteClient:
     ) -> List[Dict[str, Any]]:
         await self.ensure_session()
 
+        # Rate limiting: 3 requests/second for historical data
+        rate_limiter = get_rate_limiter()
+        await rate_limiter.acquire(KiteEndpoint.HISTORICAL, wait=True, timeout=30.0)
+
         from_dt = datetime.fromtimestamp(from_ts, tz=timezone.utc)
         to_dt = datetime.fromtimestamp(to_ts, tz=timezone.utc)
         logger.debug(
@@ -191,6 +192,10 @@ class KiteClient:
             return {}
 
         await self.ensure_session()
+
+        # Rate limiting: 1 request/second for quote endpoint
+        rate_limiter = get_rate_limiter()
+        await rate_limiter.acquire(KiteEndpoint.QUOTE, wait=True, timeout=30.0)
 
         def _quote() -> Dict[str, Any]:
             return self._kite.quote(symbols)
@@ -294,43 +299,44 @@ class KiteClient:
         self._tick_handler = on_ticks
         self._error_handler = on_error
 
-        with self._subscription_lock:
-            self._target_tokens.update(instrument_tokens)
+        # Initialize pool if needed
+        self._ensure_pool()
 
-        logger.debug("Account %s scheduling subscribe for %d tokens", self.account_id, len(instrument_tokens))
-        self._ensure_ticker()
-        self._sync_subscriptions()
+        # Subscribe via pool (automatically handles multi-connection scaling)
+        logger.info(
+            "Account %s subscribing to %d tokens via WebSocket pool",
+            self.account_id,
+            len(instrument_tokens),
+        )
+        self._ws_pool.subscribe_tokens(instrument_tokens)
 
     async def unsubscribe_tokens(self, tokens: Iterable[int]) -> None:
         instrument_tokens = [int(token) for token in tokens]
         if not instrument_tokens:
             return
 
-        with self._subscription_lock:
-            for token in instrument_tokens:
-                self._target_tokens.discard(token)
-        logger.debug("Account %s scheduling unsubscribe for %d tokens", self.account_id, len(instrument_tokens))
+        if not self._ws_pool:
+            logger.warning("Account %s: no WebSocket pool to unsubscribe from", self.account_id)
+            return
 
-        self._sync_subscriptions()
+        logger.info(
+            "Account %s unsubscribing from %d tokens via WebSocket pool",
+            self.account_id,
+            len(instrument_tokens),
+        )
+        self._ws_pool.unsubscribe_tokens(instrument_tokens)
 
     async def stop_stream(self) -> None:
-        with self._subscription_lock:
-            self._target_tokens.clear()
-
-        self._sync_subscriptions()
-
-        if self._ticker:
+        if self._ws_pool:
             try:
-                self._ticker.close()
+                self._ws_pool.stop_all()
             except Exception:  # pragma: no cover - depends on network state
-                logger.exception("Failed to close ticker for %s", self.account_id)
+                logger.exception("Failed to stop WebSocket pool for %s", self.account_id)
 
-        self._ticker = None
-        self._ticker_running = False
-        self._ticker_connected = False
-        self._subscribed_tokens.clear()
+        self._ws_pool = None
+        self._pool_started = False
         self._loop = None
-        logger.info("Kite ticker stopped for account %s", self.account_id)
+        logger.info("WebSocket pool stopped for account %s", self.account_id)
 
     # ------------------------------------------------------------------ Order Management APIs
     async def place_order(
@@ -357,6 +363,10 @@ class KiteClient:
         Returns: order_id
         """
         await self.ensure_session()
+
+        # Rate limiting: 10 req/sec, 200 req/min, 3000 req/day for orders
+        rate_limiter = get_rate_limiter()
+        await rate_limiter.acquire(KiteEndpoint.ORDER_PLACE, wait=True, timeout=30.0)
 
         def _place() -> str:
             params = {
@@ -407,6 +417,10 @@ class KiteClient:
         """
         await self.ensure_session()
 
+        # Rate limiting: 10 req/sec for order modifications
+        rate_limiter = get_rate_limiter()
+        await rate_limiter.acquire(KiteEndpoint.ORDER_MODIFY, wait=True, timeout=30.0)
+
         def _modify() -> str:
             params = {
                 "variety": variety,
@@ -438,6 +452,10 @@ class KiteClient:
         Returns: order_id
         """
         await self.ensure_session()
+
+        # Rate limiting: 10 req/sec for order cancellations
+        rate_limiter = get_rate_limiter()
+        await rate_limiter.acquire(KiteEndpoint.ORDER_CANCEL, wait=True, timeout=30.0)
 
         def _cancel() -> str:
             params = {
@@ -941,8 +959,9 @@ class KiteClient:
         self._kite.set_session_expiry_hook(callback)
 
     # ------------------------------------------------------------------ internals
-    def _ensure_ticker(self) -> None:
-        if self._ticker_running:
+    def _ensure_pool(self) -> None:
+        """Initialize WebSocket pool if not already started"""
+        if self._pool_started and self._ws_pool:
             return
 
         if not self.access_token:
@@ -950,101 +969,44 @@ class KiteClient:
                 f"Account {self.account_id} has no access token. Call ensure_session() first."
             )
 
-        self._ticker = KiteTicker(
+        if not self._loop:
+            raise RuntimeError(
+                f"Account {self.account_id} has no event loop. Call from async context."
+            )
+
+        # Get configuration
+        ticker_mode = getattr(self._settings, "ticker_mode", "LTP").upper()
+        max_instruments_per_connection = getattr(
+            self._settings,
+            "max_instruments_per_ws_connection",
+            1000,
+        )
+
+        # Create pool
+        self._ws_pool = KiteWebSocketPool(
+            account_id=self.account_id,
             api_key=self.api_key,
             access_token=self.access_token,
-            root=WS_ROOT,
-            reconnect=True,
-            reconnect_max_tries=50,
-            reconnect_max_delay=60,
+            ws_root=WS_ROOT,
+            ticker_mode=ticker_mode,
+            max_instruments_per_connection=max_instruments_per_connection,
+            tick_handler=self._tick_handler,
+            error_handler=self._error_handler,
         )
-        logger.debug("KiteTicker constructed for account %s (root=%s)", self.account_id, WS_ROOT)
 
-        def _on_connect(ws, response=None):  # pragma: no cover - runs in WS thread
-            self._ticker_connected = True
-            mode = getattr(self._settings, "ticker_mode", "LTP").upper()
-            self._ticker_mode = mode
-            logger.info("Kite ticker connected for %s in %s mode", self.account_id, mode)
-            self._sync_subscriptions()
+        # Start pool
+        self._ws_pool.start(self._loop)
+        self._pool_started = True
 
-        def _on_close(ws, code, reason):  # pragma: no cover - runs in WS thread
-            self._ticker_connected = False
-            logger.warning(
-                "Kite ticker closed for %s (code=%s reason=%s)",
-                self.account_id,
-                code,
-                reason,
-            )
+        logger.info(
+            "WebSocket pool initialized for account %s (mode=%s, max_per_connection=%d)",
+            self.account_id,
+            ticker_mode,
+            max_instruments_per_connection,
+        )
 
-        def _on_error(ws, code, reason):  # pragma: no cover - runs in WS thread
-            logger.error(
-                "Kite ticker error for %s (code=%s reason=%s)",
-                self.account_id,
-                code,
-                reason,
-            )
-            if self._error_handler and self._loop:
-                asyncio.run_coroutine_threadsafe(
-                    self._error_handler(self.account_id, RuntimeError(f"WS error {code}: {reason}")),
-                    self._loop,
-                )
-
-        def _on_ticks(ws, ticks):  # pragma: no cover - runs in WS thread
-            if self._tick_handler and self._loop:
-                asyncio.run_coroutine_threadsafe(
-                    self._tick_handler(self.account_id, ticks),
-                    self._loop,
-                )
-
-        self._ticker.on_connect = _on_connect
-        self._ticker.on_close = _on_close
-        self._ticker.on_error = _on_error
-        self._ticker.on_ticks = _on_ticks
-
-        self._ticker_running = True
-        self._ticker.connect(threaded=True, reconnect=True, disable_ssl_verification=False)
-
-    def _sync_subscriptions(self) -> None:
-        if not self._ticker or not self._ticker_running:
-            return
-
-        if not self._ticker_connected or getattr(self._ticker, "ws", None) is None:
-            logger.debug("WS not connected yet; deferring subscribe sync for %s", self.account_id)
-            return
-
-        with self._subscription_lock:
-            target = set(self._target_tokens)
-            to_add = list(target - self._subscribed_tokens)
-            to_remove = list(self._subscribed_tokens - target)
-
-        if to_add:
-            try:
-                self._ticker.subscribe(to_add)
-                self._subscribed_tokens.update(to_add)
-                logger.debug("Subscribed %s -> %s", self.account_id, to_add)
-            except Exception:  # pragma: no cover
-                logger.exception("Subscribe failed for %s", self.account_id)
-
-        if to_remove:
-            try:
-                self._ticker.unsubscribe(to_remove)
-                for token in to_remove:
-                    self._subscribed_tokens.discard(token)
-                logger.debug("Unsubscribed %s -> %s", self.account_id, to_remove)
-            except Exception:  # pragma: no cover
-                logger.exception("Unsubscribe failed for %s", self.account_id)
-
-        if not self._subscribed_tokens:
-            return
-
-        mode = (self._ticker_mode or "LTP").upper()
-        tokens = list(self._subscribed_tokens)
-        try:
-            if mode == "FULL":
-                self._ticker.set_mode(self._ticker.MODE_FULL, tokens)
-            elif mode == "QUOTE":
-                self._ticker.set_mode(self._ticker.MODE_QUOTE, tokens)
-            else:
-                self._ticker.set_mode(self._ticker.MODE_LTP, tokens)
-        except Exception:  # pragma: no cover
-            logger.exception("set_mode(%s) failed for %s", mode, self.account_id)
+    def get_pool_stats(self) -> Optional[Dict[str, Any]]:
+        """Get statistics about the WebSocket connection pool"""
+        if not self._ws_pool:
+            return None
+        return self._ws_pool.get_stats()
