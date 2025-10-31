@@ -9,13 +9,25 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/tradingview-api'
 
+/**
+ * Normalize symbol for FO endpoints
+ * Backend database stores options data under "NIFTY" while main chart uses "NIFTY50"
+ */
+const normalizeFoSymbol = (symbol: string): string => {
+  if (symbol === 'NIFTY50') {
+    return 'NIFTY'
+  }
+  return symbol
+}
+
 export const fetchFoIndicators = async (): Promise<FoIndicatorDefinition[]> => {
   const response = await api.get<{ status: string; indicators: FoIndicatorDefinition[] }>('/fo/indicators')
   return response.data.indicators
 }
 
 export const fetchFoExpiries = async (symbol: string): Promise<FoExpiriesResponse> => {
-  const response = await api.get<FoExpiriesResponse>('/fo/expiries', { params: { symbol } })
+  const normalizedSymbol = normalizeFoSymbol(symbol)
+  const response = await api.get<FoExpiriesResponse>('/fo/expiries', { params: { symbol: normalizedSymbol } })
   return response.data
 }
 
@@ -30,9 +42,10 @@ export interface MoneynessSeriesParams {
 }
 
 export const fetchFoMoneynessSeries = async (params: MoneynessSeriesParams): Promise<FoMoneynessSeriesResponse> => {
+  const normalizedSymbol = normalizeFoSymbol(params.symbol)
   const response = await api.get<FoMoneynessSeriesResponse>('/fo/moneyness-series', {
     params: {
-      symbol: params.symbol,
+      symbol: normalizedSymbol,
       timeframe: params.timeframe,
       indicator: params.indicator,
       option_side: params.option_side,
@@ -53,9 +66,10 @@ export interface StrikeDistributionParams {
 }
 
 export const fetchFoStrikeDistribution = async (params: StrikeDistributionParams): Promise<FoStrikeDistributionResponse> => {
+  const normalizedSymbol = normalizeFoSymbol(params.symbol)
   const response = await api.get<FoStrikeDistributionResponse>('/fo/strike-distribution', {
     params: {
-      symbol: params.symbol,
+      symbol: normalizedSymbol,
       timeframe: params.timeframe,
       indicator: params.indicator,
       expiry: params.expiry,

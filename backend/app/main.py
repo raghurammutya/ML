@@ -26,7 +26,7 @@ from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws
 
 # -------- logging --------
 logging.basicConfig(
@@ -50,6 +50,8 @@ labels_hub: Optional[RealTimeHub] = None
 backfill_manager: Optional[BackfillManager] = None
 order_hub: Optional[RealTimeHub] = None
 order_stream_manager: Optional[OrderStreamManager] = None
+snapshot_service = None  # Account snapshot service
+indicator_streaming_task = None  # Indicator streaming background task
 
 background_tasks = []  # supervised background tasks
 
@@ -111,6 +113,8 @@ async def lifespan(app: FastAPI):
     global backfill_manager
     global order_hub
     global order_stream_manager
+    global snapshot_service
+    global indicator_streaming_task
 
     try:
         logger.info("Starting TradingView ML Visualization API")
@@ -183,8 +187,16 @@ async def lifespan(app: FastAPI):
 
         app.include_router(nifty_monitor.router)
         app.include_router(replay.router)
+
+        # Store DB pool for API key authentication
+        app.state.db_pool = data_manager.pool
+
         app.include_router(accounts.router)
+        app.include_router(api_keys.router)  # API key management endpoints
         app.include_router(order_ws.router)  # New: WebSocket routes for order updates
+        app.include_router(indicators_api.router)  # Phase 2: Dynamic technical indicators API
+        app.include_router(indicator_ws.router)  # Phase 2D: Indicator WebSocket streaming
+        logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:
             fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
@@ -201,6 +213,27 @@ async def lifespan(app: FastAPI):
         order_stream_manager = OrderStreamManager(settings.ticker_service_url, order_hub)
         await order_stream_manager.start()
         logger.info("Order stream manager started")
+
+        # Account snapshot service (Historical positions/holdings/funds)
+        from app.services.snapshot_service import AccountSnapshotService
+        from app.services.account_service import AccountService
+
+        # Get or create AccountService instance
+        account_service = AccountService(data_manager, settings.ticker_service_url)
+        snapshot_service = AccountSnapshotService(data_manager, account_service)
+
+        # Start with 5-minute snapshot interval (configurable)
+        snapshot_interval_seconds = getattr(settings, 'snapshot_interval_seconds', 300)
+        await snapshot_service.start(interval_seconds=snapshot_interval_seconds)
+        logger.info(f"Account snapshot service started (interval: {snapshot_interval_seconds}s)")
+
+        # Indicator streaming service (Phase 2D: Real-time indicator updates)
+        from app.routes.indicator_ws import stream_indicator_updates_task
+        indicator_streaming_task = asyncio.create_task(
+            stream_indicator_updates_task(redis_client, data_manager)
+        )
+        background_tasks.append(indicator_streaming_task)
+        logger.info("Indicator streaming task started")
 
         # Supervise background tasks
         background_tasks.append(asyncio.create_task(task_supervisor()))
@@ -223,6 +256,9 @@ async def lifespan(app: FastAPI):
             await backfill_manager.shutdown()
         if order_stream_manager:
             await order_stream_manager.stop()
+        if snapshot_service:
+            await snapshot_service.stop()
+            logger.info("Snapshot service stopped")
         if data_manager:
             await data_manager.close()
         if redis_client:

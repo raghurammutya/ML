@@ -40,7 +40,7 @@ class Settings(BaseSettings):
    
     # Ticker service
     ticker_service_url: str = "http://localhost:8080"
-    ticker_service_timeout: int = 10
+    ticker_service_timeout: int = 30  # Increased from 10 to 30 for slow subscription responses
     ticker_service_mode: str = "FULL"
     ticker_service_account_id: Optional[str] = None
     monitor_stream_enabled: bool = True
