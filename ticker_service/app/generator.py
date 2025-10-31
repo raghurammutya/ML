@@ -68,6 +68,7 @@ class MultiAccountTickerLoop:
 
     def __init__(self, orchestrator: SessionOrchestrator | None = None) -> None:
         self._orchestrator = orchestrator
+        self._settings = get_settings()
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
         self._underlying_task: asyncio.Task | None = None

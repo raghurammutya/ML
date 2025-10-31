@@ -451,3 +451,154 @@ async def get_mock_data_status():
             "history_minutes": settings.mock_history_minutes
         }
     }
+
+
+# ============================================================================
+# Backpressure Monitoring & Control
+# ============================================================================
+
+@router.get("/backpressure/status")
+async def get_backpressure_status():
+    """
+    Get current backpressure status and metrics.
+
+    Returns:
+        {
+            "backpressure_level": "healthy" | "warning" | "critical" | "overload",
+            "health_status": "healthy" | "degraded",
+            "ingestion_rate": "1234.5 ticks/sec",
+            "publish_rate": "1234.5 ticks/sec",
+            "rate_ratio": "100.00%",
+            "avg_latency": "1.23 ms",
+            "p99_latency": "5.67 ms",
+            "pending_publishes": 123,
+            "dropped_messages": 0,
+            "redis_errors": 0,
+            "memory_usage": "512.3 MB",
+            "cpu_usage": "45.6%",
+            "timestamp": "2025-10-31T..."
+        }
+    """
+    from .backpressure_monitor import get_backpressure_monitor
+
+    monitor = get_backpressure_monitor()
+    return monitor.get_status_summary()
+
+
+@router.get("/backpressure/metrics")
+async def get_backpressure_metrics():
+    """
+    Get detailed backpressure metrics.
+
+    Returns full BackpressureMetrics object with all measurements.
+    """
+    from .backpressure_monitor import get_backpressure_monitor
+
+    monitor = get_backpressure_monitor()
+    metrics = monitor.get_metrics()
+
+    return {
+        "ticks_received_per_sec": metrics.ticks_received_per_sec,
+        "ticks_published_per_sec": metrics.ticks_published_per_sec,
+        "avg_publish_latency_ms": metrics.avg_publish_latency_ms,
+        "p95_publish_latency_ms": metrics.p95_publish_latency_ms,
+        "p99_publish_latency_ms": metrics.p99_publish_latency_ms,
+        "pending_publishes": metrics.pending_publishes,
+        "dropped_messages": metrics.dropped_messages,
+        "redis_publish_errors": metrics.redis_publish_errors,
+        "redis_connection_errors": metrics.redis_connection_errors,
+        "memory_usage_mb": metrics.memory_usage_mb,
+        "cpu_usage_percent": metrics.cpu_usage_percent,
+        "backpressure_level": metrics.backpressure_level.value,
+        "ingestion_rate_ratio": metrics.ingestion_rate_ratio,
+        "timestamp": metrics.timestamp.isoformat()
+    }
+
+
+@router.get("/backpressure/circuit-breaker")
+async def get_circuit_breaker_status():
+    """
+    Get Redis circuit breaker status.
+
+    Returns:
+        {
+            "state": "closed" | "open" | "half_open",
+            "failure_count": 0,
+            "last_failure_time": "2025-10-31T..." | null
+        }
+    """
+    from .redis_publisher_v2 import get_resilient_publisher
+
+    try:
+        publisher = get_resilient_publisher()
+        cb = publisher.circuit_breaker
+
+        return {
+            "state": cb.state.value,
+            "failure_count": cb.failure_count,
+            "success_count": cb.success_count,
+            "last_failure_time": cb.last_failure_time
+        }
+    except Exception:
+        # V2 publisher not initialized - return N/A
+        return {
+            "state": "unknown",
+            "message": "Resilient publisher not initialized"
+        }
+
+
+@router.get("/backpressure/publisher-stats")
+async def get_publisher_stats():
+    """
+    Get Redis publisher statistics.
+
+    Returns:
+        {
+            "total_published": 12345,
+            "total_dropped": 0,
+            "total_sampled_out": 123,
+            "buffer_size": 45,
+            "buffer_capacity": 10000,
+            "circuit_breaker_state": "closed",
+            "circuit_breaker_failures": 0,
+            "backpressure_metrics": { ... }
+        }
+    """
+    from .redis_publisher_v2 import get_resilient_publisher
+
+    try:
+        publisher = get_resilient_publisher()
+        return publisher.get_stats()
+    except Exception as e:
+        return {
+            "error": "Resilient publisher not initialized",
+            "message": str(e)
+        }
+
+
+@router.post("/backpressure/reset-circuit-breaker", dependencies=[Depends(verify_api_key)])
+async def reset_circuit_breaker():
+    """
+    Manually reset the circuit breaker to CLOSED state.
+
+    Use this to force-reopen a circuit after fixing underlying issues.
+
+    Requires API key authentication.
+    """
+    from .redis_publisher_v2 import get_resilient_publisher, CircuitState
+
+    try:
+        publisher = get_resilient_publisher()
+        publisher.circuit_breaker.state = CircuitState.CLOSED
+        publisher.circuit_breaker.failure_count = 0
+        publisher.circuit_breaker.success_count = 0
+
+        logger.info("Circuit breaker manually reset to CLOSED state")
+
+        return {
+            "success": True,
+            "message": "Circuit breaker reset to CLOSED state",
+            "new_state": "closed"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reset circuit breaker: {e}")
