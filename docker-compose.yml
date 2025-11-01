@@ -25,6 +25,10 @@ services:
      - REDIS_URL=redis://redis:6379
      - POSTGRES_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
      - TICKER_SERVICE_URL=http://ticker-service:8080
+     - SUBSCRIPTION_EVENTS_ENABLED=true
+     - REDIS_CHANNEL_PREFIX=ticker:nifty
+     - BACKFILL_IMMEDIATE_ON_SUBSCRIBE=true
+     - BACKFILL_SUBSCRIPTION_AWARE=true
     depends_on:
       redis:
         condition: service_healthy

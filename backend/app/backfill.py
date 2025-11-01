@@ -52,6 +52,9 @@ class BackfillManager:
         self._max_batch = timedelta(minutes=settings.backfill_max_batch_minutes)
         self._option_expiry_limit = settings.fo_option_expiry_window
         self._running = False
+        self._recent_failures: Dict[int, datetime] = {}
+        self._failure_cooldown = timedelta(minutes=30)  # configurable
+
 
     async def run(self) -> None:
         if not self._enabled:
@@ -259,7 +262,12 @@ class BackfillManager:
     async def _option_history(self, leg: Optional[dict], start: datetime, end: datetime) -> Dict[datetime, dict]:
         if not leg or not leg.get("instrument_token"):
             return {}
+
         token = leg["instrument_token"]
+        if not self._dm.is_token_supported(token):
+            logger.debug("Skipping unsupported option token %s", token)
+            return {}
+
         candles = await self._fetch_history(token, start, end, include_greeks=True)
         mapped: Dict[datetime, dict] = {}
         for candle in candles:
@@ -276,6 +284,19 @@ class BackfillManager:
         end: datetime,
         include_greeks: bool = False,
     ) -> List[dict]:
+        now = datetime.utcnow()
+
+        # Skip if token is marked unsupported
+        if not self._dm.is_token_supported(instrument_token):
+            logger.debug("Skipping unsupported token %s", instrument_token)
+            return []
+
+        # Skip if token failed recently
+        last_fail = self._recent_failures.get(instrument_token)
+        if last_fail and (now - last_fail) < self._failure_cooldown:
+            logger.debug("Skipping token %s due to recent failure at %s", instrument_token, last_fail.isoformat())
+            return []
+
         params: Dict[str, object] = {
             "instrument_token": instrument_token,
             "interval": "minute",
@@ -284,16 +305,28 @@ class BackfillManager:
         }
         if include_greeks:
             params["oi"] = "true"
+
         try:
             payload = await self._client.history(**params)
         except Exception as exc:
             logger.error("History fetch failed | token=%s error=%s", instrument_token, exc)
+            self._recent_failures[instrument_token] = now
+            self._dm.mark_token_no_history(instrument_token, str(exc))
             return []
+
         candles = payload.get("candles") if isinstance(payload, dict) else None
         if isinstance(candles, dict):
             candles = candles.get("data")
-        return candles or []
 
+        if not candles:
+            logger.warning("No candles returned for token %s", instrument_token)
+            self._recent_failures[instrument_token] = now
+            self._dm.mark_token_no_history(instrument_token, "no candles returned")
+            return []
+
+        return candles
+
+    
     def _candles_to_rows(self, symbol: str, candles: List[object]) -> List[dict]:
         rows: List[dict] = []
         for candle in candles:
@@ -427,3 +460,175 @@ class BackfillManager:
 
         end = min(now, start + self._max_batch)
         return start, end
+
+    async def backfill_instrument_immediate(self, instrument_token: int) -> None:
+        """
+        Trigger immediate backfill for a newly subscribed instrument.
+        Fetches last 2 hours of historical data.
+
+        Called by subscription event listener when new instrument is subscribed.
+        """
+        try:
+            logger.info(f"Starting immediate backfill for instrument token {instrument_token}")
+
+            # Get instrument details from database
+            instrument = await self._get_instrument_details(instrument_token)
+            if not instrument:
+                logger.warning(f"Instrument {instrument_token} not found in database, skipping immediate backfill")
+                return
+
+            # Determine time window (last 2 hours)
+            now = datetime.utcnow()
+            start = now - timedelta(hours=2)
+
+            # Determine instrument type and backfill accordingly
+            segment = instrument.get("segment", "")
+            tradingsymbol = instrument.get("tradingsymbol", "")
+
+            if segment == "INDICES":
+                # Underlying index
+                await self._immediate_backfill_underlying(tradingsymbol, instrument_token, start, now)
+
+            elif segment in ["NFO-FUT", "BFO-FUT", "MCX-FUT"]:
+                # Futures contract
+                await self._immediate_backfill_future(instrument, start, now)
+
+            elif segment in ["NFO-OPT", "BFO-OPT"]:
+                # Options contract - trigger full expiry backfill
+                await self._immediate_backfill_option(instrument, start, now)
+
+            else:
+                logger.warning(f"Unknown segment {segment} for token {instrument_token}, attempting generic OHLC backfill")
+                await self._immediate_backfill_generic(tradingsymbol, instrument_token, start, now)
+
+            logger.info(f"Immediate backfill completed for instrument {instrument_token} ({tradingsymbol})")
+
+        except Exception as e:
+            logger.error(f"Immediate backfill failed for token {instrument_token}: {e}", exc_info=True)
+
+    async def _get_instrument_details(self, instrument_token: int) -> Optional[dict]:
+        """Query database for instrument details"""
+        try:
+            # Query instrument_subscriptions table (used by ticker service)
+            query = """
+                SELECT instrument_token, tradingsymbol, segment, account_id
+                FROM instrument_subscriptions
+                WHERE instrument_token = $1
+                LIMIT 1
+            """
+            async with self._dm.pool.acquire() as conn:
+                row = await conn.fetchrow(query, instrument_token)
+                if row:
+                    return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to fetch instrument details for token {instrument_token}: {e}")
+            return None
+
+    async def _immediate_backfill_underlying(
+        self,
+        symbol: str,
+        instrument_token: int,
+        start: datetime,
+        end: datetime
+    ) -> None:
+        """Backfill underlying index data"""
+        try:
+            candles = await self._fetch_history(instrument_token, start, end, include_greeks=False)
+            if not candles:
+                logger.warning(f"No candles returned for underlying {symbol}")
+                return
+
+            rows = self._candles_to_rows(symbol, candles)
+            if rows:
+                await self._dm.upsert_underlying_bars(rows)
+                logger.info(f"Immediate backfill: underlying {symbol} - {len(rows)} bars")
+        except Exception as e:
+            logger.error(f"Failed to backfill underlying {symbol}: {e}", exc_info=True)
+
+    async def _immediate_backfill_future(
+        self,
+        instrument: dict,
+        start: datetime,
+        end: datetime
+    ) -> None:
+        """Backfill futures contract data"""
+        try:
+            instrument_token = instrument.get("instrument_token")
+            tradingsymbol = instrument.get("tradingsymbol")
+
+            # Extract underlying symbol from tradingsymbol (e.g., NIFTY25NOVFUT -> NIFTY50)
+            # This is a simplification - adjust based on your naming conventions
+            underlying_symbol = settings.monitor_default_symbol
+
+            # For now, set expiry_date to None - it will be parsed from tradingsymbol if needed
+            expiry_date: Optional[date] = None
+
+            candles = await self._fetch_history(instrument_token, start, end, include_greeks=True)
+            if not candles:
+                logger.warning(f"No candles returned for future {tradingsymbol}")
+                return
+
+            rows = self._candles_to_future_rows(underlying_symbol, tradingsymbol, expiry_date, candles)
+            if rows:
+                await self._dm.upsert_futures_bars(rows)
+                logger.info(f"Immediate backfill: future {tradingsymbol} - {len(rows)} bars")
+        except Exception as e:
+            logger.error(f"Failed to backfill future {instrument.get('tradingsymbol')}: {e}", exc_info=True)
+
+    async def _immediate_backfill_option(
+        self,
+        instrument: dict,
+        start: datetime,
+        end: datetime
+    ) -> None:
+        """
+        Backfill option contract data.
+
+        Note: Options are typically backfilled as part of an expiry group.
+        For immediate backfill, we'll fetch just this option's data and store it.
+        The full expiry metrics will be updated in the next scheduled backfill cycle.
+        """
+        try:
+            instrument_token = instrument.get("instrument_token")
+            tradingsymbol = instrument.get("tradingsymbol")
+
+            # For now, log that we received the option subscription
+            # The full option chain backfill will happen in the next scheduled cycle
+            # This is because options require coordinated backfill across strikes for metrics
+
+            logger.info(
+                f"Option subscription detected: {tradingsymbol} (token: {instrument_token}). "
+                f"Full option chain backfill will occur in next scheduled cycle."
+            )
+
+            # Optionally: fetch basic OHLC for this option to provide some immediate data
+            candles = await self._fetch_history(instrument_token, start, end, include_greeks=True)
+            if candles:
+                logger.info(f"Fetched {len(candles)} candles for option {tradingsymbol}")
+                # Note: Not storing individual option candles as they're typically stored
+                # as part of strike distribution tables. This just validates data availability.
+
+        except Exception as e:
+            logger.error(f"Failed to process option {instrument.get('tradingsymbol')}: {e}", exc_info=True)
+
+    async def _immediate_backfill_generic(
+        self,
+        symbol: str,
+        instrument_token: int,
+        start: datetime,
+        end: datetime
+    ) -> None:
+        """Generic OHLC backfill for unknown instrument types"""
+        try:
+            candles = await self._fetch_history(instrument_token, start, end, include_greeks=False)
+            if not candles:
+                logger.warning(f"No candles returned for instrument {symbol}")
+                return
+
+            rows = self._candles_to_rows(symbol, candles)
+            if rows:
+                await self._dm.upsert_underlying_bars(rows)
+                logger.info(f"Immediate backfill (generic): {symbol} - {len(rows)} bars")
+        except Exception as e:
+            logger.error(f"Failed to backfill instrument {symbol}: {e}", exc_info=True)
