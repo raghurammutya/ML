@@ -220,6 +220,16 @@ async def lifespan(app: FastAPI):
             background_tasks.append(asyncio.create_task(backfill_manager.run()))
             logger.info("Backfill manager loop started")
 
+        # Subscription event listener (triggers immediate backfill on new subscriptions)
+        if settings.subscription_events_enabled:
+            from app.services.subscription_event_listener import SubscriptionEventListener
+            subscription_event_listener = SubscriptionEventListener(
+                redis_client=redis_client,
+                backfill_manager=backfill_manager if settings.backfill_immediate_on_subscribe else None
+            )
+            await subscription_event_listener.start()
+            logger.info("Subscription event listener started")
+
         # Order stream manager (Phase 4A: WebSocket order streaming)
         order_stream_manager = OrderStreamManager(settings.ticker_service_url, order_hub)
         await order_stream_manager.start()

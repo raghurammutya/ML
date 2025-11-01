@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     ticker_service_account_id: Optional[str] = None
     monitor_stream_enabled: bool = True
 
+    # Subscription event listener
+    subscription_events_enabled: bool = True
+    redis_channel_prefix: str = "ticker:nifty"  # For subscription events channel
+
+    # Backfill improvements
+    backfill_subscription_aware: bool = True  # Only backfill subscribed instruments
+    backfill_immediate_on_subscribe: bool = True  # Trigger immediate backfill on subscription event
+
     # Cache TTLs (seconds)
     cache_ttl_1m: int = 60
     cache_ttl_5m: int = 300
