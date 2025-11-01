@@ -1,0 +1,15 @@
+date,name,event_type,is_trading_day,special_start,special_end,category,description
+2027-01-26,Republic Day,holiday,false,,,market_holiday,National holiday
+2027-03-11,Mahashivratri,holiday,false,,,market_holiday,Religious holiday
+2027-03-30,Ram Navami,holiday,false,,,market_holiday,Religious holiday
+2027-04-02,Good Friday,holiday,false,,,market_holiday,Christian holiday
+2027-04-14,Dr. Ambedkar Jayanti,holiday,false,,,market_holiday,National holiday
+2027-05-01,Maharashtra Day,holiday,false,,,market_holiday,Regional holiday
+2027-08-15,Independence Day,holiday,false,,,market_holiday,National holiday
+2027-10-02,Mahatma Gandhi Jayanti,holiday,false,,,market_holiday,National holiday
+2027-10-18,Dussehra,holiday,false,,,market_holiday,Religious holiday
+2027-11-06,Diwali Laxmi Pujan,holiday,false,,,market_holiday,Diwali main day
+2027-11-07,Muhurat Trading 2027,special_hours,true,18:15,19:15,special_session,Diwali special evening trading
+2027-11-08,Diwali Balipratipada,holiday,false,,,market_holiday,Day after Diwali
+2027-11-19,Guru Nanak Jayanti,holiday,false,,,market_holiday,Religious holiday
+2027-12-25,Christmas,holiday,false,,,market_holiday,Christian holiday

@@ -28,6 +28,7 @@ from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
 from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws
 from app.routes import calendar_simple as calendar
+from app.routes import admin_calendar
 
 # -------- logging --------
 logging.basicConfig(
@@ -199,6 +200,8 @@ async def lifespan(app: FastAPI):
         app.include_router(indicator_ws.router)  # Phase 2D: Indicator WebSocket streaming
         calendar.set_data_manager(data_manager)  # Set data manager for calendar
         app.include_router(calendar.router)  # Calendar service: market holidays and trading hours
+        admin_calendar.set_data_manager(data_manager)  # Set data manager for admin calendar
+        app.include_router(admin_calendar.router)  # Admin API: holiday management
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:

@@ -70,6 +70,10 @@ class MarketStatus(BaseModel):
     session_start: Optional[time] = None
     session_end: Optional[time] = None
     next_trading_day: Optional[date] = None
+    # Special session support
+    is_special_session: bool = False
+    special_event_name: Optional[str] = None
+    event_type: Optional[str] = None
 
 
 class Holiday(BaseModel):
@@ -248,9 +252,20 @@ async def get_market_status(
             day_of_week = check_date.weekday()
             is_weekend = day_of_week in [5, 6]
 
-            # Get holiday info
+            # Check for special trading session (e.g., Muhurat trading)
+            special_event = await conn.fetchrow("""
+                SELECT ce.event_name, ce.event_type, ce.is_trading_day,
+                       ce.special_start, ce.special_end, ce.category
+                FROM calendar_events ce
+                JOIN calendar_types ct ON ce.calendar_type_id = ct.id
+                WHERE ct.code = $1 AND ce.event_date = $2
+                AND ce.event_type IN ('special_hours', 'early_close', 'extended_hours')
+                AND ce.is_trading_day = true
+            """, calendar_code, check_date)
+
+            # Get holiday info (if no special session)
             holiday = await conn.fetchrow("""
-                SELECT event_name, is_trading_day
+                SELECT ce.event_name, ce.is_trading_day
                 FROM calendar_events ce
                 JOIN calendar_types ct ON ce.calendar_type_id = ct.id
                 WHERE ct.code = $1 AND ce.event_date = $2
@@ -268,12 +283,36 @@ async def get_market_status(
                 WHERE ct.code = $1 AND ts.session_type = 'regular'
             """, calendar_code)
 
-            is_trading_day = not is_weekend and not is_holiday
+            # Determine trading day status and hours
+            is_special_session = False
+            special_event_name = None
+            event_type = None
+            session_start = None
+            session_end = None
+
+            if special_event:
+                # Special trading session overrides regular hours
+                is_trading_day = True
+                is_special_session = True
+                special_event_name = special_event['event_name']
+                event_type = special_event['event_type']
+                session_start = special_event['special_start']
+                session_end = special_event['special_end']
+                logger.info(
+                    f"Special session detected: {special_event_name} "
+                    f"({session_start}-{session_end})"
+                )
+            else:
+                # Regular trading hours
+                is_trading_day = not is_weekend and not is_holiday
+                if session:
+                    session_start = session['trading_start']
+                    session_end = session['trading_end']
 
             # Determine current session
             current_session = "closed"
-            if is_trading_day and current_time and session:
-                if session['trading_start'] <= current_time < session['trading_end']:
+            if is_trading_day and current_time and session_start and session_end:
+                if session_start <= current_time < session_end:
                     current_session = "trading"
 
             # Get next trading day
@@ -309,9 +348,12 @@ async def get_market_status(
                 is_weekend=is_weekend,
                 current_session=current_session,
                 holiday_name=holiday_name,
-                session_start=session['trading_start'] if session else None,
-                session_end=session['trading_end'] if session else None,
-                next_trading_day=next_trading
+                session_start=session_start,
+                session_end=session_end,
+                next_trading_day=next_trading,
+                is_special_session=is_special_session,
+                special_event_name=special_event_name,
+                event_type=event_type
             )
 
     except HTTPException:
