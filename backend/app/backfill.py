@@ -509,9 +509,10 @@ class BackfillManager:
     async def _get_instrument_details(self, instrument_token: int) -> Optional[dict]:
         """Query database for instrument details"""
         try:
+            # Query instrument_subscriptions table (used by ticker service)
             query = """
-                SELECT instrument_token, tradingsymbol, name, expiry, strike, instrument_type, segment, exchange
-                FROM instruments
+                SELECT instrument_token, tradingsymbol, segment, account_id
+                FROM instrument_subscriptions
                 WHERE instrument_token = $1
                 LIMIT 1
             """
@@ -560,18 +561,8 @@ class BackfillManager:
             # This is a simplification - adjust based on your naming conventions
             underlying_symbol = settings.monitor_default_symbol
 
-            expiry_raw = instrument.get("expiry")
+            # For now, set expiry_date to None - it will be parsed from tradingsymbol if needed
             expiry_date: Optional[date] = None
-            if expiry_raw:
-                try:
-                    if isinstance(expiry_raw, str):
-                        expiry_date = datetime.fromisoformat(expiry_raw).date()
-                    elif isinstance(expiry_raw, date):
-                        expiry_date = expiry_raw
-                    elif isinstance(expiry_raw, datetime):
-                        expiry_date = expiry_raw.date()
-                except (ValueError, AttributeError):
-                    logger.warning(f"Could not parse expiry date: {expiry_raw}")
 
             candles = await self._fetch_history(instrument_token, start, end, include_greeks=True)
             if not candles:

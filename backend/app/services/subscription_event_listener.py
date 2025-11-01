@@ -12,9 +12,10 @@ from datetime import datetime
 
 import redis.asyncio as redis
 
-from app.config import settings
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 class SubscriptionEventListener:
