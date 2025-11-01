@@ -3,7 +3,11 @@ Indicator proxy classes for lazy evaluation.
 """
 
 from typing import Any, Union, Tuple, Dict, TYPE_CHECKING
+import logging
 from .cache import cache_key
+from .exceptions import IndicatorUnavailableError, DataUnavailableError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .api import APIClient
@@ -111,6 +115,10 @@ class IndicatorProxy:
 
         Returns:
             Indicator value(s)
+
+        Raises:
+            IndicatorUnavailableError: If indicator cannot be computed
+            DataUnavailableError: If API call fails
         """
         # Build indicator ID
         indicator_id = self._build_indicator_id(params)
@@ -121,6 +129,8 @@ class IndicatorProxy:
         cached = self._api.cache.get(key)
         if cached is not None:
             return cached
+
+        logger.info(f"Computing indicator {indicator_id} for {self._symbol} {self._timeframe} offset={self._offset}")
 
         # Call API
         try:
@@ -140,15 +150,54 @@ class IndicatorProxy:
                 value_data = response["values"][indicator_id]
                 value = value_data.get("value")
 
+                if value is None:
+                    logger.warning(f"Indicator {indicator_id} returned None")
+                    raise IndicatorUnavailableError(
+                        f"Indicator {indicator_id} not available for {self._symbol}",
+                        reason="no_value"
+                    )
+
                 # Cache the value
                 self._api.cache.set(key, value, ttl=60)
+                logger.info(f"Indicator {indicator_id} computed: {value}")
 
                 return value
             else:
-                raise ValueError(f"Indicator {indicator_id} not found in response")
+                # Try alternative: indicators might be at root level
+                if indicator_id in response:
+                    value = response[indicator_id]
 
+                    if value is None:
+                        logger.warning(f"Indicator {indicator_id} returned None")
+                        raise IndicatorUnavailableError(
+                            f"Indicator {indicator_id} not available for {self._symbol}",
+                            reason="no_value"
+                        )
+
+                    self._api.cache.set(key, value, ttl=60)
+                    logger.info(f"Indicator {indicator_id} computed: {value}")
+                    return value
+                else:
+                    # Indicator not in response
+                    logger.warning(f"Indicator {indicator_id} not found in API response")
+                    raise IndicatorUnavailableError(
+                        f"Indicator {indicator_id} not available for {self._symbol}",
+                        reason="not_in_response"
+                    )
+
+        except IndicatorUnavailableError:
+            # Re-raise specific exceptions
+            raise
+        except DataUnavailableError:
+            # Re-raise data unavailable exceptions
+            raise
         except Exception as e:
-            raise RuntimeError(f"Failed to compute {indicator_id}: {e}")
+            # Log and raise as DataUnavailableError
+            logger.error(f"Failed to compute indicator {indicator_id}: {e}", exc_info=True)
+            raise DataUnavailableError(
+                f"Failed to compute indicator {indicator_id} for {self._symbol}: {e}",
+                reason="api_error"
+            )
 
     def _compute_indicator_with_kwargs(self, kwargs: Dict) -> Union[float, Dict]:
         """

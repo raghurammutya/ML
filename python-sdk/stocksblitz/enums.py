@@ -7,6 +7,28 @@ Provides type-safe constants for orders, transactions, and other operations.
 from enum import Enum
 
 
+class DataState(str, Enum):
+    """
+    Data quality state indicator.
+
+    Used to indicate the quality and availability of data returned by the SDK.
+    Users MUST check this before making trading decisions.
+
+    Examples:
+        >>> greeks = inst.greeks
+        >>> if greeks["data_state"] == DataState.VALID:
+        ...     print(f"Delta: {greeks['delta']}")
+        >>> elif greeks["data_state"] == DataState.NOT_SUBSCRIBED:
+        ...     print("Warning: Option not subscribed")
+    """
+    VALID = "valid"                    # Data is fresh and valid
+    STALE = "stale"                    # Data is old (>10 seconds)
+    NO_DATA = "no_data"                # No data available
+    NOT_SUBSCRIBED = "not_subscribed"  # Instrument not subscribed in ticker service
+    ERROR = "error"                    # Error fetching data
+    UNAVAILABLE = "unavailable"        # Feature/endpoint unavailable
+
+
 class Exchange(str, Enum):
     """Supported exchanges."""
     NSE = "NSE"

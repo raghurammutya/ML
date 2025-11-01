@@ -33,6 +33,7 @@ from .services import AlertService, MessagingService, CalendarService, NewsServi
 
 # Enums
 from .enums import (
+    DataState,
     Exchange,
     TransactionType,
     OrderType,
@@ -71,6 +72,11 @@ from .exceptions import (
     InvalidOrderError,
     APIError,
     CacheError,
+    DataUnavailableError,
+    StaleDataError,
+    InstrumentNotSubscribedError,
+    IndicatorUnavailableError,
+    DataValidationError,
 )
 
 __all__ = [
@@ -100,6 +106,7 @@ __all__ = [
     "NewsService",
 
     # Enums
+    "DataState",
     "Exchange",
     "TransactionType",
     "OrderType",
@@ -134,4 +141,9 @@ __all__ = [
     "InvalidOrderError",
     "APIError",
     "CacheError",
+    "DataUnavailableError",
+    "StaleDataError",
+    "InstrumentNotSubscribedError",
+    "IndicatorUnavailableError",
+    "DataValidationError",
 ]
