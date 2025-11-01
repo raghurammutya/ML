@@ -1,0 +1,104 @@
+📁 CALENDAR SERVICE - FILES ORGANIZED
+
+✅ All calendar service files moved to: calendar_service/
+
+┌─────────────────────────────────────────────────────────────┐
+│ FOLDER STRUCTURE                                             │
+└─────────────────────────────────────────────────────────────┘
+
+calendar_service/
+├── README.md                            # Overview & quick start
+├── DEPLOYMENT_NOTE.md                   # Deployment details & commit message
+├── docs/                                # Documentation (6 files)
+│   ├── 01_IMPLEMENTATION.md            
+│   ├── 02_DEPLOYMENT.md                
+│   ├── 03_INTEGRATION_GUIDE.md         
+│   ├── 04_QUICK_START.md               
+│   ├── 05_QA.md                        
+│   └── 06_SUMMARY.md                   
+├── backend/                             # Backend code (5 files)
+│   ├── migrations/
+│   │   ├── 012_create_calendar_service.sql
+│   │   └── 013_populate_holidays.sql
+│   ├── routes/
+│   │   ├── calendar_simple.py          # ✅ Active (deployed)
+│   │   └── calendar.py                 # Reference
+│   └── services/
+│       └── holiday_fetcher.py
+├── sdk/                                 # Python SDK (1 file)
+│   └── calendar.py
+└── ticker_service/                      # Ticker integration (1 file)
+    └── market_mode.py
+
+Total: 15 files
+
+┌─────────────────────────────────────────────────────────────┐
+│ GIT STATUS - READY TO COMMIT                                │
+└─────────────────────────────────────────────────────────────┘
+
+Changes staged for commit:
+
+New Files (15):
+  calendar_service/README.md
+  calendar_service/DEPLOYMENT_NOTE.md
+  calendar_service/docs/* (6 files)
+  calendar_service/backend/* (5 files)
+  calendar_service/sdk/calendar.py
+  calendar_service/ticker_service/market_mode.py
+
+Modified Files (2):
+  backend/app/main.py          # Added calendar router import
+  docker-compose.yml           # Added calendar env vars
+
+Branch: feature/nifty-monitor
+
+┌─────────────────────────────────────────────────────────────┐
+│ ACTIVE DEPLOYMENTS (Currently Running)                      │
+└─────────────────────────────────────────────────────────────┘
+
+These files are COPIES from calendar_service/ and are active:
+
+✅ backend/app/routes/calendar_simple.py
+✅ backend/migrations/012_create_calendar_service.sql (run)
+✅ backend/migrations/013_populate_holidays.sql (run)
+✅ python-sdk/stocksblitz_sdk/calendar.py
+✅ backend/app/services/holiday_fetcher.py
+
+Note: Original code files remain in their locations.
+      calendar_service/ folder contains reference copies.
+
+┌─────────────────────────────────────────────────────────────┐
+│ REMOVED FROM ROOT                                            │
+└─────────────────────────────────────────────────────────────┘
+
+Deleted (moved to calendar_service/docs/):
+  CALENDAR_Q&A.md
+  CALENDAR_SERVICE_IMPLEMENTATION.md
+  CALENDAR_IMPLEMENTATION_SUMMARY.md
+  CALENDAR_DEPLOYMENT_COMPLETE.md
+  CALENDAR_INTEGRATION_GUIDE.md
+  CALENDAR_QUICK_START.md
+
+┌─────────────────────────────────────────────────────────────┐
+│ NEXT STEPS                                                   │
+└─────────────────────────────────────────────────────────────┘
+
+1. Review changes:
+   git diff --staged
+
+2. Commit:
+   git commit -m "feat(calendar): Add calendar service for market hours and holidays"
+
+3. Push to feature/nifty-monitor:
+   git push origin feature/nifty-monitor
+
+┌─────────────────────────────────────────────────────────────┐
+│ QUICK REFERENCE                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Documentation:  calendar_service/docs/
+Main README:    calendar_service/README.md
+Deployment:     calendar_service/DEPLOYMENT_NOTE.md
+
+Start with:     calendar_service/docs/04_QUICK_START.md
+

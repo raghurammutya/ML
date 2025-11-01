@@ -65,6 +65,10 @@ services:
       - INSTRUMENT_DB_USER=stocksblitz
       - INSTRUMENT_DB_PASSWORD=stocksblitz123
       - KITE_TOKEN_DIR=/app/app/kite/tokens
+      # Calendar service integration
+      - MARKET_MODE=force_mock
+      - CALENDAR_API_URL=http://backend:8000
+      - CALENDAR_CODE=NSE
     volumes:
       - ./ticker_service/tokens:/app/app/kite/tokens
       - ./ticker_service/app/kite/.env:/app/app/kite/.env:ro

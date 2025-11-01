@@ -27,6 +27,7 @@ from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
 from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws
+from app.routes import calendar_simple as calendar
 
 # -------- logging --------
 logging.basicConfig(
@@ -196,11 +197,18 @@ async def lifespan(app: FastAPI):
         app.include_router(order_ws.router)  # New: WebSocket routes for order updates
         app.include_router(indicators_api.router)  # Phase 2: Dynamic technical indicators API
         app.include_router(indicator_ws.router)  # Phase 2D: Indicator WebSocket streaming
+        calendar.set_data_manager(data_manager)  # Set data manager for calendar
+        app.include_router(calendar.router)  # Calendar service: market holidays and trading hours
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:
+            print(f"[MAIN] Creating FOStreamConsumer, fo_stream_enabled={settings.fo_stream_enabled}", flush=True)
             fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
-            background_tasks.append(asyncio.create_task(fo_stream_consumer.run()))
+            print(f"[MAIN] FOStreamConsumer created: {fo_stream_consumer}", flush=True)
+            task = asyncio.create_task(fo_stream_consumer.run())
+            print(f"[MAIN] Task created: {task}", flush=True)
+            background_tasks.append(task)
+            print(f"[MAIN] Task appended to background_tasks, len={len(background_tasks)}", flush=True)
             logger.info("FO stream consumer started")
         if nifty_monitor_stream:
             background_tasks.append(asyncio.create_task(nifty_monitor_stream.run()))
