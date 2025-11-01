@@ -65,6 +65,8 @@ services:
       - INSTRUMENT_DB_USER=stocksblitz
       - INSTRUMENT_DB_PASSWORD=stocksblitz123
       - KITE_TOKEN_DIR=/app/app/kite/tokens
+      # API Key disabled for internal service
+      - API_KEY_ENABLED=false
       # Calendar service integration
       - MARKET_MODE=force_mock
       - CALENDAR_API_URL=http://backend:8000

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -34,6 +32,46 @@ settings = get_settings()
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+
+
+# Define Pydantic models early in module to ensure they're in namespace
+# before any FastAPI route decorators are processed
+class SubscriptionRequest(BaseModel):
+    instrument_token: int = Field(ge=1)
+    requested_mode: str = Field(default="FULL")
+    account_id: Optional[str] = None
+
+
+class SubscriptionResponse(BaseModel):
+    instrument_token: int
+    tradingsymbol: str
+    segment: str
+    status: str
+    requested_mode: str
+    account_id: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+def _record_to_response(record: SubscriptionRecord) -> SubscriptionResponse:
+    return SubscriptionResponse(
+        instrument_token=record.instrument_token,
+        tradingsymbol=record.tradingsymbol,
+        segment=record.segment,
+        status=record.status,
+        requested_mode=record.requested_mode,
+        account_id=record.account_id,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _to_timestamp(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return int(dt.timestamp())
 
 
 # PII Sanitization Filter for Logs
@@ -157,7 +195,50 @@ async def lifespan(app: FastAPI):
         logger.info("Shutdown complete")
 
 
-app = FastAPI(title="Ticker Service", lifespan=lifespan)
+app = FastAPI(
+    title="Ticker Service",
+    description="""
+    Production-ready ticker service for real-time market data streaming and order management.
+
+    ## Features
+
+    * **Real-time Market Data**: WebSocket streaming of options and underlying data
+    * **Order Management**: Place, modify, and cancel orders with retry logic
+    * **Batch Orders**: Atomic multi-order execution with rollback
+    * **Webhooks**: Event-driven notifications for order updates
+    * **Historical Data**: Fetch candlestick data for any instrument
+    * **Subscription Management**: Manage active market data subscriptions
+
+    ## Authentication
+
+    Most endpoints require API key authentication via `X-API-Key` header.
+    Contact your administrator for API key.
+
+    ## Rate Limits
+
+    - `/health`: 60 requests/minute
+    - `/subscriptions`: 30 requests/minute
+    - `/advanced/batch-orders`: 10 requests/minute
+    - `/advanced/webhooks`: 20 requests/minute
+
+    ## Support
+
+    - Documentation: See `README.md` and `PRODUCTION_DEPLOYMENT.md`
+    - Security: See `SECURITY.md`
+    """,
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",  # Swagger UI
+    redoc_url="/redoc",  # ReDoc alternative UI
+    openapi_url="/openapi.json",
+    contact={
+        "name": "Ticker Service Team",
+        "url": "https://github.com/your-org/ticker-service",
+    },
+    license_info={
+        "name": "Proprietary",
+    },
+)
 
 # Add middlewares
 app.add_middleware(RequestIDMiddleware)
@@ -223,44 +304,6 @@ app.include_router(advanced_router)
 
 # Include trading accounts management router
 app.include_router(trading_accounts_router)
-
-
-class SubscriptionRequest(BaseModel):
-    instrument_token: int = Field(ge=1)
-    requested_mode: str = Field(default="FULL")
-    account_id: Optional[str] = None
-
-
-class SubscriptionResponse(BaseModel):
-    instrument_token: int
-    tradingsymbol: str
-    segment: str
-    status: str
-    requested_mode: str
-    account_id: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-
-
-def _record_to_response(record: SubscriptionRecord) -> SubscriptionResponse:
-    return SubscriptionResponse(
-        instrument_token=record.instrument_token,
-        tradingsymbol=record.tradingsymbol,
-        segment=record.segment,
-        status=record.status,
-        requested_mode=record.requested_mode,
-        account_id=record.account_id,
-        created_at=record.created_at,
-        updated_at=record.updated_at,
-    )
-
-
-def _to_timestamp(dt: datetime) -> int:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return int(dt.timestamp())
 
 
 @app.get("/metrics")
@@ -420,9 +463,26 @@ async def create_subscription(request: Request, payload: SubscriptionRequest) ->
         raise HTTPException(status_code=500, detail="Failed to persist subscription")
 
     try:
-        await ticker_loop.reload_subscriptions()
+        # Use incremental subscription (no disruption to existing streams)
+        await ticker_loop.add_subscription_incremental(
+            instrument_token=payload.instrument_token,
+            requested_mode=requested_mode
+        )
+
+        # Publish subscription event for backend to trigger backfill
+        from .publisher import publish_subscription_event
+        await publish_subscription_event(
+            event_type="subscription_created",
+            instrument_token=payload.instrument_token,
+            metadata={
+                "tradingsymbol": tradingsymbol,
+                "segment": metadata.segment or "",
+                "requested_mode": requested_mode,
+                "account_id": account_id,
+            }
+        )
     except Exception as exc:
-        logger.exception("Subscription reload failed after create: %s", exc)
+        logger.exception("Subscription activation failed after create: %s", exc)
         raise HTTPException(status_code=502, detail=f"Failed to activate subscription: {exc}") from exc
     return _record_to_response(record)
 
@@ -491,8 +551,20 @@ async def delete_subscription(request: Request, instrument_token: int) -> Subscr
     if not record:
         raise HTTPException(status_code=500, detail="Failed to fetch updated subscription")
     try:
-        await ticker_loop.reload_subscriptions()
+        # Use incremental unsubscription (no disruption to other streams)
+        await ticker_loop.remove_subscription_incremental(instrument_token)
+
+        # Publish subscription event for backend
+        from .publisher import publish_subscription_event
+        await publish_subscription_event(
+            event_type="subscription_removed",
+            instrument_token=instrument_token,
+            metadata={
+                "tradingsymbol": record.tradingsymbol,
+                "segment": record.segment,
+            }
+        )
     except Exception as exc:
-        logger.exception("Subscription reload failed after delete: %s", exc)
+        logger.exception("Subscription removal failed after delete: %s", exc)
         raise HTTPException(status_code=502, detail=f"Failed to apply subscription removal: {exc}") from exc
     return _record_to_response(record)

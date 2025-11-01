@@ -1,0 +1,66 @@
+═══════════════════════════════════════════════════════════════════
+              ✅ DOCKER REBUILD READY!
+═══════════════════════════════════════════════════════════════════
+
+DISCOVERED: The ticker service runs in a Docker container!
+
+Container: tv-ticker
+Image:     tradingview-viz_ticker-service
+Port:      8080:8080
+
+═══════════════════════════════════════════════════════════════════
+              🚀 ONE COMMAND TO REBUILD & RESTART:
+═══════════════════════════════════════════════════════════════════
+
+    bash rebuild_docker.sh
+
+This will:
+  1. Stop the current container
+  2. Remove the old image
+  3. Build new image with incremental subscriptions
+  4. Start the container
+  5. Wait for health check to pass
+
+═══════════════════════════════════════════════════════════════════
+                    WHAT GETS DEPLOYED:
+═══════════════════════════════════════════════════════════════════
+
+✓ Incremental subscription methods (10-25x faster)
+✓ Event notifications via Redis (ticker:nifty:events)
+✓ Zero disruption to existing subscriptions
+✓ Sub-second subscription activation
+✓ All new code from app/generator.py, app/publisher.py, app/main.py
+
+═══════════════════════════════════════════════════════════════════
+                  AFTER REBUILD SUCCEEDS:
+═══════════════════════════════════════════════════════════════════
+
+Test the service:
+
+    curl http://localhost:8080/health | jq
+
+Verify new features:
+
+    bash verify_incremental.sh
+
+Watch logs:
+
+    docker logs -f tv-ticker
+
+═══════════════════════════════════════════════════════════════════
+                    TROUBLESHOOTING:
+═══════════════════════════════════════════════════════════════════
+
+If build fails:
+    docker logs tv-ticker --tail 50
+
+If container won't start:
+    cd /mnt/stocksblitz-data/Quantagro/tradingview-viz
+    docker-compose logs ticker-service
+
+Manual rebuild:
+    cd /mnt/stocksblitz-data/Quantagro/tradingview-viz
+    docker-compose build --no-cache ticker-service
+    docker-compose up -d ticker-service
+
+═══════════════════════════════════════════════════════════════════

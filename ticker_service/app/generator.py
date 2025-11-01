@@ -74,6 +74,7 @@ class MultiAccountTickerLoop:
         self._underlying_task: asyncio.Task | None = None
         self._account_tasks: Dict[str, asyncio.Task] = {}
         self._assignments: Dict[str, List[Instrument]] = {}
+        self._token_maps: Dict[str, Dict[int, Instrument]] = {}  # account_id -> {token -> instrument}
         self._last_tick_at: Dict[str, float] = {}
         self._started_at: float | None = None
         self._registry_refresh_task: asyncio.Task | None = None
@@ -170,6 +171,7 @@ class MultiAccountTickerLoop:
         self._underlying_task = None
         self._running = False
         self._assignments = {}
+        self._token_maps = {}
         self._last_tick_at = {}
         self._started_at = None
         self._historical_bootstrap_done = {}
@@ -177,10 +179,167 @@ class MultiAccountTickerLoop:
         logger.info("Ticker loop stopped")
 
     async def reload_subscriptions(self) -> None:
+        """Full reload - stops and restarts all streams (legacy method)"""
         async with self._reconcile_lock:
             if self._running:
                 await self.stop()
             await self.start()
+
+    async def add_subscription_incremental(self, instrument_token: int, requested_mode: str = "FULL") -> None:
+        """Add a subscription incrementally without full reload"""
+        async with self._reconcile_lock:
+            # Fetch instrument metadata
+            metadata = await instrument_registry.fetch_metadata(instrument_token)
+            if not metadata or not metadata.is_active:
+                raise ValueError(f"Instrument token {instrument_token} not found or inactive")
+
+            instrument = metadata.to_instrument()
+
+            # Check if already subscribed
+            for account_instruments in self._assignments.values():
+                if any(inst.instrument_token == instrument_token for inst in account_instruments):
+                    logger.debug("Instrument %s already subscribed", instrument_token)
+                    return
+
+            # If ticker loop is not running, just update assignments and return
+            # The subscription will be activated when the loop starts
+            if not self._running:
+                logger.info(
+                    "Ticker loop not running, subscription will activate on next start | token=%s",
+                    instrument_token
+                )
+                # Just update the database, start() will load it
+                await subscription_store.update_account(instrument_token, None)
+                return
+
+            # Find account with capacity
+            target_account = await self._find_account_with_capacity()
+            if not target_account:
+                raise RuntimeError("No accounts available with capacity for new subscription")
+
+            # Add to WebSocket pool incrementally
+            # Note: The pool uses the mode set during initialization (typically FULL)
+            # Mode changes require full reload due to KiteTicker API design
+            try:
+                # Get the client for this account (it should already have active pool)
+                async with self._orchestrator.borrow(target_account) as client:
+                    # Access the WebSocket pool directly for incremental subscription
+                    if client._ws_pool and client._pool_started:
+                        # Pool is already running, add token incrementally
+                        await client._ws_pool.subscribe_tokens([instrument_token])
+                        logger.info(
+                            "Added subscription incrementally via pool | token=%s account=%s mode=%s",
+                            instrument_token,
+                            target_account,
+                            requested_mode
+                        )
+                    else:
+                        # Pool not yet started, this shouldn't happen if _running is True
+                        logger.warning(
+                            "WebSocket pool not started for account %s, subscription will activate on next stream start",
+                            target_account
+                        )
+            except Exception as exc:
+                logger.exception("Failed to subscribe incrementally: %s", exc)
+                raise
+
+            # Update assignments in-place
+            if target_account not in self._assignments:
+                self._assignments[target_account] = []
+            self._assignments[target_account].append(instrument)
+
+            # Update token_maps for tick processing
+            if target_account not in self._token_maps:
+                self._token_maps[target_account] = {}
+            self._token_maps[target_account][instrument_token] = instrument
+
+            # Update subscription store with account assignment
+            await subscription_store.update_account(instrument_token, target_account)
+
+    async def remove_subscription_incremental(self, instrument_token: int) -> None:
+        """Remove a subscription incrementally without full reload"""
+        async with self._reconcile_lock:
+            # Find which account has this subscription
+            target_account = None
+            for account_id, instruments in self._assignments.items():
+                for instrument in instruments:
+                    if instrument.instrument_token == instrument_token:
+                        target_account = account_id
+                        break
+                if target_account:
+                    break
+
+            if not target_account:
+                logger.debug("Instrument %s not currently subscribed", instrument_token)
+                return
+
+            # Remove from WebSocket pool
+            try:
+                async with self._orchestrator.borrow(target_account) as client:
+                    # Access the WebSocket pool directly for incremental unsubscription
+                    if client._ws_pool and client._pool_started:
+                        client._ws_pool.unsubscribe_tokens([instrument_token])
+                        logger.info(
+                            "Removed subscription incrementally via pool | token=%s account=%s",
+                            instrument_token,
+                            target_account
+                        )
+                    else:
+                        logger.warning(
+                            "WebSocket pool not started for account %s during unsubscribe",
+                            target_account
+                        )
+            except Exception as exc:
+                logger.exception("Failed to unsubscribe incrementally: %s", exc)
+                raise
+
+            # Update assignments in-place
+            self._assignments[target_account] = [
+                inst for inst in self._assignments[target_account]
+                if inst.instrument_token != instrument_token
+            ]
+
+            # Update token_maps
+            if target_account in self._token_maps:
+                self._token_maps[target_account].pop(instrument_token, None)
+
+            # Clean up empty account assignments
+            if not self._assignments[target_account]:
+                del self._assignments[target_account]
+                # Also clean up token_map
+                if target_account in self._token_maps:
+                    del self._token_maps[target_account]
+
+    async def _find_account_with_capacity(self) -> Optional[str]:
+        """Find an account with capacity for new subscriptions"""
+        # If not running, use any available account
+        if not self._running:
+            accounts = await self._available_accounts()
+            return accounts[0] if accounts else None
+
+        # Find account with lowest subscription count
+        if not self._assignments:
+            accounts = await self._available_accounts()
+            return accounts[0] if accounts else None
+
+        # Find account with most capacity (assuming 1000 instrument limit per account)
+        min_count = float('inf')
+        best_account = None
+
+        for account_id, instruments in self._assignments.items():
+            count = len(instruments)
+            if count < min_count and count < 1000:  # Leave room for capacity
+                min_count = count
+                best_account = account_id
+
+        # If all accounts are at capacity, try to find a new account
+        if best_account is None:
+            available = await self._available_accounts()
+            for account in available:
+                if account not in self._assignments:
+                    return account
+
+        return best_account
 
     async def fetch_history(
         self,
@@ -650,8 +809,12 @@ class MultiAccountTickerLoop:
             return
         await publish_underlying_bar(bar)
     async def _stream_account(self, account_id: str, instruments: List[Instrument]) -> None:
+        # Initialize token map for this account
+        self._token_maps[account_id] = {
+            instrument.instrument_token: instrument for instrument in instruments
+        }
+
         tokens = [instrument.instrument_token for instrument in instruments]
-        token_map = {instrument.instrument_token: instrument for instrument in instruments}
 
         async with self._orchestrator.borrow(account_id) as client:
             await client.ensure_session()
@@ -659,7 +822,7 @@ class MultiAccountTickerLoop:
                 is_market_hours = self._is_market_hours()
                 if is_market_hours:
                     logger.debug("Account %s switching to LIVE stream mode", account_id)
-                    await self._run_live_stream(client, account_id, instruments, tokens, token_map)
+                    await self._run_live_stream(client, account_id, instruments, tokens)
                     logger.debug("Account %s exited LIVE stream mode", account_id)
                 elif self._settings.enable_mock_data:
                     logger.debug("Account %s switching to MOCK stream mode", account_id)
@@ -678,7 +841,6 @@ class MultiAccountTickerLoop:
         account_id: str,
         instruments: List[Instrument],
         tokens: List[int],
-        token_map: Dict[int, Instrument],
     ) -> None:
         if not tokens:
             await asyncio.sleep(settings.stream_interval_seconds)
@@ -694,6 +856,8 @@ class MultiAccountTickerLoop:
                 logger.debug("Ignoring ticks - market hours ended")
                 return
             logger.debug("Received %d ticks from %s", len(ticks), _account)
+            # Use instance token_map for this account
+            token_map = self._token_maps.get(account_id, {})
             await self._handle_ticks(account_id, token_map, ticks)
 
         async def on_error(_account: str, exc: Exception) -> None:
