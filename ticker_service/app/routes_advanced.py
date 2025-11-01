@@ -3,6 +3,7 @@ Advanced Order Features API Routes
 
 WebSocket streaming, webhooks, batch orders
 """
+import asyncio
 from typing import List, Optional
 from datetime import datetime
 
@@ -38,24 +39,78 @@ async def _verify_websocket_auth(api_key: str) -> bool:
 
 
 @router.websocket("/ws/orders/{account_id}")
-async def websocket_orders(websocket: WebSocket, account_id: str, api_key: str = Query(None)):
+async def websocket_orders(websocket: WebSocket, account_id: str):
     """
     WebSocket endpoint for real-time order updates.
+
+    IMPORTANT: Authentication is done via the first message after connection.
+    Send {"type": "auth", "api_key": "YOUR_KEY"} as the first message.
 
     Connect to receive live updates when orders change status.
 
     Example (JavaScript):
-        const ws = new WebSocket('ws://localhost:8080/advanced/ws/orders/primary?api_key=YOUR_KEY');
+        const ws = new WebSocket('ws://localhost:8080/advanced/ws/orders/primary');
+        ws.onopen = () => {
+            // FIRST: Send authentication
+            ws.send(JSON.stringify({type: "auth", api_key: "YOUR_KEY"}));
+        };
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            console.log('Order update:', data);
+            if (data.type === "authenticated") {
+                console.log("Connected and authenticated!");
+            } else if (data.type === "order_update") {
+                console.log('Order update:', data);
+            }
         };
+
+        // Send ping every 30 seconds to keep connection alive
+        setInterval(() => ws.send("ping"), 30000);
     """
-    # Verify authentication before accepting connection
-    if not await _verify_websocket_auth(api_key):
-        await websocket.close(code=1008, reason="Unauthorized")
-        logger.warning(f"WebSocket connection rejected for account {account_id}: Invalid API key")
+    import json
+
+    # Accept connection first (don't authenticate yet)
+    await websocket.accept()
+
+    try:
+        # Wait for authentication message (with timeout)
+        auth_message = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+
+        try:
+            auth_data = json.loads(auth_message)
+            if auth_data.get("type") != "auth":
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "First message must be authentication: {type: 'auth', api_key: 'YOUR_KEY'}"
+                })
+                await websocket.close(code=1008, reason="Authentication required")
+                return
+
+            api_key = auth_data.get("api_key")
+            if not await _verify_websocket_auth(api_key):
+                await websocket.send_json({"type": "error", "message": "Invalid API key"})
+                await websocket.close(code=1008, reason="Unauthorized")
+                logger.warning(f"WebSocket connection rejected for account {account_id}: Invalid API key")
+                return
+
+        except json.JSONDecodeError:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Invalid JSON in auth message"
+            })
+            await websocket.close(code=1008, reason="Invalid auth format")
+            return
+
+    except asyncio.TimeoutError:
+        await websocket.send_json({"type": "error", "message": "Authentication timeout (10s)"})
+        await websocket.close(code=1008, reason="Auth timeout")
         return
+
+    # Authentication successful - connect to order stream
+    await websocket.send_json({
+        "type": "authenticated",
+        "account_id": account_id,
+        "message": "Successfully authenticated"
+    })
 
     await order_stream_manager.connect(websocket, account_id)
 
@@ -96,9 +151,11 @@ class WebhookResponse(BaseModel):
 
 
 @router.post("/webhooks", response_model=WebhookResponse, status_code=201, dependencies=[Depends(verify_api_key)])
-async def create_webhook(payload: WebhookCreateRequest):
+async def create_webhook(request: Request, payload: WebhookCreateRequest):
     """
     Register a webhook for order notifications.
+
+    Rate limit: 20 requests per minute per IP
 
     Webhook will receive HTTP POST requests when events occur:
         POST <your_url>
@@ -115,6 +172,10 @@ async def create_webhook(payload: WebhookCreateRequest):
     import uuid
     import httpx
     from urllib.parse import urlparse
+
+    # Apply rate limiting
+    limiter = request.app.state.limiter
+    await limiter.limit("20/minute")(request)
 
     # Validate URL is not internal (SSRF protection)
     parsed = urlparse(str(payload.url))
@@ -244,9 +305,11 @@ class BatchOrdersResponse(BaseModel):
 
 
 @router.post("/batch-orders", response_model=BatchOrdersResponse, status_code=201, dependencies=[Depends(verify_api_key)])
-async def execute_batch_orders(payload: BatchOrdersRequest):
+async def execute_batch_orders(request: Request, payload: BatchOrdersRequest):
     """
     Execute multiple orders atomically.
+
+    Rate limit: 10 requests per minute per IP
 
     If rollback_on_failure=true, all successfully placed orders
     will be cancelled if any order fails.
@@ -276,6 +339,10 @@ async def execute_batch_orders(payload: BatchOrdersRequest):
             "rollback_on_failure": true
         }
     """
+    # Apply rate limiting
+    limiter = request.app.state.limiter
+    await limiter.limit("10/minute")(request)
+
     # Validate batch size
     if len(payload.orders) == 0:
         raise HTTPException(status_code=400, detail="Batch must contain at least one order")
@@ -366,10 +433,10 @@ async def enable_mock_data():
             "message": "Mock data generation enabled"
         }
     """
-    from .config import get_settings
+    from .runtime_state import get_runtime_state
 
-    settings = get_settings()
-    settings.enable_mock_data = True
+    runtime_state = get_runtime_state()
+    await runtime_state.set_mock_data_enabled(True, changed_by="api")
 
     logger.info("Mock data generation enabled via API")
 
@@ -397,10 +464,10 @@ async def disable_mock_data():
             "message": "Mock data generation disabled"
         }
     """
-    from .config import get_settings
+    from .runtime_state import get_runtime_state
 
-    settings = get_settings()
-    settings.enable_mock_data = False
+    runtime_state = get_runtime_state()
+    await runtime_state.set_mock_data_enabled(False, changed_by="api")
 
     logger.info("Mock data generation disabled via API")
 
@@ -430,15 +497,22 @@ async def get_mock_data_status():
         }
     """
     from .config import get_settings
+    from .runtime_state import get_runtime_state
     from .generator import ticker_loop
 
     settings = get_settings()
+    runtime_state = get_runtime_state()
 
     # Get current market hours status
     is_market_hours = ticker_loop._is_market_hours() if hasattr(ticker_loop, '_is_market_hours') else None
 
+    # Get runtime state
+    state_summary = await runtime_state.get_state_summary()
+
     return {
-        "mock_data_enabled": settings.enable_mock_data,
+        "mock_data_enabled": await runtime_state.get_mock_data_enabled(),
+        "last_toggled": state_summary.get("mock_data_last_toggled"),
+        "toggled_by": state_summary.get("mock_data_toggled_by"),
         "market_hours": {
             "open": settings.market_open_time.strftime("%H:%M"),
             "close": settings.market_close_time.strftime("%H:%M"),

@@ -1,0 +1,83 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Log files
+*.log
+logs/
+ticker_service.log
+ticker_service_dev.log
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!README.md
+docs/
+BACKPRESSURE_*.md
+IMPROVEMENT_*.md
+KITE_*.md
+LOW_PRIORITY_*.md
+MEDIUM_*.md
+NEW_FEATURES_*.md
+PRODUCTION_*.md
+WEBSOCKET_*.md
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+.tox/
+
+# Temporary files
+*.pid
+PING
+SUBSCRIBE
+.cache/
+tmp/
+
+# Token files (these should be mounted as volumes)
+tokens/
+app/kite/tokens/
+
+# Local scripts
+scripts/
+Kite_FOdata_scripts/
+*.html
+*_files/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Claude Code
+.claude/

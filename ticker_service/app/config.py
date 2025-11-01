@@ -100,7 +100,7 @@ class Settings(BaseSettings):
 
     # API Authentication configuration
     api_key_enabled: bool = Field(
-        default=False,
+        default=True,  # PRODUCTION DEFAULT: Always require authentication
         env="API_KEY_ENABLED",
         description="Enable API key authentication. Set to True to require X-API-Key header.",
     )
@@ -207,6 +207,13 @@ class Settings(BaseSettings):
         # Validate API key is set when authentication is enabled
         if self.api_key_enabled and not self.api_key.strip():
             raise ValueError("api_key must be set when api_key_enabled=True")
+
+        # PRODUCTION SECURITY: Force authentication in production environments
+        if self.environment.lower() in ("production", "prod", "live") and not self.api_key_enabled:
+            raise ValueError(
+                "API key authentication MUST be enabled in production environments. "
+                "Set API_KEY_ENABLED=true and provide a strong API_KEY."
+            )
 
     model_config = {
         "env_file": ".env",

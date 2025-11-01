@@ -54,13 +54,32 @@ def sanitize_pii(record: dict) -> bool:
     return True
 
 
-# Configure loguru with PII filter
+# Configure loguru with PII filter and log rotation
 logger.remove()  # Remove default handler
+
+# Console handler (for Docker logs)
 logger.add(
     sink=lambda msg: print(msg, end=""),
     format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     filter=sanitize_pii,
-    colorize=True
+    colorize=True,
+    level="INFO"
+)
+
+# File handler with rotation (for persistent logs)
+import os
+log_dir = os.getenv("LOG_DIR", "logs")
+os.makedirs(log_dir, exist_ok=True)
+
+logger.add(
+    sink=os.path.join(log_dir, "ticker_service.log"),
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+    filter=sanitize_pii,
+    rotation="100 MB",      # Rotate when file reaches 100MB
+    retention="7 days",     # Keep logs for 7 days
+    compression="zip",      # Compress rotated logs
+    enqueue=True,           # Thread-safe logging
+    level="DEBUG"           # Capture all levels in file
 )
 
 
@@ -290,10 +309,24 @@ async def health(request: Request) -> dict[str, object]:
 
     # Check instrument registry
     try:
-        # Check if instruments cache is populated
-        registry_ok = hasattr(instrument_registry, '_instruments') and instrument_registry._instruments is not None
-        health_status["dependencies"]["instrument_registry"] = "ok" if registry_ok else "not_loaded"
-        if not registry_ok:
+        # Check if registry is initialized and cache is populated
+        registry_initialized = instrument_registry._initialised
+        cache_loaded = len(instrument_registry._cache) > 0
+
+        if registry_initialized and cache_loaded:
+            health_status["dependencies"]["instrument_registry"] = {
+                "status": "ok",
+                "cached_instruments": len(instrument_registry._cache),
+                "last_refresh": instrument_registry._last_refresh.isoformat() if instrument_registry._last_refresh else None
+            }
+        elif registry_initialized:
+            health_status["dependencies"]["instrument_registry"] = {
+                "status": "initialized_but_empty",
+                "cached_instruments": 0
+            }
+            health_status["status"] = "degraded"
+        else:
+            health_status["dependencies"]["instrument_registry"] = "not_initialized"
             health_status["status"] = "degraded"
     except Exception as exc:
         logger.error(f"Instrument registry health check failed: {exc}")
@@ -304,7 +337,8 @@ async def health(request: Request) -> dict[str, object]:
 
 
 @app.post("/admin/instrument-refresh")
-async def instrument_refresh(force: bool = False) -> dict[str, object]:
+@limiter.limit("5/hour")
+async def instrument_refresh(request: Request, force: bool = False) -> dict[str, object]:
     try:
         result = await ticker_loop.refresh_instruments(force=force)
     except Exception as exc:
@@ -353,7 +387,8 @@ async def list_subscriptions(
 
 
 @app.post("/subscriptions", response_model=SubscriptionResponse, status_code=201)
-async def create_subscription(payload: SubscriptionRequest) -> SubscriptionResponse:
+@limiter.limit("30/minute")
+async def create_subscription(request: Request, payload: SubscriptionRequest) -> SubscriptionResponse:
     requested_mode = (payload.requested_mode or "FULL").upper()
     if requested_mode not in {"FULL", "QUOTE", "LTP"}:
         raise HTTPException(status_code=400, detail="requested_mode must be one of FULL, QUOTE, LTP")
@@ -444,7 +479,8 @@ async def history(
 
 
 @app.delete("/subscriptions/{instrument_token}", response_model=SubscriptionResponse)
-async def delete_subscription(instrument_token: int) -> SubscriptionResponse:
+@limiter.limit("30/minute")
+async def delete_subscription(request: Request, instrument_token: int) -> SubscriptionResponse:
     record = await subscription_store.get(instrument_token)
     if not record:
         raise HTTPException(status_code=404, detail="Subscription not found")
