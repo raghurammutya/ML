@@ -157,8 +157,10 @@ class IndicatorComputer:
     def __init__(self, data_manager: DataManager):
         self.dm = data_manager
 
-        if ta is None:
-            raise ImportError("pandas_ta is required. Install with: pip install pandas-ta")
+        # pandas_ta is optional - some indicators work without it
+        self._has_pandas_ta = (ta is not None)
+        if not self._has_pandas_ta:
+            logger.warning("pandas_ta not available - some advanced indicators may not work")
 
     async def compute_indicator(
         self,

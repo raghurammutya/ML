@@ -4,11 +4,16 @@ Uses pydantic-settings for environment variable loading and validation
 """
 
 from typing import List, Optional
-from pydantic import Field, PostgresDsn, RedisDsn, validator
-from pydantic_settings import BaseSettings
+from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True
+    )
     """Application settings loaded from environment variables"""
 
     # Application
@@ -79,12 +84,19 @@ class Settings(BaseSettings):
     SESSION_COOKIE_HTTPONLY: bool = Field(default=True, env="SESSION_COOKIE_HTTPONLY")
     SESSION_COOKIE_SAMESITE: str = Field(default="strict", env="SESSION_COOKIE_SAMESITE")
 
-    # CORS
-    CORS_ALLOWED_ORIGINS: List[str] = Field(
-        default=["http://localhost:3000"],
+    # CORS (stored as string, parsed on access)
+    CORS_ALLOWED_ORIGINS_STR: str = Field(
+        default="http://localhost:3000",
         env="CORS_ALLOWED_ORIGINS"
     )
     CORS_ALLOW_CREDENTIALS: bool = Field(default=True, env="CORS_ALLOW_CREDENTIALS")
+
+    @property
+    def CORS_ALLOWED_ORIGINS(self) -> List[str]:
+        """Parse comma-separated CORS origins"""
+        if isinstance(self.CORS_ALLOWED_ORIGINS_STR, str):
+            return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS_STR.split(",")]
+        return [self.CORS_ALLOWED_ORIGINS_STR]
 
     # Logging & Observability
     LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
@@ -107,14 +119,8 @@ class Settings(BaseSettings):
     ALERT_SERVICE_URL: str = Field(default="http://alert_service:8003", env="ALERT_SERVICE_URL")
     BACKEND_SERVICE_URL: str = Field(default="http://backend:8000", env="BACKEND_SERVICE_URL")
 
-    @validator("CORS_ALLOWED_ORIGINS", pre=True)
-    def parse_cors_origins(cls, v):
-        """Parse comma-separated string to list"""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        return v
-
-    @validator("SESSION_COOKIE_SAMESITE")
+    @field_validator("SESSION_COOKIE_SAMESITE")
+    @classmethod
     def validate_samesite(cls, v):
         """Validate SameSite cookie attribute"""
         allowed = ["strict", "lax", "none"]
@@ -122,18 +128,14 @@ class Settings(BaseSettings):
             raise ValueError(f"SESSION_COOKIE_SAMESITE must be one of {allowed}")
         return v.lower()
 
-    @validator("LOG_LEVEL")
+    @field_validator("LOG_LEVEL")
+    @classmethod
     def validate_log_level(cls, v):
         """Validate log level"""
         allowed = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if v.upper() not in allowed:
             raise ValueError(f"LOG_LEVEL must be one of {allowed}")
         return v.upper()
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
 
 
 # Global settings instance

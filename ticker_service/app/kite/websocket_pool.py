@@ -101,7 +101,7 @@ class KiteWebSocketPool:
 
         self._connections: List[WebSocketConnection] = []
         self._next_connection_id = 0
-        self._pool_lock = threading.Lock()
+        self._pool_lock = threading.RLock()  # Use RLock for reentrant locking (same thread can acquire multiple times)
 
         # Track which token is on which connection
         self._token_to_connection: Dict[int, int] = {}  # token -> connection_id
@@ -140,11 +140,13 @@ class KiteWebSocketPool:
 
     def _create_connection(self) -> WebSocketConnection:
         """Create a new WebSocket connection"""
+        logger.info("DEBUG: _create_connection() called for account %s", self.account_id)
         if not KiteTicker:
             raise RuntimeError("KiteTicker not available")
 
         connection_id = self._next_connection_id
         self._next_connection_id += 1
+        logger.info("DEBUG: Creating connection #%d", connection_id)
 
         ticker = KiteTicker(
             api_key=self.api_key,
@@ -258,7 +260,48 @@ class KiteWebSocketPool:
         ticker.on_ticks = _on_ticks
 
         # Start the connection
-        ticker.connect(threaded=True, reconnect=True, disable_ssl_verification=False)
+        # IMPORTANT: ticker.connect() can block even with threaded=True when called from asyncio.
+        # We need to call it in a dedicated daemon thread that won't be cleaned up.
+        logger.info(
+            "About to call ticker.connect() for connection #%d (api_key=%s, token=%s...)",
+            connection_id,
+            self.api_key[:10],
+            self.access_token[:20]
+        )
+
+        # Run ticker.connect() in a daemon thread to avoid blocking
+        # Must be daemon so it doesn't prevent shutdown, and must not be in a ThreadPoolExecutor
+        # that gets cleaned up, as that would kill KiteTicker's background threads
+        import threading
+
+        def _start_connection():
+            try:
+                logger.info("Starting ticker.connect() in thread for connection #%d", connection_id)
+                # Note: KiteTicker.connect() signature: connect(threaded=False, disable_ssl_verification=False, proxy=None)
+                # It does NOT accept 'reconnect' parameter - reconnection is automatic
+                ticker.connect(threaded=True, disable_ssl_verification=False)
+                logger.info("ticker.connect() returned for connection #%d", connection_id)
+            except Exception as e:
+                logger.error(
+                    f"ticker.connect() exception for connection #{connection_id}: {e}",
+                    exc_info=True
+                )
+
+        connect_thread = threading.Thread(
+            target=_start_connection,
+            name=f"kite_connect_{self.account_id}_{connection_id}",
+            daemon=True
+        )
+        connect_thread.start()
+
+        # Give it a moment to start
+        import time
+        time.sleep(0.1)
+
+        logger.info(
+            "ticker.connect() initiated in daemon thread for connection #%d",
+            connection_id
+        )
 
         self.total_connections_created += 1
         logger.info(
@@ -272,13 +315,17 @@ class KiteWebSocketPool:
 
     def _get_or_create_connection_for_tokens(self, token_count: int) -> WebSocketConnection:
         """Get an existing connection with capacity or create a new one"""
+        logger.info("DEBUG: _get_or_create_connection_for_tokens() called, token_count=%d, existing_connections=%d", token_count, len(self._connections))
         with self._pool_lock:
+            logger.info("DEBUG: Lock acquired in _get_or_create_connection_for_tokens()")
             # Try to find existing connection with enough capacity
             for connection in self._connections:
                 if connection.available_capacity() >= token_count:
+                    logger.info("DEBUG: Found existing connection with capacity")
                     return connection
 
             # Need to create new connection
+            logger.info("DEBUG: No suitable connection found, creating new one")
             connection = self._create_connection()
             self._connections.append(connection)
             return connection

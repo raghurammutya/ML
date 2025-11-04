@@ -8,7 +8,7 @@ from app.models.trading_account import TradingAccount, TradingAccountMembership,
 from app.models.preference import UserPreference
 from app.models.mfa import MfaTotp
 from app.models.policy import Policy, PolicyEffect
-from app.models.oauth import OAuthClient, JwtSigningKey
+from app.models.oauth import OAuthClient, JwtSigningKey, AuthProvider
 from app.models.auth_event import AuthEvent
 
 __all__ = [
@@ -25,5 +25,6 @@ __all__ = [
     "PolicyEffect",
     "OAuthClient",
     "JwtSigningKey",
+    "AuthProvider",
     "AuthEvent",
 ]

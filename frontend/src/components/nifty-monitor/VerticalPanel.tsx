@@ -16,44 +16,56 @@ export interface VerticalPanelProps {
 const TooltipContent = ({ active, payload }: any) => {
   if (!active || !payload || !payload.length) return null
   const datum = payload[0].payload
+  const seriesName = payload[0].name || ''
+  const isSplit = seriesName.includes('CALL') || seriesName.includes('PUT')
+
   return (
     <div className="monitor-tooltip">
       <div className="monitor-tooltip__row">
         <span>Strike</span>
         <span>{datum.strike}</span>
       </div>
-      <div className="monitor-tooltip__row">
-        <span>Value</span>
-        <span>{datum.value?.toFixed(4)}</span>
-      </div>
-      {typeof datum.call === 'number' && (
+      {datum.expiry && (
         <div className="monitor-tooltip__row">
-          <span>Call</span>
-          <span>{datum.call.toFixed(4)}</span>
+          <span>Expiry</span>
+          <span>{datum.expiry}</span>
         </div>
       )}
-      {typeof datum.put === 'number' && (
+      {isSplit ? (
         <div className="monitor-tooltip__row">
-          <span>Put</span>
-          <span>{datum.put.toFixed(4)}</span>
+          <span>{seriesName.includes('CALL') ? 'Call IV' : 'Put IV'}</span>
+          <span>{datum.value?.toFixed(4)}</span>
         </div>
+      ) : (
+        <>
+          <div className="monitor-tooltip__row">
+            <span>Value</span>
+            <span>{datum.value?.toFixed(4)}</span>
+          </div>
+          {typeof datum.call === 'number' && (
+            <div className="monitor-tooltip__row">
+              <span>Call</span>
+              <span>{datum.call.toFixed(4)}</span>
+            </div>
+          )}
+          {typeof datum.put === 'number' && (
+            <div className="monitor-tooltip__row">
+              <span>Put</span>
+              <span>{datum.put.toFixed(4)}</span>
+            </div>
+          )}
+        </>
       )}
-      {typeof datum.call_oi === 'number' && (
+      {typeof datum.call_oi === 'number' && datum.call_oi > 0 && (
         <div className="monitor-tooltip__row">
           <span>Call OI</span>
           <span>{datum.call_oi.toLocaleString('en-IN')}</span>
         </div>
       )}
-      {typeof datum.put_oi === 'number' && (
+      {typeof datum.put_oi === 'number' && datum.put_oi > 0 && (
         <div className="monitor-tooltip__row">
           <span>Put OI</span>
           <span>{datum.put_oi.toLocaleString('en-IN')}</span>
-        </div>
-      )}
-      {datum.expiry && (
-        <div className="monitor-tooltip__row">
-          <span>Expiry</span>
-          <span>{datum.expiry}</span>
         </div>
       )}
     </div>
@@ -64,10 +76,53 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
   const { priceRange } = useMonitorSync()
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; strike: number; expiry: string; timestamp: number } | null>(null)
 
-  const scatterSeries = useMemo(() => data.map(series => ({
-    expiry: series.expiry,
-    points: series.points.map(pt => ({ ...pt, expiry: series.expiry })),
-  })), [data])
+  // For indicators like IV, create separate series for CALL and PUT
+  // For others, use the combined value
+  const scatterSeries = useMemo(() => {
+    console.log(`[VerticalPanel ${panel.id}] Incoming data:`, data.length, 'series')
+    if (data.length > 0) {
+      console.log(`[VerticalPanel ${panel.id}] First series:`, data[0].expiry, 'with', data[0].points.length, 'points')
+      if (data[0].points.length > 0) {
+        console.log(`[VerticalPanel ${panel.id}] Sample point:`, data[0].points[0])
+      }
+    }
+
+    const hasCallPut = data.length > 0 && data[0].points.length > 0 &&
+      typeof data[0].points[0].call === 'number' &&
+      typeof data[0].points[0].put === 'number'
+
+    console.log(`[VerticalPanel ${panel.id}] hasCallPut=${hasCallPut}, indicator=${panel.indicator}`)
+
+    if (hasCallPut && panel.indicator === 'iv') {
+      // Create separate series for calls and puts
+      const callSeries = data.map(series => ({
+        expiry: series.expiry,
+        side: 'call' as const,
+        points: series.points
+          .filter(pt => typeof pt.call === 'number')
+          .map(pt => ({ ...pt, value: pt.call, expiry: series.expiry, side: 'call' })),
+      }))
+      const putSeries = data.map(series => ({
+        expiry: series.expiry,
+        side: 'put' as const,
+        points: series.points
+          .filter(pt => typeof pt.put === 'number')
+          .map(pt => ({ ...pt, value: pt.put, expiry: series.expiry, side: 'put' })),
+      }))
+      const combined = [...callSeries, ...putSeries]
+      console.log(`[VerticalPanel ${panel.id}] Created ${combined.length} series (${callSeries.length} call + ${putSeries.length} put)`)
+      return combined
+    }
+
+    // Default: use combined value
+    const defaultSeries = data.map(series => ({
+      expiry: series.expiry,
+      side: undefined,
+      points: series.points.map(pt => ({ ...pt, expiry: series.expiry })),
+    }))
+    console.log(`[VerticalPanel ${panel.id}] Using default series:`, defaultSeries.length)
+    return defaultSeries
+  }, [data, panel.indicator, panel.id])
 
   const handleContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault()
@@ -127,25 +182,32 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
                 stroke="#2f3b52"
                 tick={{ fill: '#64748b', fontSize: 10 }}
                 domain={priceRange ? [priceRange.min, priceRange.max] : ['auto', 'auto']}
-                width={0}
-                tickLine={false}
-                axisLine={false}
+                width={50}
+                tickLine={true}
+                axisLine={true}
               />
               <XAxis type="number" dataKey="value" hide domain={['auto', 'auto']} />
               <Tooltip content={<TooltipContent />} cursor={{ stroke: '#26a69a', strokeDasharray: '3 3' }} />
-              {scatterSeries.map(series => (
-                <Scatter
-                  key={series.expiry}
-                  name={series.expiry}
-                  data={series.points}
-                  line
-                  lineJointType="monotoneX"
-                  lineType="fitting"
-                  fill={colorMap[series.expiry] || '#fff'}
-                  stroke={colorMap[series.expiry] || '#fff'}
-                  strokeWidth={1.5}
-                />
-              ))}
+              {scatterSeries.map((series) => {
+                const baseColor = colorMap[series.expiry] || '#fff'
+                // For call/put series, use dashed line for puts
+                const isDashed = series.side === 'put'
+                const key = series.side ? `${series.expiry}-${series.side}` : series.expiry
+                return (
+                  <Scatter
+                    key={key}
+                    name={series.side ? `${series.expiry} (${series.side.toUpperCase()})` : series.expiry}
+                    data={series.points}
+                    line
+                    lineJointType="monotoneX"
+                    lineType="fitting"
+                    fill={baseColor}
+                    stroke={baseColor}
+                    strokeWidth={1.5}
+                    strokeDasharray={isDashed ? '5 5' : undefined}
+                  />
+                )
+              })}
             </ScatterChart>
           </ResponsiveContainer>
         </div>

@@ -99,12 +99,14 @@ class MultiAccountTickerLoop:
         logger.debug("Starting ticker loop")
         self._stop_event = asyncio.Event()
 
-        # Step 1: Refresh instrument registry before anything else
+        # Step 1: Refresh instrument registry before anything else (skip if no accounts in mock mode)
         try:
             kite = self._orchestrator.get_default_session()
-            result = await self.refresh_instruments(force=True, kite_session=kite)
-
-            logger.info("Instrument registry forced refresh at startup: %s", result)
+            if kite:
+                result = await self.refresh_instruments(force=True, kite_session=kite)
+                logger.info("Instrument registry forced refresh at startup: %s", result)
+            else:
+                logger.warning("Skipping instrument refresh (no Kite accounts, running in mock mode)")
         except Exception as exc:
             logger.exception("Startup instrument refresh failed")
 
@@ -121,6 +123,12 @@ class MultiAccountTickerLoop:
         # Step 3: Validate available accounts
         available_accounts = await self._available_accounts()
         if not available_accounts:
+            if settings.enable_mock_data:
+                self._assignments = {}
+                self._running = False
+                self._started_at = None
+                logger.warning("No Kite accounts available; ticker loop idle (mock mode enabled).")
+                return
             raise RuntimeError("No Kite accounts authenticated successfully; unable to start streaming.")
 
         # Step 4: Build assignments

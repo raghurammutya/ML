@@ -17,7 +17,6 @@ class AuthEvent(Base):
         Index('idx_auth_events_user_id', 'user_id', 'timestamp'),
         Index('idx_auth_events_type', 'event_type', 'timestamp'),
         Index('idx_auth_events_session', 'session_id', 'timestamp'),
-        Index('idx_auth_events_risk', 'risk_score', postgresql_where=Column('risk_score') == 'high'),
     )
 
     event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -27,7 +26,7 @@ class AuthEvent(Base):
     country = Column(String(2), nullable=True)  # ISO country code
     device_fingerprint = Column(String(255), nullable=True)
     session_id = Column(String(255), nullable=True, index=True)
-    metadata = Column(JSONB, nullable=True)
+    event_metadata = Column("metadata", JSONB, nullable=True)
     risk_score = Column(String(20), nullable=True)  # 'low', 'medium', 'high'
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     notification_sent = Column(Boolean, default=False, nullable=False)

@@ -67,16 +67,28 @@ export interface StrikeDistributionParams {
 
 export const fetchFoStrikeDistribution = async (params: StrikeDistributionParams): Promise<FoStrikeDistributionResponse> => {
   const normalizedSymbol = normalizeFoSymbol(params.symbol)
-  const response = await api.get<FoStrikeDistributionResponse>('/fo/strike-distribution', {
-    params: {
-      symbol: normalizedSymbol,
-      timeframe: params.timeframe,
-      indicator: params.indicator,
-      expiry: params.expiry,
-      bucket_time: params.bucket_time,
-    }
+  console.log('[fo.ts] fetchFoStrikeDistribution called:', {
+    symbol: normalizedSymbol,
+    timeframe: params.timeframe,
+    indicator: params.indicator,
+    expiry: params.expiry
   })
-  return response.data
+  try {
+    const response = await api.get<FoStrikeDistributionResponse>('/fo/strike-distribution', {
+      params: {
+        symbol: normalizedSymbol,
+        timeframe: params.timeframe,
+        indicator: params.indicator,
+        expiry: params.expiry,
+        bucket_time: params.bucket_time,
+      }
+    })
+    console.log('[fo.ts] fetchFoStrikeDistribution response:', response.data)
+    return response.data
+  } catch (error) {
+    console.error('[fo.ts] fetchFoStrikeDistribution error:', error)
+    throw error
+  }
 }
 
 const buildWsUrl = (): string => {

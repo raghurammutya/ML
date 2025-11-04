@@ -3,6 +3,7 @@ Main TradingClient class - entry point for the SDK.
 """
 
 from typing import Optional
+from pathlib import Path
 from .api import APIClient
 from .cache import SimpleCache
 from .instrument import Instrument
@@ -10,6 +11,7 @@ from .account import Account
 from .filter import InstrumentFilter
 from .strategy import Strategy
 from .services import AlertService, MessagingService, CalendarService, NewsService
+from .indicator_registry import IndicatorRegistry
 
 
 class TradingClient:
@@ -18,45 +20,192 @@ class TradingClient:
 
     This is the primary entry point for using the SDK.
 
-    Example:
+    Supports two authentication methods:
+    1. API Key (for server-to-server, bots, scripts)
+    2. JWT (for user applications with username/password)
+
+    Example (API Key):
         >>> from stocksblitz import TradingClient
         >>> client = TradingClient(
-        ...     api_url="http://localhost:8009",
-        ...     api_key="sb_XXXXXXXX_YYYYYYYY"
+        ...     api_url="http://localhost:8081",
+        ...     api_key="sb_30d4d5ea_bbb52c64cc4eb2536fdd7b44861c93e4b30b50c6"
         ... )
         >>> inst = client.Instrument("NIFTY25N0424500PE")
         >>> if inst['5m'].rsi[14] > 70:
         ...     client.Account().sell(inst, quantity=50)
+
+    Example (JWT):
+        >>> client = TradingClient.from_credentials(
+        ...     api_url="http://localhost:8081",
+        ...     user_service_url="http://localhost:8001",
+        ...     username="trader@example.com",
+        ...     password="my_password"
+        ... )
+        >>> inst = client.Instrument("NIFTY50")
+        >>> inst['5m'].close
     """
 
-    def __init__(self, api_url: str, api_key: str,
-                 cache: Optional[SimpleCache] = None):
+    def __init__(
+        self,
+        api_url: str,
+        api_key: Optional[str] = None,
+        user_service_url: Optional[str] = None,
+        cache: Optional[SimpleCache] = None,
+        enable_disk_cache: bool = True,
+        cache_dir: Optional[Path] = None,
+        cache_ttl: int = 86400
+    ):
         """
-        Initialize trading client.
+        Initialize trading client with API key or JWT setup.
 
         Args:
-            api_url: Base URL of the API (e.g., "http://localhost:8009")
-            api_key: API key for authentication
+            api_url: Base URL of the backend API (e.g., "http://localhost:8081")
+            api_key: API key for authentication (for server-to-server use)
+            user_service_url: User service URL (for JWT authentication)
             cache: Optional cache instance (creates new if not provided)
+            enable_disk_cache: Enable persistent disk cache for indicator registry (default: True)
+            cache_dir: Custom cache directory for indicator registry (default: ~/.stocksblitz)
+            cache_ttl: Cache TTL in seconds for indicator registry (default: 86400 = 24 hours)
 
-        Example:
-            >>> client = TradingClient(
-            ...     api_url="http://localhost:8009",
-            ...     api_key="sb_30d4d5ea_bbb52c64cc4eb2536fdd7b44861c93e4b30b50c6"
-            ... )
+        Note:
+            For JWT authentication, provide user_service_url and then call login():
+                >>> client = TradingClient(
+                ...     api_url="http://localhost:8081",
+                ...     user_service_url="http://localhost:8001"
+                ... )
+                >>> client.login("user@example.com", "password")
+
+            Or use the from_credentials() class method for easier JWT setup:
+                >>> client = TradingClient.from_credentials(
+                ...     api_url="http://localhost:8081",
+                ...     user_service_url="http://localhost:8001",
+                ...     username="user@example.com",
+                ...     password="password"
+                ... )
         """
+        if not api_key and not user_service_url:
+            raise ValueError(
+                "Either 'api_key' or 'user_service_url' must be provided. "
+                "For API key auth, pass api_key. "
+                "For JWT auth, pass user_service_url and call login() or use from_credentials()."
+            )
+
         self._cache = cache or SimpleCache(default_ttl=60)
-        self._api = APIClient(api_url, api_key, self._cache)
+        self._api = APIClient(api_url, api_key=api_key, user_service_url=user_service_url, cache=self._cache)
 
         # Store for easy access
         self.api_url = api_url
         self.api_key = api_key
+        self.user_service_url = user_service_url
 
         # Initialize services
         self._alerts = AlertService(self._api)
         self._messaging = MessagingService(self._api)
         self._calendar = CalendarService(self._api)
         self._news = NewsService(self._api)
+
+        # Initialize indicator registry with disk caching
+        self._indicators = IndicatorRegistry(
+            self._api,
+            enable_disk_cache=enable_disk_cache,
+            cache_dir=cache_dir,
+            cache_ttl=cache_ttl
+        )
+
+    @classmethod
+    def from_credentials(
+        cls,
+        api_url: str,
+        user_service_url: str,
+        username: str,
+        password: str,
+        persist_session: bool = True,
+        cache: Optional[SimpleCache] = None
+    ) -> "TradingClient":
+        """
+        Create TradingClient with username/password authentication (JWT).
+
+        This is the recommended method for user-facing applications.
+        It will automatically:
+        - Login to user_service
+        - Obtain JWT access + refresh tokens
+        - Auto-refresh tokens as needed
+
+        Args:
+            api_url: Backend API URL (e.g., "http://localhost:8081")
+            user_service_url: User service URL (e.g., "http://localhost:8001")
+            username: User email/username
+            password: User password
+            persist_session: If True, obtain refresh token for long-lived session
+            cache: Optional cache instance
+
+        Returns:
+            Authenticated TradingClient instance
+
+        Raises:
+            AuthenticationError: If login fails
+
+        Example:
+            >>> from stocksblitz import TradingClient
+            >>> client = TradingClient.from_credentials(
+            ...     api_url="http://localhost:8081",
+            ...     user_service_url="http://localhost:8001",
+            ...     username="trader@example.com",
+            ...     password="secure_password123"
+            ... )
+            >>> # Client is now authenticated and ready to use
+            >>> inst = client.Instrument("NIFTY50")
+            >>> print(inst['5m'].close)
+        """
+        # Create instance with JWT setup
+        instance = cls(
+            api_url=api_url,
+            user_service_url=user_service_url,
+            cache=cache
+        )
+
+        # Perform login to get JWT tokens
+        instance._api.login(username, password, persist_session=persist_session)
+
+        return instance
+
+    def login(self, username: str, password: str, persist_session: bool = True):
+        """
+        Login with username/password (for JWT authentication).
+
+        Only needed if you didn't use from_credentials() class method.
+
+        Args:
+            username: User email/username
+            password: User password
+            persist_session: If True, obtain refresh token for long-lived session
+
+        Returns:
+            Login response dict
+
+        Raises:
+            AuthenticationError: If login fails
+
+        Example:
+            >>> client = TradingClient(
+            ...     api_url="http://localhost:8081",
+            ...     user_service_url="http://localhost:8001"
+            ... )
+            >>> client.login("user@example.com", "password")
+        """
+        return self._api.login(username, password, persist_session=persist_session)
+
+    def logout(self):
+        """
+        Logout and clear authentication tokens.
+
+        For JWT auth, this calls user_service logout endpoint.
+        For API key auth, this is a no-op.
+
+        Example:
+            >>> client.logout()
+        """
+        self._api.logout()
 
     def Instrument(self, spec: str) -> Instrument:
         """
@@ -250,9 +399,38 @@ class TradingClient:
         """
         return self._news
 
+    @property
+    def indicators(self) -> IndicatorRegistry:
+        """
+        Access indicator registry.
+
+        Returns:
+            IndicatorRegistry instance
+
+        Example:
+            >>> # List available indicators
+            >>> indicators = client.indicators.list_indicators()
+            >>> print(f"Total indicators: {len(indicators)}")
+            >>>
+            >>> # Get indicator by category
+            >>> momentum_indicators = client.indicators.list_indicators(category="momentum")
+            >>>
+            >>> # Validate indicator parameters
+            >>> is_valid, error = client.indicators.validate_indicator(
+            ...     "RSI",
+            ...     {"length": 14, "scalar": 100}
+            ... )
+            >>>
+            >>> # Force refresh after adding custom indicator
+            >>> client.indicators.clear_cache()
+            >>> client.indicators.fetch_indicators()
+        """
+        return self._indicators
+
     def clear_cache(self):
         """Clear all cached data."""
         self._cache.clear()
 
     def __repr__(self) -> str:
-        return f"<TradingClient api_url='{self.api_url}'>"
+        auth_method = "API Key" if self.api_key else "JWT"
+        return f"<TradingClient api_url='{self.api_url}' auth='{auth_method}'>"

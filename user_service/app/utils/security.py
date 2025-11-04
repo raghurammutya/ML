@@ -44,7 +44,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    print(f"[DEBUG] verify_password called:", flush=True)
+    print(f"  plain_password type: {type(plain_password)}, len: {len(plain_password) if plain_password else 0}", flush=True)
+    print(f"  hashed_password type: {type(hashed_password)}, len: {len(hashed_password) if hashed_password else 0}", flush=True)
+    print(f"  plain_password value: '{plain_password}'", flush=True)
+    print(f"  hashed_password value: '{hashed_password[:20]}...'", flush=True)
+    result = pwd_context.verify(plain_password, hashed_password)
+    print(f"  result: {result}", flush=True)
+    return result
 
 
 def validate_password_strength(password: str, user_inputs: Optional[list] = None) -> dict:

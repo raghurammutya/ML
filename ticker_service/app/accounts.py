@@ -228,8 +228,13 @@ class SessionOrchestrator:
             self._sessions[account_id] = AccountSession(account_id=account_id, client=client)
             logger.debug("Session created for account %s", account_id)
 
-        if not self._sessions:
+        # Allow running without accounts when mock mode is enabled
+        from .config import get_settings
+        settings = get_settings()
+        if not self._sessions and not settings.enable_mock_data:
             raise RuntimeError("No Kite accounts available for ticker service.")
+        elif not self._sessions:
+            logger.warning("Running ticker service without Kite accounts (mock mode enabled)")
 
         self._rotation = list(self._sessions.values())
         self._rr_index = 0
@@ -239,6 +244,7 @@ class SessionOrchestrator:
         """
         Returns the KiteClient for the default account.
         Falls back to the first available account if 'default' is not explicitly configured.
+        Returns None if no accounts are configured (mock mode).
         """
         if "default" in self._sessions:
             return self._sessions["default"].client

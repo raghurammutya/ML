@@ -4,6 +4,7 @@
   "description": "TradingView visualization with ML labels for Nifty50",
   "private": true,
   "dependencies": {
+    "@headlessui/react": "^2.2.9",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.39",
     "@types/react-dom": "^18.2.17",
@@ -11,6 +12,7 @@
     "lightweight-charts": "^4.2.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-router-dom": "^7.9.5",
     "recharts": "^2.9.3",
     "typescript": "^5.3.2"
   },

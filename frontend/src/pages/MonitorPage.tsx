@@ -217,10 +217,16 @@ const MonitorPage = () => {
         setStrikeGap(resp.meta?.strike_gap ?? DEFAULT_STRIKE_GAP)
         const expiryList = resp.options.map(option => option.expiry)
         setExpiries(expiryList)
+        console.log('[MonitorPage] Setting expiries:', expiryList)
         setSelectedExpiries(prev => {
           const preserved = prev.filter(expiry => expiryList.includes(expiry))
-          if (preserved.length) return preserved
-          return expiryList.slice(0, Math.min(2, expiryList.length))
+          if (preserved.length) {
+            console.log('[MonitorPage] Preserving selected expiries:', preserved)
+            return preserved
+          }
+          const autoSelected = expiryList.slice(0, Math.min(3, expiryList.length))
+          console.log('[MonitorPage] Auto-selecting first 3 expiries:', autoSelected)
+          return autoSelected
         })
         if (resp.underlying?.last_price != null) {
           setLatestUnderlying(resp.underlying.last_price)
@@ -450,22 +456,38 @@ const MonitorPage = () => {
 
   const loadVerticalPanels = useCallback(async () => {
     const loadId = ++verticalLoadIdRef.current
+    console.log('[MonitorPage] loadVerticalPanels called:', {
+      selectedExpiries: selectedExpiries.length,
+      activeVerticalPanels: activeVerticalPanels.length,
+      symbol,
+      timeframe
+    })
     if (!selectedExpiries.length || !activeVerticalPanels.length) {
+      console.log('[MonitorPage] Skipping vertical panel load - no expiries or panels selected')
       if (loadId === verticalLoadIdRef.current) {
         setVerticalData({})
       }
       return
     }
+    console.log('[MonitorPage] Fetching vertical panel data for expiries:', selectedExpiries)
     const entries = await Promise.all(activeVerticalPanels.map(async panel => {
-      const resp = await fetchFoStrikeDistribution({
-        symbol,
-        timeframe,
-        indicator: panel.indicator,
-        expiry: selectedExpiries,
-      })
-      return [panel.id, resp.series] as const
+      console.log(`[MonitorPage] Fetching ${panel.indicator} for panel ${panel.id}`)
+      try {
+        const resp = await fetchFoStrikeDistribution({
+          symbol,
+          timeframe,
+          indicator: panel.indicator,
+          expiry: selectedExpiries,
+        })
+        console.log(`[MonitorPage] Received ${resp.series.length} series for panel ${panel.id}`)
+        return [panel.id, resp.series] as const
+      } catch (error) {
+        console.error(`[MonitorPage] Failed to fetch ${panel.id}:`, error)
+        return [panel.id, []] as const
+      }
     }))
     if (loadId !== verticalLoadIdRef.current) return
+    console.log('[MonitorPage] Setting vertical data:', Object.fromEntries(entries.map(([id, series]) => [id, series.length])))
     setVerticalData(Object.fromEntries(entries))
   }, [activeVerticalPanels, selectedExpiries, symbol, timeframe])
 

@@ -15,6 +15,48 @@ services:
     networks:
       - tv-network
 
+  user-service:
+    build: ./user_service
+    container_name: tv-user-service
+    ports:
+      - "8001:8000"
+    environment:
+      - APP_NAME=user_service
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+      - REDIS_URL=redis://redis:6379/2
+      - JWT_SIGNING_KEY_ID=key-001
+      - JWT_ISSUER=user_service
+      - JWT_AUDIENCE=trading_platform
+      - JWT_ALGORITHM=RS256
+      - KMS_PROVIDER=local
+      - LOCAL_KMS_KEY_PATH=/app/keys/master.key
+      - CORS_ALLOWED_ORIGINS=http://localhost:3001,http://localhost:3000
+      - TICKER_SERVICE_URL=http://ticker-service:8080
+      - ALERT_SERVICE_URL=http://alert-service:8003
+      - BACKEND_SERVICE_URL=http://backend:8000
+      - RATELIMIT_LOGIN_ATTEMPTS=1000
+      - RATELIMIT_LOGIN_WINDOW_MINUTES=1
+      - RATELIMIT_REGISTER_ATTEMPTS=1000
+      - RATELIMIT_REGISTER_WINDOW_HOURS=1
+      - RATELIMIT_REFRESH_ATTEMPTS=1000
+      - RATELIMIT_REFRESH_WINDOW_MINUTES=1
+    volumes:
+      - ./user_service/keys:/app/keys:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5.0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tv-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   backend:
     build: ./backend
     container_name: tv-backend
@@ -25,8 +67,11 @@ services:
      - REDIS_URL=redis://redis:6379
      - POSTGRES_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
      - TICKER_SERVICE_URL=http://ticker-service:8080
+     - USER_SERVICE_URL=http://host.docker.internal:8001
     depends_on:
       redis:
+        condition: service_healthy
+      user-service:
         condition: service_healthy
       ticker-service:
         condition: service_started
@@ -66,22 +111,55 @@ services:
       - INSTRUMENT_DB_PASSWORD=stocksblitz123
       - KITE_TOKEN_DIR=/app/app/kite/tokens
       # Calendar service integration
-      - MARKET_MODE=force_mock
+      - MARKET_MODE=auto
       - CALENDAR_API_URL=http://backend:8000
       - CALENDAR_CODE=NSE
+      # User service integration
+      - USER_SERVICE_URL=http://host.docker.internal:8001
     volumes:
       - ./ticker_service/tokens:/app/app/kite/tokens
       - ./ticker_service/app/kite/.env:/app/app/kite/.env:ro
     ports:
-      - "8080:8080" 
+      - "8080:8080"
     depends_on:
       redis:
+        condition: service_healthy
+      user-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 15s
       timeout: 5s
       retries: 5
+    networks:
+      - tv-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  alert-service:
+    build: ./alert_service
+    container_name: tv-alert
+    ports:
+      - "8003:8003"
+    environment:
+      - APP_NAME=alert_service
+      - ENVIRONMENT=development
+      - PORT=8003
+      - DATABASE_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+      - REDIS_URL=redis://redis:6379/3
+      - USER_SERVICE_URL=http://host.docker.internal:8001
+      - TICKER_SERVICE_URL=http://ticker-service:8080
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     networks:
       - tv-network
     extra_hosts:

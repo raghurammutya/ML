@@ -383,7 +383,7 @@ class Instrument:
             fetch_time = datetime.now()
 
             # Check if this is the underlying itself or an option
-            if "underlying" in response and response["underlying"]["symbol"] == underlying:
+            if "underlying" in response and response["underlying"] is not None and response["underlying"].get("symbol") == underlying:
                 # This is the underlying
                 underlying_data = response["underlying"]
 
@@ -422,7 +422,7 @@ class Instrument:
 
                 logger.info(f"Quote fetched for {self.tradingsymbol}: LTP={ltp}, state={data_state}")
 
-            elif "options" in response and self.tradingsymbol in response["options"]:
+            elif "options" in response and response["options"] is not None and isinstance(response["options"], dict) and self.tradingsymbol in response["options"]:
                 # This is an option in the chain
                 option_data = response["options"][self.tradingsymbol]
 
@@ -499,7 +499,7 @@ class Instrument:
 
     def _extract_underlying(self, symbol: str) -> str:
         """
-        Extract underlying symbol from option symbol.
+        Extract underlying symbol from option/futures symbol.
 
         Args:
             symbol: Trading symbol
@@ -513,6 +513,8 @@ class Instrument:
         Examples:
             >>> _extract_underlying("NIFTY25N0724500PE")
             'NIFTY'
+            >>> _extract_underlying("NIFTY25NOVFUT")
+            'NIFTY'
             >>> _extract_underlying("BANKNIFTY25N07...")
             'BANKNIFTY'
         """
@@ -520,6 +522,11 @@ class Instrument:
 
         # Pattern for option symbols: NIFTY25N0724500PE
         match = re.match(r'^(NIFTY|BANKNIFTY|FINNIFTY)(\d{2}[A-Z]\d{2})', symbol)
+        if match:
+            return match.group(1)
+
+        # Pattern for futures symbols: NIFTY25NOVFUT
+        match = re.match(r'^(NIFTY|BANKNIFTY|FINNIFTY)(\d{2}[A-Z]{3})FUT$', symbol)
         if match:
             return match.group(1)
 
@@ -535,7 +542,7 @@ class Instrument:
         logger.error(f"Cannot extract underlying from '{symbol}'")
         raise ValueError(
             f"Cannot extract underlying from '{symbol}'. "
-            f"Please use valid option symbols or direct underlying symbols."
+            f"Please use valid option/futures symbols or direct underlying symbols."
         )
 
     def _fetch_greeks(self) -> Dict:

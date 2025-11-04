@@ -23,8 +23,9 @@ engine = create_engine(
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for models
+# Base class for models with schema
 Base = declarative_base()
+Base.metadata.schema = "user_service"
 
 
 def get_db():

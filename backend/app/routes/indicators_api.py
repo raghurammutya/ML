@@ -18,7 +18,7 @@ from app.database import DataManager
 from app.services.indicator_computer import IndicatorComputer, IndicatorSpec
 from app.services.indicator_subscription_manager import IndicatorSubscriptionManager
 from app.services.indicator_cache import IndicatorCache
-from app.auth import require_api_key, APIKey
+from app.auth import require_api_key, require_api_key_or_jwt, APIKey, UserIdentity
 import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
@@ -94,13 +94,15 @@ class BatchQueryRequest(BaseModel):
 async def subscribe_indicators(
     request: Request,
     body: SubscribeRequest,
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     sub_manager: IndicatorSubscriptionManager = Depends(get_subscription_manager),
     computer: IndicatorComputer = Depends(get_indicator_computer),
     cache: IndicatorCache = Depends(get_indicator_cache)
 ) -> Dict[str, Any]:
     """
     Subscribe to technical indicators for real-time computation.
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```json
@@ -121,7 +123,8 @@ async def subscribe_indicators(
     - Use these IDs for querying and unsubscribing
     """
     try:
-        client_id = str(api_key.key_id)
+        # Use key_id for API keys, user_id for JWT
+        client_id = str(user.api_key.key_id) if user.api_key else user.user_id
 
         # Create indicator IDs
         indicator_ids = []
@@ -169,11 +172,13 @@ async def subscribe_indicators(
 async def unsubscribe_indicators(
     request: Request,
     body: UnsubscribeRequest,
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     sub_manager: IndicatorSubscriptionManager = Depends(get_subscription_manager)
 ) -> Dict[str, Any]:
     """
     Unsubscribe from indicators.
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```json
@@ -185,7 +190,7 @@ async def unsubscribe_indicators(
     ```
     """
     try:
-        client_id = str(api_key.key_id)
+        client_id = str(user.api_key.key_id) if user.api_key else user.user_id
 
         result = await sub_manager.unsubscribe(
             client_id, body.symbol, body.timeframe, body.indicator_ids
@@ -204,12 +209,14 @@ async def get_current_indicators(
     symbol: str = Query(..., description="Symbol (e.g., NIFTY50)"),
     timeframe: str = Query(..., description="Timeframe (1, 5, 15, 60, day)"),
     indicators: str = Query(..., description="Comma-separated indicator IDs (e.g., RSI_14,SMA_20)"),
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     computer: IndicatorComputer = Depends(get_indicator_computer),
     cache: IndicatorCache = Depends(get_indicator_cache)
 ) -> Dict[str, Any]:
     """
     Get current indicator values.
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```
@@ -294,12 +301,14 @@ async def get_indicator_history(
     timeframe: str = Query(..., description="Timeframe"),
     indicator: str = Query(..., description="Indicator ID (e.g., RSI_14)"),
     lookback: int = Query(20, ge=1, le=1000, description="Number of candles to fetch"),
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     computer: IndicatorComputer = Depends(get_indicator_computer),
     cache: IndicatorCache = Depends(get_indicator_cache)
 ) -> Dict[str, Any]:
     """
     Get historical indicator values (N candles back).
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```
@@ -385,11 +394,13 @@ async def get_indicator_at_offset(
     timeframe: str = Query(..., description="Timeframe"),
     indicators: str = Query(..., description="Comma-separated indicator IDs"),
     offset: int = Query(0, ge=0, le=1000, description="Candles back (0=current, 1=one back, etc.)"),
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     computer: IndicatorComputer = Depends(get_indicator_computer)
 ) -> Dict[str, Any]:
     """
     Get indicator values at specific offset (N candles back).
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```
@@ -450,11 +461,13 @@ async def get_indicator_at_offset(
 async def batch_query(
     request: Request,
     body: BatchQueryRequest,
-    api_key: APIKey = Depends(require_api_key),
+    user: UserIdentity = Depends(require_api_key_or_jwt),
     computer: IndicatorComputer = Depends(get_indicator_computer)
 ) -> Dict[str, Any]:
     """
     Batch query multiple indicators/timeframes.
+
+    **Authentication**: Accepts either API key or JWT token.
 
     **Example**:
     ```json
@@ -557,6 +570,166 @@ def _timeframe_to_minutes(timeframe: str) -> int:
             return int(tf)
         except ValueError:
             return 5
+
+
+@router.get("/list")
+async def list_available_indicators(
+    category: Optional[str] = Query(None, description="Filter by category (momentum, trend, volatility, volume, other)"),
+    search: Optional[str] = Query(None, description="Search query"),
+    include_custom: bool = Query(True, description="Include custom user-defined indicators")
+) -> Dict[str, Any]:
+    """
+    List all available indicators with their parameters and metadata.
+
+    This endpoint is primarily for frontend discovery - it provides all the information
+    needed to build dynamic UI for indicator selection and configuration.
+
+    **Example**: Get all indicators
+    ```
+    GET /indicators/list
+    ```
+
+    **Example**: Filter by category
+    ```
+    GET /indicators/list?category=momentum
+    ```
+
+    **Example**: Search
+    ```
+    GET /indicators/list?search=moving+average
+    ```
+
+    **Response**:
+    ```json
+    {
+      "status": "success",
+      "total": 41,
+      "categories": ["momentum", "trend", "volatility", "volume", "other"],
+      "indicators": [
+        {
+          "name": "RSI",
+          "display_name": "Relative Strength Index (RSI)",
+          "category": "momentum",
+          "description": "Measures the magnitude of recent price changes...",
+          "parameters": [
+            {
+              "name": "length",
+              "type": "integer",
+              "default": 14,
+              "min": 2,
+              "max": 100,
+              "description": "Period length",
+              "required": true
+            },
+            {
+              "name": "scalar",
+              "type": "integer",
+              "default": 100,
+              "min": 1,
+              "max": 1000,
+              "description": "Scaling factor",
+              "required": false
+            }
+          ],
+          "outputs": ["RSI"],
+          "is_custom": false
+        }
+      ]
+    }
+    ```
+    """
+    from app.services.indicator_registry import get_indicator_registry, IndicatorCategory
+
+    try:
+        registry = get_indicator_registry()
+
+        # Filter by category
+        category_filter = None
+        if category:
+            try:
+                category_filter = IndicatorCategory(category.lower())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid category. Must be one of: {', '.join(registry.get_categories())}"
+                )
+
+        # Get indicators
+        if search:
+            indicators = registry.search(search)
+        else:
+            indicators = registry.list_all(
+                category=category_filter,
+                include_custom=include_custom
+            )
+
+        # Convert to dict
+        indicators_data = [ind.to_dict() for ind in indicators]
+
+        return {
+            "status": "success",
+            "total": len(indicators_data),
+            "categories": registry.get_categories(),
+            "indicators": indicators_data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list indicators: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/definition/{indicator_name}")
+async def get_indicator_definition(
+    indicator_name: str
+) -> Dict[str, Any]:
+    """
+    Get detailed definition for a specific indicator.
+
+    **Example**:
+    ```
+    GET /indicators/definition/RSI
+    ```
+
+    **Response**:
+    ```json
+    {
+      "status": "success",
+      "indicator": {
+        "name": "RSI",
+        "display_name": "Relative Strength Index (RSI)",
+        "category": "momentum",
+        "description": "Measures the magnitude of recent price changes...",
+        "parameters": [...],
+        "outputs": ["RSI"],
+        "is_custom": false
+      }
+    }
+    ```
+    """
+    from app.services.indicator_registry import get_indicator_registry
+
+    try:
+        registry = get_indicator_registry()
+        indicator = registry.get(indicator_name.upper())
+
+        if not indicator:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Indicator '{indicator_name}' not found"
+            )
+
+        return {
+            "status": "success",
+            "indicator": indicator.to_dict()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get indicator definition: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/health")

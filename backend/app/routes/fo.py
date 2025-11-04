@@ -96,7 +96,7 @@ INDICATOR_REGISTRY = [
         "label": "IV by Strike",
         "indicator": "iv",
         "orientation": "vertical",
-        "default": False,
+        "default": True,
     },
     {
         "id": "delta_strike_panel",
@@ -713,6 +713,131 @@ async def strike_distribution(
         "timeframe": normalized_tf,
         "indicator": indicator,
         "series": series,
+    }
+
+
+@router.get("/strike-history")
+async def strike_history(
+    symbol: str = Query(settings.monitor_default_symbol),
+    strike: float = Query(..., description="Strike price"),
+    expiry: str = Query(..., description="Expiry date (YYYY-MM-DD)"),
+    timeframe: str = Query("5min"),
+    from_time: Optional[int] = Query(default=None, alias="from", description="Start timestamp (Unix)"),
+    to_time: Optional[int] = Query(default=None, alias="to", description="End timestamp (Unix)"),
+    hours: int = Query(24, description="Hours of history (if from/to not provided)"),
+    dm: DataManager = Depends(get_data_manager),
+):
+    """
+    Return time-series data for a specific strike.
+    Used by chart popups to show historical greeks and price action.
+
+    Returns OHLCV data plus all greeks (IV, Delta, Gamma, Theta, Vega) and OI.
+    """
+    # Normalize inputs
+    normalized_tf = _normalize_timeframe(timeframe)
+    symbol_db = _normalize_symbol(symbol)
+
+    # Parse expiry
+    try:
+        expiry_date = datetime.fromisoformat(expiry).date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid expiry format: {expiry}. Use YYYY-MM-DD")
+
+    # Time range
+    if from_time and to_time:
+        from_dt = datetime.fromtimestamp(from_time, tz=timezone.utc)
+        to_dt = datetime.fromtimestamp(to_time, tz=timezone.utc)
+    else:
+        to_dt = datetime.now(timezone.utc)
+        from_dt = to_dt - timedelta(hours=hours)
+
+    # Get correct table based on timeframe
+    table_name = _fo_strike_table(timeframe)
+
+    # Query database for this specific strike
+    query = f"""
+        SELECT
+            bucket_time,
+            strike,
+            expiry,
+            underlying_close,
+            call_iv_avg,
+            put_iv_avg,
+            call_delta_avg,
+            put_delta_avg,
+            call_gamma_avg,
+            put_gamma_avg,
+            call_theta_avg,
+            put_theta_avg,
+            call_vega_avg,
+            put_vega_avg,
+            call_oi_sum,
+            put_oi_sum,
+            call_volume,
+            put_volume
+        FROM {table_name}
+        WHERE symbol = $1
+          AND strike = $2
+          AND expiry = $3
+          AND bucket_time BETWEEN $4 AND $5
+        ORDER BY bucket_time ASC
+    """
+
+    async with dm.pool.acquire() as conn:
+        rows = await conn.fetch(
+            query,
+            symbol_db,
+            strike,
+            expiry_date,
+            from_dt,
+            to_dt
+        )
+
+    logger.info(f"Strike history returned {len(rows)} rows for {symbol_db} strike={strike} expiry={expiry_date}")
+
+    # Format response as OHLCV + greeks
+    candles = []
+    for row in rows:
+        timestamp = int(row['bucket_time'].replace(tzinfo=timezone.utc).timestamp())
+
+        candles.append({
+            "time": timestamp,
+            "underlying": float(row['underlying_close']) if row['underlying_close'] else None,
+            "greeks": {
+                "call_iv": float(row['call_iv_avg']) if row['call_iv_avg'] else None,
+                "put_iv": float(row['put_iv_avg']) if row['put_iv_avg'] else None,
+                "call_delta": float(row['call_delta_avg']) if row['call_delta_avg'] else None,
+                "put_delta": float(row['put_delta_avg']) if row['put_delta_avg'] else None,
+                "call_gamma": float(row['call_gamma_avg']) if row['call_gamma_avg'] else None,
+                "put_gamma": float(row['put_gamma_avg']) if row['put_gamma_avg'] else None,
+                "call_theta": float(row['call_theta_avg']) if row['call_theta_avg'] else None,
+                "put_theta": float(row['put_theta_avg']) if row['put_theta_avg'] else None,
+                "call_vega": float(row['call_vega_avg']) if row['call_vega_avg'] else None,
+                "put_vega": float(row['put_vega_avg']) if row['put_vega_avg'] else None,
+            },
+            "oi": {
+                "call": float(row['call_oi_sum']) if row['call_oi_sum'] else 0,
+                "put": float(row['put_oi_sum']) if row['put_oi_sum'] else 0,
+                "total": (float(row['call_oi_sum']) if row['call_oi_sum'] else 0) +
+                        (float(row['put_oi_sum']) if row['put_oi_sum'] else 0),
+            },
+            "volume": {
+                "call": float(row['call_volume']) if row['call_volume'] else 0,
+                "put": float(row['put_volume']) if row['put_volume'] else 0,
+                "total": (float(row['call_volume']) if row['call_volume'] else 0) +
+                        (float(row['put_volume']) if row['put_volume'] else 0),
+            }
+        })
+
+    return {
+        "status": "ok",
+        "symbol": symbol_db,
+        "strike": strike,
+        "expiry": expiry_date.isoformat(),
+        "timeframe": normalized_tf,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "candles": candles
     }
 
 

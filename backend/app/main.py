@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import redis.asyncio as redis
@@ -26,9 +26,11 @@ from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws
+from app.services.session_subscription_manager import SessionSubscriptionManager, init_subscription_manager
+from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments
 from app.routes import calendar_simple as calendar
 from app.routes import admin_calendar
+from app.routes import corporate_calendar
 
 # -------- logging --------
 logging.basicConfig(
@@ -54,6 +56,7 @@ order_hub: Optional[RealTimeHub] = None
 order_stream_manager: Optional[OrderStreamManager] = None
 snapshot_service = None  # Account snapshot service
 indicator_streaming_task = None  # Indicator streaming background task
+session_subscription_manager = None  # Session-isolated indicator subscriptions
 
 background_tasks = []  # supervised background tasks
 
@@ -117,6 +120,7 @@ async def lifespan(app: FastAPI):
     global order_stream_manager
     global snapshot_service
     global indicator_streaming_task
+    global session_subscription_manager
 
     try:
         logger.info("Starting TradingView ML Visualization API")
@@ -134,6 +138,11 @@ async def lifespan(app: FastAPI):
 
         # Cache
         cache_manager = CacheManager(redis_client)
+
+        # Session Subscription Manager (Session-isolated indicator subscriptions)
+        init_subscription_manager(redis_client)
+        session_subscription_manager = SessionSubscriptionManager(redis_client)
+        logger.info("Session subscription manager initialized")
 
         # --- DB POOL + DATA MANAGER (FIX) ---
         # Create a real asyncpg pool and pass it to DataManager
@@ -179,12 +188,17 @@ async def lifespan(app: FastAPI):
         nifty_monitor.set_data_manager(data_manager)
         nifty_monitor.set_subscription_manager(nifty_subscription_manager)
 
+        print(f"[MAIN] monitor_stream_enabled={settings.monitor_stream_enabled}", flush=True)
         if settings.monitor_stream_enabled:
+            print(f"[MAIN] Creating NiftyMonitorStream...", flush=True)
             nifty_monitor_stream = NiftyMonitorStream(redis_client, settings, monitor_hub)
+            print(f"[MAIN] NiftyMonitorStream created: {nifty_monitor_stream}", flush=True)
             nifty_monitor.set_monitor_stream(nifty_monitor_stream)
             nifty_monitor.set_realtime_hub(monitor_hub)
+            print(f"[MAIN] NiftyMonitorStream configured", flush=True)
         else:
             nifty_monitor_stream = None
+            print(f"[MAIN] NiftyMonitorStream DISABLED", flush=True)
             logger.info("Nifty monitor stream disabled via configuration")
 
         app.include_router(nifty_monitor.router)
@@ -193,15 +207,26 @@ async def lifespan(app: FastAPI):
         # Store DB pool for API key authentication
         app.state.db_pool = data_manager.pool
 
+        # Store data_manager and redis_client for indicator endpoints
+        app.state.data_manager = data_manager
+        app.state.redis_client = redis_client
+        app.state.cache_manager = cache_manager
+        app.state.session_subscription_manager = session_subscription_manager
+
         app.include_router(accounts.router)
         app.include_router(api_keys.router)  # API key management endpoints
         app.include_router(order_ws.router)  # New: WebSocket routes for order updates
         app.include_router(indicators_api.router)  # Phase 2: Dynamic technical indicators API
-        app.include_router(indicator_ws.router)  # Phase 2D: Indicator WebSocket streaming
+        app.include_router(indicator_ws.router)  # Phase 2D: Indicator WebSocket streaming (legacy)
+        app.include_router(indicator_ws_session.router)  # Phase 2E: Session-isolated indicator streaming
         calendar.set_data_manager(data_manager)  # Set data manager for calendar
         app.include_router(calendar.router)  # Calendar service: market holidays and trading hours
         admin_calendar.set_data_manager(data_manager)  # Set data manager for admin calendar
         app.include_router(admin_calendar.router)  # Admin API: holiday management
+        corporate_calendar.set_data_manager(data_manager)  # Set data manager for corporate calendar
+        app.include_router(corporate_calendar.router)  # Corporate calendar: corporate actions API
+        instruments.set_data_manager(data_manager)  # Set data manager for instruments
+        app.include_router(instruments.router)  # Instruments: list and filter tradeable symbols
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:
@@ -213,9 +238,14 @@ async def lifespan(app: FastAPI):
             background_tasks.append(task)
             print(f"[MAIN] Task appended to background_tasks, len={len(background_tasks)}", flush=True)
             logger.info("FO stream consumer started")
+        print(f"[MAIN] About to start NiftyMonitorStream: {nifty_monitor_stream}", flush=True)
         if nifty_monitor_stream:
+            print(f"[MAIN] Starting NiftyMonitorStream task...", flush=True)
             background_tasks.append(asyncio.create_task(nifty_monitor_stream.run()))
+            print(f"[MAIN] NiftyMonitorStream task appended, len={len(background_tasks)}", flush=True)
             logger.info("Nifty monitor stream consumer started")
+        else:
+            print(f"[MAIN] NiftyMonitorStream is None, skipping start", flush=True)
         if backfill_manager and settings.backfill_enabled:
             background_tasks.append(asyncio.create_task(backfill_manager.run()))
             logger.info("Backfill manager loop started")
@@ -313,6 +343,7 @@ app.add_middleware(
 
 # Custom middleware for correlation ID tracking and request logging
 from .middleware import CorrelationIdMiddleware, RequestLoggingMiddleware, ErrorHandlingMiddleware
+from .jwt_auth import get_current_user, get_optional_user
 
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
@@ -380,6 +411,19 @@ async def health_check():
             uptime=0,
             version=settings.api_version,
         )
+
+
+@app.get("/auth/test")
+async def test_jwt_auth(current_user: dict = Depends(get_current_user)):
+    """
+    Test endpoint for JWT authentication.
+    Requires valid JWT token from user_service.
+    """
+    return {
+        "message": "JWT authentication successful",
+        "user": current_user,
+        "service": "backend"
+    }
 
 
 @app.get("/metrics")

@@ -41,11 +41,12 @@ class User(Base):
     last_login_at = Column(DateTime, nullable=True)
 
     # Relationships
-    roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")
+    roles = relationship("UserRole", foreign_keys="UserRole.user_id", back_populates="user", cascade="all, delete-orphan")
     preferences = relationship("UserPreference", back_populates="user", uselist=False, cascade="all, delete-orphan")
     trading_accounts = relationship("TradingAccount", back_populates="owner", cascade="all, delete-orphan")
     account_memberships = relationship("TradingAccountMembership", foreign_keys="TradingAccountMembership.member_user_id", back_populates="member", cascade="all, delete-orphan")
     mfa_totp = relationship("MfaTotp", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    auth_providers = relationship("AuthProvider", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(user_id={self.user_id}, email='{self.email}', status='{self.status}')>"

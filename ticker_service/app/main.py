@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import re
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -29,6 +27,7 @@ from .routes_portfolio import router as portfolio_router
 from .routes_trading_accounts import router as trading_accounts_router
 from .subscription_store import SubscriptionRecord, subscription_store
 from .account_store import initialize_account_store, get_account_store
+from .jwt_auth import get_current_user, get_optional_user
 
 settings = get_settings()
 
@@ -127,9 +126,26 @@ async def lifespan(app: FastAPI):
     rate_limiter = get_rate_limiter()
     rate_limiter.start_daily_reset_scheduler(asyncio.get_running_loop())
 
+    # Start WebSocket services (Redis listener)
+    try:
+        from .routes_websocket import start_websocket_services
+        await start_websocket_services()
+        logger.info("WebSocket services started")
+    except Exception as e:
+        logger.error(f"Failed to start WebSocket services: {e}")
+        # Non-critical, continue startup
+
     try:
         yield
     finally:
+        # Stop WebSocket services
+        try:
+            from .routes_websocket import stop_websocket_services
+            await stop_websocket_services()
+            logger.info("WebSocket services stopped")
+        except Exception as e:
+            logger.error(f"Error stopping WebSocket services: {e}")
+
         # Stop rate limiter scheduler
         rate_limiter.stop_daily_reset_scheduler()
 
@@ -223,6 +239,10 @@ app.include_router(advanced_router)
 
 # Include trading accounts management router
 app.include_router(trading_accounts_router)
+
+# Include WebSocket router for real-time tick streaming
+from .routes_websocket import router as websocket_router
+app.include_router(websocket_router)
 
 
 class SubscriptionRequest(BaseModel):
@@ -334,6 +354,19 @@ async def health(request: Request) -> dict[str, object]:
         health_status["status"] = "degraded"
 
     return health_status
+
+
+@app.get("/auth/test")
+async def test_jwt_auth(current_user: dict = Depends(get_current_user)) -> dict[str, object]:
+    """
+    Test endpoint for JWT authentication.
+    Requires valid JWT token from user_service.
+    """
+    return {
+        "message": "JWT authentication successful",
+        "user": current_user,
+        "service": "ticker_service"
+    }
 
 
 @app.post("/admin/instrument-refresh")

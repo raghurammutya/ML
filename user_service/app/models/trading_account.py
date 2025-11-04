@@ -24,9 +24,8 @@ class TradingAccount(Base):
     __tablename__ = "trading_accounts"
     __table_args__ = (
         # Unique constraint: one broker user ID per broker (when active)
-        Index('idx_trading_accounts_broker_user', 'broker', 'broker_profile_snapshot',
-              postgresql_where=Column('status') == TradingAccountStatus.ACTIVE,
-              unique=True),
+        # Note: Partial unique index removed to avoid SQLAlchemy compilation issues
+        # Can be added manually via migration if needed: CREATE UNIQUE INDEX ... WHERE status='active'
         Index('idx_trading_accounts_user_id', 'user_id'),
         Index('idx_trading_accounts_status', 'status'),
     )

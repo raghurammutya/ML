@@ -32,6 +32,11 @@ class APIError(StocksBlitzError):
         self.response = response
 
 
+class AuthenticationError(StocksBlitzError):
+    """Raised when authentication fails (invalid credentials, expired tokens, etc)."""
+    pass
+
+
 class CacheError(StocksBlitzError):
     """Raised when a cache operation fails."""
     pass

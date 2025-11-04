@@ -385,3 +385,106 @@ async def require_api_key_ws(api_key: str) -> Optional[APIKey]:
     except Exception as e:
         logger.error(f"WebSocket API key validation failed: {e}")
         return None
+
+
+# Unified User Identity class for both API Key and JWT auth
+class UserIdentity:
+    """Represents an authenticated user from either API key or JWT token."""
+
+    def __init__(self, user_id: str, source: str, api_key: Optional[APIKey] = None, jwt_payload: Optional[Dict[str, Any]] = None):
+        self.user_id = user_id
+        self.source = source  # "api_key" or "jwt"
+        self.api_key = api_key
+        self.jwt_payload = jwt_payload
+
+    def has_permission(self, permission: str) -> bool:
+        """Check if user has a specific permission."""
+        if self.api_key:
+            return self.api_key.has_permission(permission)
+        # JWT users have all permissions by default (can be customized)
+        return True
+
+
+async def require_api_key_or_jwt(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> UserIdentity:
+    """
+    Require either valid API key OR valid JWT token for endpoint access.
+
+    Tries JWT authentication first, then falls back to API key if JWT fails.
+    This allows SDK users with JWT tokens to access indicator endpoints.
+
+    Usage:
+        @router.get("/protected")
+        async def protected_endpoint(user: UserIdentity = Depends(require_api_key_or_jwt)):
+            print(f"User {user.user_id} authenticated via {user.source}")
+            ...
+
+    Returns:
+        UserIdentity object with user_id and authentication source
+
+    Raises:
+        HTTPException: If both JWT and API key authentication fail
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide Bearer token (JWT or API key) in Authorization header."
+        )
+
+    token = credentials.credentials
+
+    # Try JWT authentication first
+    try:
+        from app.jwt_auth import verify_jwt_token
+
+        # Create mock credentials for JWT verification
+        jwt_payload = await verify_jwt_token(credentials)
+
+        user_id = jwt_payload.get("sub")  # Subject claim contains user_id
+        logger.info(f"User {user_id} authenticated via JWT token")
+
+        return UserIdentity(
+            user_id=user_id,
+            source="jwt",
+            jwt_payload=jwt_payload
+        )
+
+    except Exception as jwt_error:
+        # JWT authentication failed, try API key
+        logger.debug(f"JWT authentication failed: {jwt_error}. Trying API key...")
+
+        try:
+            # Get client IP
+            client_ip = request.client.host if request.client else None
+
+            # Validate API key
+            manager = await get_api_key_manager(request)
+            api_key_obj = await manager.validate_api_key(token, client_ip)
+
+            if not api_key_obj:
+                raise HTTPException(
+                    status_code=HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired credentials (neither valid JWT token nor API key)"
+                )
+
+            # Store in request state for logging
+            request.state.api_key = api_key_obj
+
+            logger.info(f"User {api_key_obj.user_id} authenticated via API key")
+
+            return UserIdentity(
+                user_id=str(api_key_obj.user_id),
+                source="api_key",
+                api_key=api_key_obj
+            )
+
+        except HTTPException:
+            raise
+        except Exception as api_error:
+            logger.error(f"API key authentication also failed: {api_error}")
+            raise HTTPException(
+                status_code=HTTP_401_UNAUTHORIZED,
+                detail="Authentication failed. Provide valid JWT token or API key."
+            )

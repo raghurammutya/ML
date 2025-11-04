@@ -121,14 +121,27 @@ class NiftyMonitorStream:
         self._running = asyncio.Event()
 
     async def run(self) -> None:
-        pubsub = self._redis.pubsub()
-        channels = [
-            self._settings.fo_underlying_channel,
-            self._settings.fo_options_channel,
-        ]
-        await pubsub.subscribe(*channels)
-        self._running.set()
-        logger.info("Nifty monitor stream subscribed to %s", channels)
+        print("[NiftyMonitorStream] run() called - starting...", flush=True)
+        logger.info("NiftyMonitorStream.run() called - starting...")
+        try:
+            pubsub = self._redis.pubsub()
+            print("[NiftyMonitorStream] pubsub object created", flush=True)
+            logger.info("NiftyMonitorStream: pubsub object created")
+            channels = [
+                self._settings.fo_underlying_channel,
+                self._settings.fo_options_channel,
+            ]
+            print(f"[NiftyMonitorStream] subscribing to channels: {channels}", flush=True)
+            logger.info(f"NiftyMonitorStream: subscribing to channels: {channels}")
+            await pubsub.subscribe(*channels)
+            print("[NiftyMonitorStream] subscribe call completed", flush=True)
+            logger.info("NiftyMonitorStream: subscribe call completed")
+            self._running.set()
+            print(f"[NiftyMonitorStream] subscribed to {channels}, now listening for messages", flush=True)
+            logger.info("Nifty monitor stream subscribed to %s", channels)
+        except Exception as e:
+            logger.error(f"NiftyMonitorStream: Failed to subscribe: {e}", exc_info=True)
+            raise
         try:
             while True:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)

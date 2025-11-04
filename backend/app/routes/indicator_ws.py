@@ -14,7 +14,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends
 from pydantic import BaseModel, ValidationError
 
 from app.auth import require_api_key_ws
-from app.database import get_data_manager, DataManager
+from app.database import DataManager
+from app.routes.indicators import get_data_manager
 from app.services.indicator_computer import IndicatorComputer, IndicatorSpec
 from app.services.indicator_subscription_manager import IndicatorSubscriptionManager
 from app.services.indicator_cache import IndicatorCache
