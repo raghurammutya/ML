@@ -18,6 +18,7 @@ from .subscription_store import SubscriptionRecord, subscription_store
 from .kite.client import KiteClient
 from .publisher import publish_option_snapshot, publish_underlying_bar
 from .schema import Instrument, OptionSnapshot
+from .greeks_calculator import GreeksCalculator
 
 settings = get_settings()
 
@@ -88,6 +89,14 @@ class MultiAccountTickerLoop:
         self._mock_seed_lock = asyncio.Lock()
         self._historical_bootstrap_done: Dict[str, bool] = {}
         self._last_market_state: Optional[bool] = None
+        self._last_underlying_price: float | None = None
+        self._greeks_calculator = GreeksCalculator(
+            interest_rate=self._settings.option_greeks_interest_rate,
+            dividend_yield=self._settings.option_greeks_dividend_yield,
+            expiry_time_hour=self._settings.option_expiry_time_hour,
+            expiry_time_minute=self._settings.option_expiry_time_minute,
+            market_timezone=self._settings.market_timezone,
+        )
 
     async def start(self) -> None:
         if self._running:
@@ -200,26 +209,21 @@ class MultiAccountTickerLoop:
         continuous: bool = False,
         oi: bool = False,
     ) -> List[Dict[str, Any]]:
-        from .kite_failover import borrow_with_failover
-
         orchestrator = self._orchestrator or SessionOrchestrator()
         if self._orchestrator is None:
             self._orchestrator = orchestrator
 
-        # Use failover mechanism to automatically try next account on API limits
-        async with borrow_with_failover(
-            orchestrator,
-            operation=f"history_fetch[{instrument_token}]",
-            preferred_account=account_id
-        ) as client:
-            return await client.fetch_historical(
-                instrument_token=instrument_token,
-                from_ts=from_ts,
-                to_ts=to_ts,
-                interval=interval,
-                continuous=continuous,
-                oi=oi,
-            )
+        # Use lock-free client access for API calls to avoid blocking on WebSocket locks
+        # Historical data fetches are thread-safe HTTP requests and don't need exclusive access
+        client = orchestrator.get_client_for_api_call(preferred_account=account_id)
+        return await client.fetch_historical(
+            instrument_token=instrument_token,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            interval=interval,
+            continuous=continuous,
+            oi=oi,
+        )
 
     async def refresh_instruments(self, force: bool = False, kite_session: KiteClient | None = None) -> Dict[str, Any]:
         await instrument_registry.initialise()
@@ -425,12 +429,93 @@ class MultiAccountTickerLoop:
                     continue
 
         if last_price <= 0:
-            logger.warning(
-                "Unable to seed mock state for token={} ({}): no price data",
-                instrument.instrument_token,
-                tradingsymbol or "unknown",
+            # Fallback: Calculate theoretical price for options when live data unavailable
+            logger.info(
+                "No live price data for {} - using theoretical fallback",
+                tradingsymbol or instrument.instrument_token,
             )
-            return None
+
+            # Estimate NIFTY spot price (can be improved with actual spot fetch)
+            estimated_spot = 24000.0
+
+            if instrument.strike and instrument.instrument_type in ['CE', 'PE']:
+                strike = float(instrument.strike)
+
+                if instrument.instrument_type == 'CE':
+                    # Call option
+                    intrinsic = max(0, estimated_spot - strike)
+                    time_value = max(10, strike * 0.01)  # 1% time value minimum
+                    last_price = intrinsic + time_value
+                else:
+                    # Put option
+                    intrinsic = max(0, strike - estimated_spot)
+                    time_value = max(10, strike * 0.01)
+                    last_price = intrinsic + time_value
+
+                # Add some randomness
+                last_price *= random.uniform(0.9, 1.1)
+                last_price = max(0.05, last_price)  # Minimum price
+
+                # Estimate volume and OI based on strike distance
+                distance = abs(strike - estimated_spot)
+                if distance < 500:  # ATM/near ATM
+                    volume = random.randint(5000, 20000)
+                    oi = random.randint(50000, 200000)
+                else:  # OTM
+                    volume = random.randint(500, 5000)
+                    oi = random.randint(5000, 50000)
+            else:
+                # For spot/futures, use estimated spot
+                last_price = estimated_spot
+                volume = random.randint(100000, 500000)
+                oi = 0
+
+            logger.debug(
+                "Fallback seed: {} strike={} price={:.2f}",
+                tradingsymbol,
+                instrument.strike if instrument.strike else "N/A",
+                last_price
+            )
+
+        # Calculate Greeks for options in mock mode
+        iv = 0.0
+        delta = 0.0
+        gamma = 0.0
+        theta = 0.0
+        vega = 0.0
+
+        if (last_price > 0 and
+            instrument.strike and
+            instrument.expiry and
+            instrument.instrument_type in ('CE', 'PE')):
+
+            # Get spot price from underlying state
+            spot_price = None
+            if self._mock_underlying_state:
+                spot_price = self._mock_underlying_state.last_close
+            elif self._last_underlying_price:
+                spot_price = self._last_underlying_price
+
+            if spot_price and spot_price > 0:
+                try:
+                    iv, greeks = self._greeks_calculator.calculate_option_greeks(
+                        market_price=last_price,
+                        spot_price=spot_price,
+                        strike_price=instrument.strike,
+                        expiry_date=instrument.expiry,
+                        option_type=instrument.instrument_type,
+                    )
+                    delta = greeks.get("delta", 0.0)
+                    gamma = greeks.get("gamma", 0.0)
+                    theta = greeks.get("theta", 0.0)
+                    vega = greeks.get("vega", 0.0)
+                    logger.info(
+                        f"MOCK GREEKS: Calculated for {instrument.tradingsymbol} | "
+                        f"price={last_price:.2f} spot={spot_price:.2f} | "
+                        f"IV={iv:.4f} delta={delta:.4f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to calculate mock Greeks for {instrument.tradingsymbol}: {e}")
 
         return MockOptionState(
             instrument=instrument,
@@ -438,11 +523,11 @@ class MultiAccountTickerLoop:
             last_price=last_price,
             base_volume=volume or 1,
             base_oi=oi,
-            iv=0.0,
-            delta=0.0,
-            gamma=0.0,
-            theta=0.0,
-            vega=0.0,
+            iv=iv,
+            delta=delta,
+            gamma=gamma,
+            theta=theta,
+            vega=vega,
         )
 
     async def _generate_mock_option_snapshot(self, instrument: Instrument) -> Optional[OptionSnapshot]:
@@ -697,12 +782,14 @@ class MultiAccountTickerLoop:
         logger.info("Account %s: Starting LIVE data stream (market hours active)", account_id)
 
         async def on_ticks(_account: str, ticks: List[Dict[str, Any]]) -> None:
+            logger.info(f"DEBUG GENERATOR: on_ticks callback fired! account={_account}, ticks={len(ticks)}")
             # Only process ticks if still in market hours
             if not self._is_market_hours():
-                logger.debug("Ignoring ticks - market hours ended")
+                logger.warning(f"DEBUG GENERATOR: Ignoring ticks - market hours ended")
                 return
-            logger.debug("Received %d ticks from %s", len(ticks), _account)
+            logger.info(f"DEBUG GENERATOR: Processing {len(ticks)} ticks from {_account}")
             await self._handle_ticks(account_id, token_map, ticks)
+            logger.info(f"DEBUG GENERATOR: Finished handling ticks")
 
         async def on_error(_account: str, exc: Exception) -> None:
             logger.error("Ticker error [%s]: %s", _account, exc)
@@ -771,19 +858,83 @@ class MultiAccountTickerLoop:
             instrument = lookup.get(tick.get("instrument_token"))
             if not instrument:
                 continue
-            snapshot = OptionSnapshot(
-                instrument=instrument,
-                last_price=float(tick.get("last_price") or 0.0),
-                volume=int(tick.get("volume_traded_today") or tick.get("volume") or 0),
-                oi=int(tick.get("oi") or tick.get("open_interest") or 0),
-                iv=float(tick.get("implied_volatility") or 0.0),
-                delta=float(tick.get("delta") or 0.0),
-                gamma=float(tick.get("gamma") or 0.0),
-                theta=float(tick.get("theta") or 0.0),
-                vega=float(tick.get("vega") or 0.0),
-                timestamp=int(tick.get("timestamp", int(time.time()))),
-            )
-            await publish_option_snapshot(snapshot)
+
+            # Route index/underlying instruments to underlying channel
+            if instrument.segment == "INDICES":
+                last_price = float(tick.get("last_price") or 0.0)
+                bar = {
+                    "symbol": instrument.tradingsymbol,
+                    "instrument_token": instrument.instrument_token,
+                    "last_price": last_price,
+                    "volume": int(tick.get("volume_traded_today") or tick.get("volume") or 0),
+                    "timestamp": int(tick.get("timestamp", int(time.time()))),
+                    "ohlc": tick.get("ohlc", {}),
+                }
+                # Track underlying price for Greeks calculation
+                self._last_underlying_price = last_price
+                logger.info(f"GREEKS TEST: Underlying price updated to {last_price}")
+                await publish_underlying_bar(bar)
+            else:
+                # Route option instruments to options channel
+                # Calculate Greeks for options using underlying price
+                market_price = float(tick.get("last_price") or 0.0)
+
+                # Initialize Greeks to zero
+                iv = 0.0
+                delta = 0.0
+                gamma = 0.0
+                theta = 0.0
+                vega = 0.0
+
+                # Only calculate Greeks if we have valid data
+                if (market_price > 0 and
+                    self._last_underlying_price and
+                    self._last_underlying_price > 0 and
+                    instrument.strike and
+                    instrument.expiry and
+                    instrument.instrument_type in ('CE', 'PE')):
+
+                    try:
+                        # Calculate IV and Greeks
+                        iv, greeks = self._greeks_calculator.calculate_option_greeks(
+                            market_price=market_price,
+                            spot_price=self._last_underlying_price,
+                            strike_price=instrument.strike,
+                            expiry_date=instrument.expiry,
+                            option_type=instrument.instrument_type,
+                        )
+                        delta = greeks.get("delta", 0.0)
+                        gamma = greeks.get("gamma", 0.0)
+                        theta = greeks.get("theta", 0.0)
+                        vega = greeks.get("vega", 0.0)
+                        logger.info(
+                            f"GREEKS TEST: Calculated for {instrument.tradingsymbol} | "
+                            f"price={market_price:.2f} spot={self._last_underlying_price:.2f} | "
+                            f"IV={iv:.4f} delta={delta:.4f}"
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to calculate Greeks for %s (strike=%s, spot=%s, price=%s): %s",
+                            instrument.tradingsymbol,
+                            instrument.strike,
+                            self._last_underlying_price,
+                            market_price,
+                            e,
+                        )
+
+                snapshot = OptionSnapshot(
+                    instrument=instrument,
+                    last_price=market_price,
+                    volume=int(tick.get("volume_traded_today") or tick.get("volume") or 0),
+                    oi=int(tick.get("oi") or tick.get("open_interest") or 0),
+                    iv=iv,
+                    delta=delta,
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega,
+                    timestamp=int(tick.get("timestamp", int(time.time()))),
+                )
+                await publish_option_snapshot(snapshot)
 
     def runtime_state(self) -> Dict[str, Any]:
         orchestrator_stats = self._orchestrator.stats() if self._orchestrator else []

@@ -258,6 +258,33 @@ class SessionOrchestrator:
     def primary_account_id(self) -> Optional[str]:
         return self._rotation[0].account_id if self._rotation else None
 
+    def get_client_for_api_call(self, preferred_account: Optional[str] = None) -> KiteClient:
+        """
+        Get a KiteClient for API calls WITHOUT acquiring exclusive lock.
+
+        This bypasses the locking mechanism since API calls (historical data, quotes, etc.)
+        don't need exclusive access - they're thread-safe operations that just make HTTP requests.
+        Only WebSocket operations need exclusive locks.
+
+        Args:
+            preferred_account: Optional account ID to use
+
+        Returns:
+            KiteClient instance
+        """
+        if preferred_account:
+            session = self._sessions.get(preferred_account)
+            if not session:
+                raise KeyError(f"Account '{preferred_account}' not registered.")
+            logger.debug("Getting client for API call from account %s", preferred_account)
+            return session.client
+
+        # Round-robin selection for API calls
+        session = self._rotation[self._rr_index % len(self._rotation)]
+        self._rr_index = (self._rr_index + 1) % len(self._rotation)
+        logger.debug("Getting client for API call from account %s via round-robin", session.account_id)
+        return session.client
+
     def borrow(self, preferred_account: Optional[str] = None) -> AccountLease:
         if preferred_account:
             session = self._sessions.get(preferred_account)
