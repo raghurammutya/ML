@@ -8,6 +8,7 @@ import DerivativesChartPopup from '../components/ShowChartPopup/DerivativesChart
 import ReplayControls from '../components/nifty-monitor/ReplayControls'
 import ReplayWatermark from '../components/nifty-monitor/ReplayWatermark'
 import { useReplayMode } from '../hooks/useReplayMode'
+import { ResizableSplit } from '../components/layout/ResizableSplit'
 import type {
   FoIndicatorDefinition,
   FoMoneynessSeries,
@@ -31,6 +32,7 @@ import {
   connectMonitorStream,
   searchMonitorSymbols,
 } from '../services/monitor'
+import { displayUnderlyingSymbol, normalizeUnderlyingSymbol } from '../utils/symbols'
 
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
 
@@ -41,15 +43,6 @@ interface PanelViewState {
 
 const TIMEFRAMES: Timeframe[] = ['1', '2', '3', '5', '15', '30', '60', '1D']
 const COLORS = ['#26a69a', '#f97316', '#60a5fa', '#a855f7', '#f43f5e', '#facc15', '#38bdf8']
-const normalizeSymbol = (value: string): string => {
-  const trimmed = value.trim()
-  if (!trimmed) return ''
-  const upper = trimmed.toUpperCase()
-  const withoutPrefix = upper.includes(':') ? upper.split(':').pop() ?? upper : upper
-  const compact = withoutPrefix.replace(/\s+/g, '')
-  if (['NIFTY50', 'NSEI', '^NSEI', 'NIFTY'].includes(compact)) return 'NIFTY50'
-  return compact
-}
 const REALTIME_FIELD_MAP: Record<string, keyof FoRealtimeBucket['strikes'][number]['call']> = {
   iv: 'iv',
   delta: 'delta',
@@ -136,7 +129,8 @@ const MonitorPage = () => {
   const horizontalLoadIdRef = useRef(0)
   const verticalLoadIdRef = useRef(0)
   const sessionIdRef = useRef<string | null>(null)
-  const canonicalSymbol = useMemo(() => normalizeSymbol(symbol), [symbol])
+  const canonicalSymbol = useMemo(() => displayUnderlyingSymbol(symbol), [symbol])
+  const backendSymbol = useMemo(() => normalizeUnderlyingSymbol(symbol), [symbol])
 
   // Sprint 3: Replay mode and performance mode
   const [performanceMode, setPerformanceMode] = useState(false)
@@ -207,9 +201,14 @@ const MonitorPage = () => {
   }, [])
 
   useEffect(() => {
+    if (!backendSymbol) {
+      setMetadata(null)
+      setMetadataLoading(false)
+      return
+    }
     let cancelled = false
     setMetadataLoading(true)
-    fetchMonitorMetadata({ symbol })
+    fetchMonitorMetadata({ symbol: backendSymbol })
       .then(resp => {
         if (cancelled) return
         setMetadata(resp)
@@ -231,10 +230,10 @@ const MonitorPage = () => {
         if (resp.underlying?.last_price != null) {
           setLatestUnderlying(resp.underlying.last_price)
         }
-        const backendSymbol = (resp.symbol || symbol).toUpperCase()
-        if (backendSymbol && backendSymbol !== symbol) {
-          setSymbol(backendSymbol)
-          setSymbolInput(backendSymbol)
+        const responseSymbol = displayUnderlyingSymbol(resp.symbol || symbol)
+        if (responseSymbol && responseSymbol !== symbol) {
+          setSymbol(responseSymbol)
+          setSymbolInput(responseSymbol)
         }
         setSearchResults([])
         setSearchError(null)
@@ -253,7 +252,7 @@ const MonitorPage = () => {
     return () => {
       cancelled = true
     }
-  }, [symbol, canonicalSymbol])
+  }, [backendSymbol, symbol])
 
   useEffect(() => {
     const query = symbolInput.trim()
@@ -263,7 +262,7 @@ const MonitorPage = () => {
       setSearchError(null)
       return
     }
-    if (normalizeSymbol(query) === canonicalSymbol) {
+    if (normalizeUnderlyingSymbol(query) === backendSymbol) {
       setSearchResults([])
       setSearchLoading(false)
       setSearchError(null)
@@ -295,7 +294,7 @@ const MonitorPage = () => {
       controller.abort()
       window.clearTimeout(timeoutId)
     }
-  }, [symbolInput, canonicalSymbol])
+  }, [symbolInput, backendSymbol])
 
   const tokensForSession = useMemo(() => {
     if (!metadata) return []
@@ -387,9 +386,9 @@ const MonitorPage = () => {
   }, [])
 
   useEffect(() => {
-    if (!metadata) return
+    if (!metadata || !backendSymbol) return
     let cancelled = false
-    fetchMonitorSnapshot()
+    fetchMonitorSnapshot({ symbol: backendSymbol, timeframe })
       .then(resp => {
         if (cancelled) return
         const price = extractPrice(resp.underlying ?? null)
@@ -401,7 +400,7 @@ const MonitorPage = () => {
     return () => {
       cancelled = true
     }
-  }, [metadata, extractPrice])
+  }, [metadata, extractPrice, backendSymbol, timeframe])
 
   useEffect(() => {
     if (!metadata) return
@@ -510,7 +509,7 @@ const MonitorPage = () => {
         const payload: FoRealtimeBucket = JSON.parse(event.data)
         if (payload.type !== 'fo_bucket') return
         if (payload.timeframe !== timeframe) return
-        if (normalizeSymbol(payload.symbol ?? '') !== canonicalSymbol) return
+        if (normalizeUnderlyingSymbol(payload.symbol ?? '') !== backendSymbol) return
         if (!selectedExpiries.includes(payload.expiry)) return
         setHorizontalData(prev => {
           const next = { ...prev }
@@ -551,9 +550,13 @@ const MonitorPage = () => {
               if (!next[panel.id]) next[panel.id] = []
               const series = next[panel.id].find(s => s.expiry === payload.expiry)
               if (series) {
-                series.points = [...series.points.filter(p => p.strike !== point.strike), point]
+                const existingPoints = series.points ?? []
+                series.points = [...existingPoints.filter(p => p.strike !== point.strike), point]
               } else {
-                next[panel.id] = [...next[panel.id], { expiry: payload.expiry, bucket_time: payload.bucket_time, points: [point] }]
+                next[panel.id] = [
+                  ...next[panel.id],
+                  { expiry: payload.expiry, bucket_time: payload.bucket_time, points: [point] },
+                ]
               }
             })
           })
@@ -564,7 +567,7 @@ const MonitorPage = () => {
       }
     }
     return () => ws.close()
-  }, [timeframe, selectedExpiries, activeHorizontalPanels, activeVerticalPanels, classifyBucket, canonicalSymbol])
+  }, [timeframe, selectedExpiries, activeHorizontalPanels, activeVerticalPanels, classifyBucket, backendSymbol])
 
   const togglePanel = (id: string) => {
     setPanelState(prev => {
@@ -599,9 +602,10 @@ const MonitorPage = () => {
   }
 
   const handleSearchSelect = (result: MonitorSearchResult) => {
-    const display = result.display_symbol || result.canonical_symbol
-    setSymbol(result.canonical_symbol)
-    setSymbolInput(display)
+    const resolvedSymbol = result.canonical_symbol || result.display_symbol || ''
+    const display = displayUnderlyingSymbol(resolvedSymbol)
+    setSymbol(display || resolvedSymbol.toUpperCase())
+    setSymbolInput(display || resolvedSymbol.toUpperCase())
     setSearchResults([])
     setSearchError(null)
   }
@@ -610,12 +614,15 @@ const MonitorPage = () => {
     event.preventDefault()
     const next = symbolInput.trim()
     if (!next) return
-    const normalizedInput = normalizeSymbol(next)
+    const normalizedInput = displayUnderlyingSymbol(next)
+    const backendInput = normalizeUnderlyingSymbol(next)
     const directMatch = searchResults.find(result => {
       const display = result.display_symbol || ''
+      const resultBackend = normalizeUnderlyingSymbol(result.canonical_symbol || '')
+      const resultDisplay = displayUnderlyingSymbol(display)
       return (
-        result.canonical_symbol === normalizedInput ||
-        normalizeSymbol(display) === normalizedInput ||
+        (!!resultBackend && resultBackend === backendInput) ||
+        resultDisplay === normalizedInput ||
         display.toUpperCase() === next.toUpperCase()
       )
     })
@@ -623,8 +630,9 @@ const MonitorPage = () => {
       handleSearchSelect(directMatch)
       return
     }
-    setSymbol(normalizedInput)
-    setSymbolInput(next.toUpperCase())
+    const displayValue = normalizedInput || next.toUpperCase()
+    setSymbol(displayValue)
+    setSymbolInput(displayValue)
     setSearchResults([])
     setSearchError(null)
   }
@@ -779,112 +787,129 @@ const MonitorPage = () => {
             </div>
           </div>
         </header>
-        <div className="monitor-body">
-          <div className="monitor-left">
-            {metadataLoading && (
-              <div className="monitor-loading" style={{ marginBottom: 12 }}>
-                Loading ticker metadata…
-              </div>
-            )}
-            {metadataError && (
-              <div style={{ marginBottom: 12, color: '#ef4444' }}>
-                {metadataError}
-              </div>
-            )}
-            {sessionError && (
-              <div style={{ marginBottom: 12, color: '#ef4444' }}>
-                {sessionError}
-              </div>
-            )}
-            <div className="monitor-filter">
-              <label>Expiries</label>
-              <div className="monitor-expiries">
-                {expiries.map(exp => (
-                  <button
-                    key={exp}
-                    className={selectedExpiries.includes(exp) ? 'active' : ''}
-                    onClick={() => handleExpirySelect(exp)}
-                  >
-                    {exp}
-                  </button>
-                ))}
-              </div>
-              {!selectedExpiries.length && (
-                <div className="monitor-card__subtext" style={{ marginTop: 8 }}>
-                  Select at least one expiry to populate the panels.
+        <ResizableSplit
+          className="monitor-body"
+          initialPrimaryPercentage={68}
+          minPrimaryPx={720}
+          minSecondaryPx={320}
+          primary={
+            <div className="monitor-left">
+              {metadataLoading && (
+                <div className="monitor-loading" style={{ marginBottom: 12 }}>
+                  Loading ticker metadata…
                 </div>
               )}
+              {metadataError && (
+                <div style={{ marginBottom: 12, color: '#ef4444' }}>
+                  {metadataError}
+                </div>
+              )}
+              {sessionError && (
+                <div style={{ marginBottom: 12, color: '#ef4444' }}>
+                  {sessionError}
+                </div>
+              )}
+
+              <div className="monitor-left-duplicate">
+                <div className="monitor-left-duplicate__frame">
+                  <UnderlyingChart symbol={symbol} timeframe={timeframe} />
+                </div>
+              </div>
+
+              <div className="monitor-filter">
+                <label>Expiries</label>
+                <div className="monitor-expiries">
+                  {expiries.map(exp => (
+                    <button
+                      key={exp}
+                      className={selectedExpiries.includes(exp) ? 'active' : ''}
+                      onClick={() => handleExpirySelect(exp)}
+                    >
+                      {exp}
+                    </button>
+                  ))}
+                </div>
+                {!selectedExpiries.length && (
+                  <div className="monitor-card__subtext" style={{ marginTop: 8 }}>
+                    Select at least one expiry to populate the panels.
+                  </div>
+                )}
+              </div>
+
+              <div className="monitor-main" style={{ position: 'relative' }}>
+                <div className="monitor-chart-wrapper">
+                  {/* Sprint 3: Replay Mode Watermark */}
+                  {replayState.isActive && <ReplayWatermark />}
+
+                  <UnderlyingChart symbol={symbol} timeframe={timeframe} />
+                </div>
+                {verticalOrder.filter(id => panelState[id]?.enabled).length > 0 && (
+                  <div className="monitor-vertical-panels" style={{ height: CHART_HEIGHT }}>
+                    {verticalOrder.filter(id => panelState[id]?.enabled).map(id => {
+                      const def = indicators.find(ind => ind.id === id && ind.orientation === 'vertical')
+                      if (!def) return null
+                      return (
+                        <VerticalPanel
+                          key={id}
+                          panel={def}
+                          data={verticalData[id] ?? []}
+                          colorMap={colorMap}
+                          collapsed={panelState[id]?.collapsed ?? false}
+                          onToggleCollapse={() => toggleCollapse(id)}
+                          height={CHART_HEIGHT}
+                          onShowChart={handleVerticalPanelShowChart}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {loadingPanels && <div className="monitor-loading">Refreshing indicator panels…</div>}
+
+              {horizontalOrder.filter(id => panelState[id]?.enabled).map(id => {
+                const def = indicators.find(ind => ind.id === id && ind.orientation === 'horizontal')
+                if (!def) return null
+                return (
+                  <HorizontalPanel
+                    key={id}
+                    panel={def}
+                    data={horizontalData[id] ?? []}
+                    colorMap={colorMap}
+                    collapsed={panelState[id]?.collapsed ?? false}
+                    onToggleCollapse={() => toggleCollapse(id)}
+                    onShowChart={handleHorizontalPanelShowChart}
+                  />
+                )
+              })}
             </div>
-
-            <div className="monitor-main" style={{ position: 'relative' }}>
-              <div className="monitor-chart-wrapper">
-                {/* Sprint 3: Replay Mode Watermark */}
-                {replayState.isActive && <ReplayWatermark />}
-
+          }
+          secondary={
+            <div className="monitor-right">
+              <div className="monitor-right-chart">
                 <UnderlyingChart symbol={symbol} timeframe={timeframe} />
               </div>
-              {verticalOrder.filter(id => panelState[id]?.enabled).length > 0 && (
-                <div className="monitor-vertical-panels" style={{ height: CHART_HEIGHT }}>
-                  {verticalOrder.filter(id => panelState[id]?.enabled).map(id => {
-                    const def = indicators.find(ind => ind.id === id && ind.orientation === 'vertical')
-                    if (!def) return null
-                    return (
-                      <VerticalPanel
-                        key={id}
-                        panel={def}
-                        data={verticalData[id] ?? []}
-                        colorMap={colorMap}
-                        collapsed={panelState[id]?.collapsed ?? false}
-                        onToggleCollapse={() => toggleCollapse(id)}
-                        height={CHART_HEIGHT}
-                        onShowChart={handleVerticalPanelShowChart}
-                      />
-                    )
-                  })}
-                </div>
-              )}
+              <PanelManager
+                indicators={indicators.filter(i => i.orientation === 'horizontal')}
+                state={panelState}
+                order={horizontalOrder}
+                onToggleEnabled={togglePanel}
+                onToggleCollapse={toggleCollapse}
+                onMove={(id, dir) => movePanel('horizontal', id, dir)}
+                title="Horizontal Panels"
+              />
+              <PanelManager
+                indicators={indicators.filter(i => i.orientation === 'vertical')}
+                state={panelState}
+                order={verticalOrder}
+                onToggleEnabled={togglePanel}
+                onToggleCollapse={toggleCollapse}
+                onMove={(id, dir) => movePanel('vertical', id, dir)}
+                title="Vertical Panels"
+              />
             </div>
-
-            {loadingPanels && <div className="monitor-loading">Refreshing indicator panels…</div>}
-
-            {horizontalOrder.filter(id => panelState[id]?.enabled).map(id => {
-              const def = indicators.find(ind => ind.id === id && ind.orientation === 'horizontal')
-              if (!def) return null
-              return (
-                <HorizontalPanel
-                  key={id}
-                  panel={def}
-                  data={horizontalData[id] ?? []}
-                  colorMap={colorMap}
-                  collapsed={panelState[id]?.collapsed ?? false}
-                  onToggleCollapse={() => toggleCollapse(id)}
-                  onShowChart={handleHorizontalPanelShowChart}
-                />
-              )
-            })}
-          </div>
-
-          <div className="monitor-right">
-            <PanelManager
-              indicators={indicators.filter(i => i.orientation === 'horizontal')}
-              state={panelState}
-              order={horizontalOrder}
-              onToggleEnabled={togglePanel}
-              onToggleCollapse={toggleCollapse}
-              onMove={(id, dir) => movePanel('horizontal', id, dir)}
-              title="Horizontal Panels"
-            />
-            <PanelManager
-              indicators={indicators.filter(i => i.orientation === 'vertical')}
-              state={panelState}
-              order={verticalOrder}
-              onToggleEnabled={togglePanel}
-              onToggleCollapse={toggleCollapse}
-              onMove={(id, dir) => movePanel('vertical', id, dir)}
-              title="Vertical Panels"
-            />
-          </div>
-        </div>
+          }
+        />
       </div>
       
       {/* Derivatives Chart Popup */}

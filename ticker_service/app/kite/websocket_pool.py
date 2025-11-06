@@ -228,11 +228,19 @@ class KiteWebSocketPool:
                 )
 
         def _on_ticks(ws, ticks):
+            logger.info(
+                "DEBUG: _on_ticks fired for connection #%d: %d ticks received, handler=%s",
+                connection_id,
+                len(ticks) if ticks else 0,
+                "SET" if self._tick_handler else "None"
+            )
+
             # Update heartbeat timestamp
             self._last_tick_time[connection_id] = time.time()
 
             # Validate event loop exists and is not closed
             if not self._tick_handler:
+                logger.error("CRITICAL: No tick handler registered for connection #%d - ticks will be dropped!", connection_id)
                 return
 
             if not self._loop or self._loop.is_closed():
@@ -243,15 +251,17 @@ class KiteWebSocketPool:
                 return
 
             try:
-                asyncio.run_coroutine_threadsafe(
+                logger.info(
+                    f"DEBUG: About to dispatch {len(ticks)} ticks for account {self.account_id}"
+                )
+                future = asyncio.run_coroutine_threadsafe(
                     self._tick_handler(self.account_id, ticks),
                     self._loop,
                 )
+                logger.info(f"DEBUG: Ticks dispatched successfully for connection #{connection_id}")
             except Exception as e:
                 logger.exception(
-                    "Failed to dispatch ticks from connection #%d: %s",
-                    connection_id,
-                    e
+                    f"EXCEPTION: Failed to dispatch ticks from connection #{connection_id}: {e}"
                 )
 
         ticker.on_connect = _on_connect
@@ -348,15 +358,26 @@ class KiteWebSocketPool:
             True if subscription succeeded, False if timeout or error
         """
         def _do_subscribe():
+            logger.info(
+                "DEBUG: Subscribing %d tokens on connection #%d",
+                len(tokens),
+                connection.connection_id
+            )
             connection.ticker.subscribe(tokens)
+            logger.info("DEBUG: Subscribe() completed for connection #%d", connection.connection_id)
 
             # Set mode
             if mode == "FULL":
+                logger.info("DEBUG: Setting MODE_FULL for connection #%d", connection.connection_id)
                 connection.ticker.set_mode(connection.ticker.MODE_FULL, tokens)
             elif mode == "QUOTE":
+                logger.info("DEBUG: Setting MODE_QUOTE for connection #%d", connection.connection_id)
                 connection.ticker.set_mode(connection.ticker.MODE_QUOTE, tokens)
             else:
+                logger.info("DEBUG: Setting MODE_LTP for connection #%d", connection.connection_id)
                 connection.ticker.set_mode(connection.ticker.MODE_LTP, tokens)
+
+            logger.info("DEBUG: set_mode() completed for connection #%d", connection.connection_id)
 
         future = self._subscribe_executor.submit(_do_subscribe)
         try:
@@ -381,19 +402,65 @@ class KiteWebSocketPool:
 
     def _sync_connection_subscriptions(self, connection: WebSocketConnection) -> None:
         """Sync subscriptions for a specific connection"""
+        logger.info(
+            "DEBUG _sync_connection_subscriptions: conn_id=%d connected=%s has_ws=%s tokens_count=%d",
+            connection.connection_id,
+            connection.connected,
+            hasattr(connection.ticker, "ws"),
+            len(connection.subscribed_tokens)
+        )
+
         if not connection.connected or not hasattr(connection.ticker, "ws"):
+            logger.warning(
+                "Skipping sync for connection #%d: connected=%s has_ws=%s",
+                connection.connection_id,
+                connection.connected,
+                hasattr(connection.ticker, "ws")
+            )
             return
 
         tokens = list(connection.subscribed_tokens)
         if not tokens:
+            logger.warning("No tokens to sync for connection #%d", connection.connection_id)
             return
 
+        logger.info(
+            "Syncing %d tokens for connection #%d (mode=%s) in batches",
+            len(tokens),
+            connection.connection_id,
+            self.ticker_mode
+        )
+
         mode = self.ticker_mode.upper()
-        success = self._subscribe_with_timeout(connection, tokens, mode)
+
+        # Subscribe in batches of 100 to avoid overwhelming the WebSocket
+        batch_size = 100
+        total_success = True
+
+        for i in range(0, len(tokens), batch_size):
+            batch = tokens[i:i+batch_size]
+            logger.info(
+                "Syncing batch %d-%d (%d tokens) for connection #%d",
+                i,
+                min(i+batch_size, len(tokens)),
+                len(batch),
+                connection.connection_id
+            )
+            success = self._subscribe_with_timeout(connection, batch, mode)
+            if not success:
+                total_success = False
+                logger.error(
+                    "Failed to sync batch %d-%d for connection #%d",
+                    i,
+                    i+batch_size,
+                    connection.connection_id
+                )
+
+        success = total_success
 
         if success:
-            logger.debug(
-                "Synced %d tokens for connection #%d (account %s)",
+            logger.info(
+                "✓ Synced %d tokens for connection #%d (account %s)",
                 len(tokens),
                 connection.connection_id,
                 self.account_id,

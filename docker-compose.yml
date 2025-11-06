@@ -111,11 +111,16 @@ services:
       - INSTRUMENT_DB_PASSWORD=stocksblitz123
       - KITE_TOKEN_DIR=/app/app/kite/tokens
       # Calendar service integration
-      - MARKET_MODE=auto
+      # - MARKET_MODE=mock  # Commented out - auto-detect based on market hours
       - CALENDAR_API_URL=http://backend:8000
       - CALENDAR_CODE=NSE
+      # Indian market hours (IST)
+      - MARKET_OPEN_TIME=09:15
+      - MARKET_CLOSE_TIME=15:30
       # User service integration
       - USER_SERVICE_URL=http://host.docker.internal:8001
+      # API authentication
+      - API_KEY_ENABLED=false
     volumes:
       - ./ticker_service/tokens:/app/app/kite/tokens
       - ./ticker_service/app/kite/.env:/app/app/kite/.env:ro
@@ -140,15 +145,20 @@ services:
     build: ./alert_service
     container_name: tv-alert
     ports:
-      - "8003:8003"
+      - "8003:8082"
     environment:
       - APP_NAME=alert_service
       - ENVIRONMENT=development
-      - PORT=8003
-      - DATABASE_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+      - PORT=8082
+      - DB_HOST=host.docker.internal
+      - DB_PORT=5432
+      - DB_NAME=stocksblitz_unified
+      - DB_USER=stocksblitz
+      - DB_PASSWORD=stocksblitz123
       - REDIS_URL=redis://redis:6379/3
       - USER_SERVICE_URL=http://host.docker.internal:8001
       - TICKER_SERVICE_URL=http://ticker-service:8080
+      - TELEGRAM_ENABLED=false
       - LOG_LEVEL=INFO
     depends_on:
       redis:
@@ -156,7 +166,7 @@ services:
       user-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s
       timeout: 5s
       retries: 3

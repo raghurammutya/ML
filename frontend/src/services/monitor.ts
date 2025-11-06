@@ -1,4 +1,5 @@
 import { api } from './api'
+import { normalizeUnderlyingSymbol } from '../utils/symbols'
 import type {
   MonitorMetadataResponse,
   MonitorSessionRequest,
@@ -14,9 +15,10 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/tradingview-api'
 export const fetchMonitorMetadata = async (
   params?: { symbol?: string; expiry_limit?: number; otm_levels?: number }
 ): Promise<MonitorMetadataResponse> => {
+  const symbol = params?.symbol ? normalizeUnderlyingSymbol(params.symbol) : undefined
   const response = await api.get<MonitorMetadataResponse>('/monitor/metadata', {
     params: {
-      symbol: params?.symbol,
+      symbol,
       expiry_limit: params?.expiry_limit,
       otm_levels: params?.otm_levels,
     }
@@ -38,8 +40,16 @@ export const deleteMonitorSession = async (
   return response.data
 }
 
-export const fetchMonitorSnapshot = async (): Promise<MonitorSnapshotResponse> => {
-  const response = await api.get<MonitorSnapshotResponse>('/monitor/snapshot')
+export const fetchMonitorSnapshot = async (
+  params?: { symbol?: string; timeframe?: string }
+): Promise<MonitorSnapshotResponse> => {
+  const symbol = params?.symbol ? normalizeUnderlyingSymbol(params.symbol) : undefined
+  const response = await api.get<MonitorSnapshotResponse>('/monitor/snapshot', {
+    params: {
+      symbol,
+      timeframe: params?.timeframe,
+    },
+  })
   return response.data
 }
 

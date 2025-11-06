@@ -145,6 +145,7 @@ async def build_instrument_query(
     dm: DataManager,
     classification: Optional[str] = None,
     segment: Optional[str] = None,
+    segments: Optional[List[str]] = None,
     exchange: Optional[str] = None,
     instrument_type: Optional[str] = None,
     search: Optional[str] = None,
@@ -180,10 +181,16 @@ async def build_instrument_query(
         elif classification == "commodity":
             conditions.append("(segment LIKE 'MCX-%' OR segment LIKE 'CDS-%')")
 
-    # Filter by segment
-    if segment:
+    # Filter by segment (single)
+    if segment and not segments:
         conditions.append(f"segment = ${param_count}")
         params.append(segment)
+        param_count += 1
+
+    # Filter by segments (multiple)
+    if segments and len(segments) > 0:
+        conditions.append(f"segment = ANY(${param_count})")
+        params.append(segments)
         param_count += 1
 
     # Filter by exchange
@@ -228,6 +235,7 @@ async def build_instrument_count_query(
     dm: DataManager,
     classification: Optional[str] = None,
     segment: Optional[str] = None,
+    segments: Optional[List[str]] = None,
     exchange: Optional[str] = None,
     instrument_type: Optional[str] = None,
     search: Optional[str] = None,
@@ -262,10 +270,16 @@ async def build_instrument_count_query(
         elif classification == "commodity":
             conditions.append("(segment LIKE 'MCX-%' OR segment LIKE 'CDS-%')")
 
-    # Filter by segment
-    if segment:
+    # Filter by segment (single)
+    if segment and not segments:
         conditions.append(f"segment = ${param_count}")
         params.append(segment)
+        param_count += 1
+
+    # Filter by segments (multiple)
+    if segments and len(segments) > 0:
+        conditions.append(f"segment = ANY(${param_count})")
+        params.append(segments)
         param_count += 1
 
     # Filter by exchange
@@ -313,6 +327,10 @@ async def list_instruments(
     segment: Optional[str] = Query(
         None,
         description="Filter by segment: NSE, BSE, NFO-FUT, NFO-OPT, INDICES, etc."
+    ),
+    segments: Optional[List[str]] = Query(
+        None,
+        description="Filter by multiple segments (e.g., segments=NSE&segments=BSE)"
     ),
     exchange: Optional[str] = Query(
         None,
@@ -377,6 +395,7 @@ async def list_instruments(
             "list",
             classification=classification,
             segment=segment,
+            segments=segments,
             exchange=exchange,
             instrument_type=instrument_type,
             search=search,
@@ -394,6 +413,7 @@ async def list_instruments(
             dm=dm,
             classification=classification,
             segment=segment,
+            segments=segments,
             exchange=exchange,
             instrument_type=instrument_type,
             search=search,
@@ -427,6 +447,7 @@ async def list_instruments(
             dm=dm,
             classification=classification,
             segment=segment,
+            segments=segments,
             exchange=exchange,
             instrument_type=instrument_type,
             search=search,
@@ -442,6 +463,7 @@ async def list_instruments(
             "filters_applied": {
                 "classification": classification,
                 "segment": segment,
+                "segments": segments,
                 "exchange": exchange,
                 "instrument_type": instrument_type,
                 "search": search,
@@ -624,6 +646,7 @@ async def get_instrument_stats(
 
 @router.get("/search", response_model=InstrumentListResponse)
 async def search_instruments(
+    request: Request,
     q: str = Query(..., min_length=1, description="Search query (minimum 1 character)"),
     classification: Optional[str] = Query(None, description="Filter by classification"),
     limit: int = Query(20, ge=1, le=100, description="Maximum results"),
@@ -644,6 +667,7 @@ async def search_instruments(
     - Matching instruments sorted by relevance (exact matches first)
     """
     return await list_instruments(
+        request=request,
         classification=classification,
         search=q,
         limit=limit,
@@ -652,3 +676,232 @@ async def search_instruments(
         dm=dm,
         user=user
     )
+
+
+@router.get("/fo-enabled", response_model=InstrumentListResponse)
+async def get_fo_enabled_stocks(
+    request: Request,
+    nse_only: bool = Query(
+        True,
+        description="If true and stock exists in both NSE and BSE, return only NSE"
+    ),
+    search: Optional[str] = Query(
+        None,
+        description="Search by name or tradingsymbol (case-insensitive, for type-ahead)"
+    ),
+    limit: int = Query(
+        500,
+        ge=1,
+        le=2000,
+        description="Maximum number of results to return"
+    ),
+    offset: int = Query(
+        0,
+        ge=0,
+        description="Number of results to skip (for pagination)"
+    ),
+    dm: DataManager = Depends(get_data_manager),
+    user: Optional[dict] = Depends(get_optional_user)
+):
+    """
+    Get list of F&O-enabled stocks (stocks that have futures/options contracts).
+
+    **How F&O stocks are identified**:
+    - Stocks (instrument_type='EQ') that have corresponding derivatives in NFO segment
+    - A stock is F&O-enabled if it has futures or options contracts listed
+
+    **NSE vs BSE precedence**:
+    - By default (`nse_only=true`), when a stock exists in both NSE and BSE, only NSE is returned
+    - Set `nse_only=false` to get both NSE and BSE listings
+
+    **Search filtering**:
+    - Use `search` parameter for type-ahead functionality
+    - Searches both tradingsymbol and name fields (case-insensitive)
+    - Ideal for real-time filtering as user types
+
+    **Examples**:
+    - Get all F&O stocks (NSE only): `GET /instruments/fo-enabled`
+    - Search F&O stocks: `GET /instruments/fo-enabled?search=RELI`
+    - Type-ahead search: `GET /instruments/fo-enabled?search=NIFT&limit=20`
+    - Get all F&O stocks (both exchanges): `GET /instruments/fo-enabled?nse_only=false`
+    - Paginate results: `GET /instruments/fo-enabled?limit=100&offset=100`
+
+    **Returns**:
+    - List of equity instruments with F&O contracts
+    - Each instrument includes: token, symbol, name, segment, exchange
+    """
+    # Cache key - include search in cache key, use offset=0 check for cache eligibility
+    cache_enabled = offset == 0 and limit <= 500
+    cache_key = None
+
+    if cache_enabled:
+        cache_key = _make_cache_key("fo_enabled", nse_only=nse_only, search=search, limit=limit)
+        cached = await _get_cached(request, cache_key)
+        if cached:
+            logger.debug("Returning cached F&O enabled list")
+            return InstrumentListResponse(**cached)
+
+    try:
+        # Build search condition
+        search_condition = ""
+        search_params = []
+        param_offset = 1
+
+        if search:
+            search_condition = f"AND (i.tradingsymbol ILIKE ${param_offset} OR i.name ILIKE ${param_offset})"
+            search_params = [f"%{search}%"]
+            param_offset += 1
+
+        # Query to get F&O-enabled stocks
+        # NSE-only version uses DISTINCT ON to pick NSE over BSE
+        # Note: F&O contracts use tradingsymbol as their 'name' field, so we join on i_eq.tradingsymbol = i_fo.name
+        if nse_only:
+            query = f"""
+                WITH fo_stocks AS (
+                    SELECT DISTINCT i_eq.tradingsymbol
+                    FROM instrument_registry i_eq
+                    INNER JOIN instrument_registry i_fo
+                        ON i_eq.tradingsymbol = i_fo.name
+                        AND i_fo.segment LIKE 'NFO-%'
+                        AND i_fo.is_active = true
+                    WHERE i_eq.instrument_type = 'EQ'
+                      AND i_eq.is_active = true
+                      AND i_eq.segment IN ('NSE', 'BSE')
+                )
+                SELECT DISTINCT ON (i.tradingsymbol)
+                    i.instrument_token,
+                    i.tradingsymbol,
+                    i.name,
+                    i.segment,
+                    i.instrument_type,
+                    i.exchange,
+                    i.expiry,
+                    i.strike,
+                    i.lot_size
+                FROM instrument_registry i
+                INNER JOIN fo_stocks fs ON i.tradingsymbol = fs.tradingsymbol
+                WHERE i.instrument_type = 'EQ'
+                  AND i.is_active = true
+                  AND i.segment IN ('NSE', 'BSE')
+                  {search_condition}
+                ORDER BY i.tradingsymbol,
+                         CASE WHEN i.segment = 'NSE' THEN 0 ELSE 1 END,
+                         i.tradingsymbol
+                LIMIT ${param_offset} OFFSET ${param_offset + 1}
+            """
+            params = search_params + [limit, offset]
+        else:
+            # Return both NSE and BSE if available
+            # Use same search_condition for consistency
+            query = f"""
+                SELECT DISTINCT
+                    i_eq.instrument_token,
+                    i_eq.tradingsymbol,
+                    i_eq.name,
+                    i_eq.segment,
+                    i_eq.instrument_type,
+                    i_eq.exchange,
+                    i_eq.expiry,
+                    i_eq.strike,
+                    i_eq.lot_size
+                FROM instrument_registry i_eq
+                INNER JOIN instrument_registry i_fo
+                    ON i_eq.tradingsymbol = i_fo.name
+                    AND i_fo.segment LIKE 'NFO-%'
+                    AND i_fo.is_active = true
+                WHERE i_eq.instrument_type = 'EQ'
+                  AND i_eq.is_active = true
+                  AND i_eq.segment IN ('NSE', 'BSE')
+                  {search_condition.replace('i.', 'i_eq.') if search else ''}
+                ORDER BY i_eq.tradingsymbol, i_eq.segment, i_eq.tradingsymbol
+                LIMIT ${param_offset} OFFSET ${param_offset + 1}
+            """
+            params = search_params + [limit, offset]
+
+        # Execute query
+        async with dm.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        # Convert to response models
+        instruments = [
+            InstrumentSummary(
+                instrument_token=row["instrument_token"],
+                tradingsymbol=row["tradingsymbol"],
+                name=row["name"],
+                segment=row["segment"],
+                instrument_type=row["instrument_type"],
+                exchange=row["exchange"],
+                expiry=row["expiry"],
+                strike=row["strike"],
+                lot_size=row["lot_size"]
+            )
+            for row in rows
+        ]
+
+        # Get total count (with search filter if applicable)
+        if nse_only:
+            count_query = f"""
+                WITH fo_stocks AS (
+                    SELECT DISTINCT i_eq.tradingsymbol
+                    FROM instrument_registry i_eq
+                    INNER JOIN instrument_registry i_fo
+                        ON i_eq.tradingsymbol = i_fo.name
+                        AND i_fo.segment LIKE 'NFO-%'
+                        AND i_fo.is_active = true
+                    WHERE i_eq.instrument_type = 'EQ'
+                      AND i_eq.is_active = true
+                      AND i_eq.segment IN ('NSE', 'BSE')
+                )
+                SELECT COUNT(DISTINCT i.tradingsymbol)
+                FROM instrument_registry i
+                INNER JOIN fo_stocks fs ON i.tradingsymbol = fs.tradingsymbol
+                WHERE i.instrument_type = 'EQ'
+                  AND i.is_active = true
+                  AND i.segment IN ('NSE', 'BSE')
+                  {search_condition}
+            """
+        else:
+            count_query = f"""
+                SELECT COUNT(DISTINCT i_eq.instrument_token)
+                FROM instrument_registry i_eq
+                INNER JOIN instrument_registry i_fo
+                    ON i_eq.tradingsymbol = i_fo.name
+                    AND i_fo.segment LIKE 'NFO-%'
+                    AND i_fo.is_active = true
+                WHERE i_eq.instrument_type = 'EQ'
+                  AND i_eq.is_active = true
+                  AND i_eq.segment IN ('NSE', 'BSE')
+                  {search_condition.replace('i.', 'i_eq.') if search else ''}
+            """
+
+        async with dm.pool.acquire() as conn:
+            count_result = await conn.fetchval(count_query, *search_params)
+
+        result = {
+            "status": "success",
+            "total": count_result,
+            "instruments": [inst.dict() for inst in instruments],
+            "filters_applied": {
+                "classification": "fo_enabled",
+                "nse_only": nse_only,
+                "segment": None,
+                "segments": None,
+                "exchange": None,
+                "instrument_type": "EQ",
+                "search": search,
+                "only_active": True,
+                "limit": limit,
+                "offset": offset
+            }
+        }
+
+        # Cache for shorter duration if search is active (5 min for search, 1 hour otherwise)
+        if cache_enabled and cache_key:
+            ttl = 300 if search else 3600
+            await _set_cached(request, cache_key, result, ttl=ttl)
+
+        return InstrumentListResponse(**result)
+
+    except Exception as e:
+        logger.error(f"Error getting F&O enabled stocks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get F&O enabled stocks: {str(e)}")

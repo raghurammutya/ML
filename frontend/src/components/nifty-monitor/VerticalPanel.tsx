@@ -81,15 +81,18 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
   const scatterSeries = useMemo(() => {
     console.log(`[VerticalPanel ${panel.id}] Incoming data:`, data.length, 'series')
     if (data.length > 0) {
-      console.log(`[VerticalPanel ${panel.id}] First series:`, data[0].expiry, 'with', data[0].points.length, 'points')
-      if (data[0].points.length > 0) {
-        console.log(`[VerticalPanel ${panel.id}] Sample point:`, data[0].points[0])
+      const samplePoints = data[0].points ?? []
+      console.log(`[VerticalPanel ${panel.id}] First series:`, data[0].expiry, 'with', samplePoints.length, 'points')
+      if (samplePoints.length > 0) {
+        console.log(`[VerticalPanel ${panel.id}] Sample point:`, samplePoints[0])
       }
     }
 
-    const hasCallPut = data.length > 0 && data[0].points.length > 0 &&
-      typeof data[0].points[0].call === 'number' &&
-      typeof data[0].points[0].put === 'number'
+    const firstPoints = data[0]?.points ?? []
+    const hasCallPut =
+      firstPoints.length > 0 &&
+      typeof firstPoints[0].call === 'number' &&
+      typeof firstPoints[0].put === 'number'
 
     console.log(`[VerticalPanel ${panel.id}] hasCallPut=${hasCallPut}, indicator=${panel.indicator}`)
 
@@ -98,14 +101,14 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
       const callSeries = data.map(series => ({
         expiry: series.expiry,
         side: 'call' as const,
-        points: series.points
+        points: (series.points ?? [])
           .filter(pt => typeof pt.call === 'number')
           .map(pt => ({ ...pt, value: pt.call, expiry: series.expiry, side: 'call' })),
       }))
       const putSeries = data.map(series => ({
         expiry: series.expiry,
         side: 'put' as const,
-        points: series.points
+        points: (series.points ?? [])
           .filter(pt => typeof pt.put === 'number')
           .map(pt => ({ ...pt, value: pt.put, expiry: series.expiry, side: 'put' })),
       }))
@@ -115,11 +118,14 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
     }
 
     // Default: use combined value
-    const defaultSeries = data.map(series => ({
-      expiry: series.expiry,
-      side: undefined,
-      points: series.points.map(pt => ({ ...pt, expiry: series.expiry })),
-    }))
+    const defaultSeries = data.map(series => {
+      const points = (series.points ?? []).map(pt => ({ ...pt, expiry: series.expiry }))
+      return {
+        expiry: series.expiry,
+        side: undefined,
+        points,
+      }
+    })
     console.log(`[VerticalPanel ${panel.id}] Using default series:`, defaultSeries.length)
     return defaultSeries
   }, [data, panel.indicator, panel.id])
@@ -129,9 +135,11 @@ const VerticalPanel = ({ panel, data, colorMap, collapsed, onToggleCollapse, hei
     if (!data.length) return
 
     const firstSeries = data[0]
-    if (!firstSeries.points.length) return
+    const firstPoints = firstSeries.points ?? []
+    if (!firstPoints.length) return
 
-    const atmStrike = firstSeries.points.find(p => p.underlying && Math.abs(p.strike - p.underlying) < 100)?.strike || firstSeries.points[0].strike
+    const atmStrike =
+      firstPoints.find(p => p.underlying && Math.abs(p.strike - p.underlying) < 100)?.strike ?? firstPoints[0].strike
 
     setContextMenu({
       x: event.clientX,

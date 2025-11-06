@@ -87,7 +87,7 @@ export interface FoMoneynessSeriesResponse {
 
 export interface FoStrikePoint {
   strike: number
-  value: number
+  value?: number | null
   call?: number | null
   put?: number | null
   call_oi?: number | null
@@ -96,10 +96,39 @@ export interface FoStrikePoint {
   underlying?: number | null
 }
 
+export interface FoStrikeGreekEntry {
+  strike: number
+  iv?: number | null
+  delta?: number | null
+  gamma?: number | null
+  theta?: number | null
+  vega?: number | null
+  oi?: number | null
+  pcr?: number | null
+  value?: number | null
+}
+
+export interface FoStrikeSeriesMetadata {
+  strike_count?: number
+  has_greeks?: boolean
+  has_oi?: boolean
+  atm_strike?: number | null
+}
+
 export interface FoStrikeSeries {
   expiry: string
   bucket_time: number | null
-  points: FoStrikePoint[]
+  call?: FoStrikeGreekEntry[]
+  put?: FoStrikeGreekEntry[]
+  metadata?: FoStrikeSeriesMetadata
+  points?: FoStrikePoint[]
+}
+
+export interface FoStrikeDistributionMetadata {
+  total_expiries?: number
+  underlying_price?: number | null
+  strike_range?: string
+  data_available?: boolean
 }
 
 export interface FoStrikeDistributionResponse {
@@ -108,12 +137,30 @@ export interface FoStrikeDistributionResponse {
   timeframe: string
   indicator: string
   series: FoStrikeSeries[]
+  metadata?: FoStrikeDistributionMetadata
 }
 
 export interface FoExpiriesResponse {
   status: string
   symbol: string
   expiries: string[]
+}
+
+export interface FoExpiryLabel {
+  date: string
+  is_weekly: boolean
+  is_monthly: boolean
+  is_quarterly: boolean
+  days_to_expiry: number
+  relative_label_today: string | null
+  relative_rank: number | null
+  relative_label_timestamp?: Array<{ time: string; label: string }>
+}
+
+export interface FoExpiriesV2Response {
+  symbol: string
+  as_of_date: string
+  expiries: FoExpiryLabel[]
 }
 
 export interface FoRealtimeStrike {
@@ -187,6 +234,7 @@ export interface MonitorOptionLeg {
   exchange?: string | null
   lot_size?: number | null
   tick_size?: number | null
+  last_price?: number | null
 }
 
 export interface MonitorOptionStrike {

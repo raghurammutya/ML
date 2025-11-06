@@ -231,7 +231,17 @@ async def lifespan(app: FastAPI):
 
         if settings.fo_stream_enabled:
             print(f"[MAIN] Creating FOStreamConsumer, fo_stream_enabled={settings.fo_stream_enabled}", flush=True)
-            fo_stream_consumer = FOStreamConsumer(redis_client, data_manager, settings, real_time_hub)
+            # Create dedicated Redis client for pub/sub with decode_responses=False
+            # This is required because pub/sub needs to handle binary message data
+            fo_redis_client = redis.from_url(
+                settings.redis_url,
+                decode_responses=False,  # Required for pub/sub binary message handling
+                socket_timeout=settings.redis_socket_timeout,
+                socket_connect_timeout=settings.redis_socket_connect_timeout,
+            )
+            await fo_redis_client.ping()
+            print(f"[MAIN] FOStreamConsumer Redis client created (decode_responses=False)", flush=True)
+            fo_stream_consumer = FOStreamConsumer(fo_redis_client, data_manager, settings, real_time_hub)
             print(f"[MAIN] FOStreamConsumer created: {fo_stream_consumer}", flush=True)
             task = asyncio.create_task(fo_stream_consumer.run())
             print(f"[MAIN] Task created: {task}", flush=True)

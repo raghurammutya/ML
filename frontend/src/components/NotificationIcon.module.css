@@ -1,0 +1,55 @@
+.button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(30, 41, 59, 0.56);
+  color: rgba(226, 232, 240, 0.86);
+  cursor: pointer;
+  transition: all 150ms ease;
+  backdrop-filter: blur(8px);
+}
+
+.button:hover,
+.button:focus-visible {
+  background: rgba(51, 65, 85, 0.9);
+  border-color: rgba(148, 163, 184, 0.44);
+  color: #f8fafc;
+  outline: none;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+}
+
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0b1120;
+  box-shadow: 0 8px 18px -12px rgba(8, 47, 73, 0.9);
+}
+
+.badgeAlert {
+  background: linear-gradient(135deg, #f87171, #fb7185);
+}
+
+.badgeMessage {
+  background: linear-gradient(135deg, #60a5fa, #38bdf8);
+  color: #0b1120;
+}
+

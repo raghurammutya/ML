@@ -1,0 +1,193 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 16px;
+  padding: 10px;
+  gap: 12px;
+  height: 100%;
+  box-shadow:
+    0 18px 36px -28px rgba(15, 23, 42, 0.85),
+    inset 0 1px 0 rgba(148, 163, 184, 0.12);
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #f8fafc;
+  text-align: center;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 6px;
+  flex: 1;
+}
+
+.tabList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tabButton {
+  background: rgba(30, 41, 59, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  color: #cbd5f5;
+  font-size: 10px;
+  border-radius: 10px;
+  padding: 8px 6px;
+  cursor: pointer;
+  width: 100%;
+  text-align: center;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.tabButton:hover {
+  background: rgba(59, 73, 98, 0.9);
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.tabButtonActive {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(59, 130, 246, 0.55);
+  color: #f8fafc;
+}
+
+.chartHolder {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  width: 100%;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+  padding: 4px 6px 8px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.chartHolderLeft {
+  border-right: none;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.chartHolderRight {
+  border-left: none;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.wrapperLeft {
+  align-items: flex-start;
+}
+
+.wrapperRight .tabList {
+  order: 2;
+}
+
+.wrapperRight .chartHolder {
+  order: 1;
+}
+
+.emptyState {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 13px;
+}
+
+.overlayTop {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  right: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(12, 19, 32, 0.85) 0%, rgba(12, 19, 32, 0) 100%);
+  z-index: 3;
+}
+
+.valueLine {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 12px;
+  text-shadow: 0 1px 2px rgba(8, 13, 23, 0.6);
+}
+
+.valueStrike {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.valueMetric {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  opacity: 0.76;
+}
+
+.valueNumber {
+  font-size: 12px;
+}
+
+.summaryRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 4px;
+  align-items: center;
+}
+
+.summaryItem {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: rgba(24, 33, 54, 0.66);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  min-height: 28px;
+  pointer-events: none;
+}
+
+.summaryDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.9);
+}
+
+.summaryLabel {
+  font-size: 10px;
+  color: rgba(203, 213, 225, 0.88);
+  flex: 1;
+  min-width: 0;
+}
+
+.summaryValue {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f8fafc;
+  text-shadow: 0 1px 2px rgba(8, 13, 23, 0.6);
+}
+
+.legendPlaceholder {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.7);
+}

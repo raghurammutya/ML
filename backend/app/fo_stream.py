@@ -456,11 +456,13 @@ class FOStreamConsumer:
         self._running = True
 
     async def run(self) -> None:
+        logger.info(f"FOStreamConsumer starting - channels: {self._options_channel}, {self._underlying_channel}")
         while self._running:
             pubsub = None
             try:
                 pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
                 await pubsub.subscribe(self._options_channel, self._underlying_channel)
+                logger.info(f"FOStreamConsumer subscribed to channels")
                 while self._running:
                     try:
                         message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=5.0)
@@ -471,12 +473,23 @@ class FOStreamConsumer:
                         continue
                     if message["type"] != "message":
                         continue
+                    # Handle bytes channel names from decode_responses=False
                     channel = message["channel"]
-                    data = json.loads(message["data"])
+                    if isinstance(channel, bytes):
+                        channel = channel.decode('utf-8')
+                    # Handle bytes data from decode_responses=False
+                    data_raw = message["data"]
+                    if isinstance(data_raw, bytes):
+                        data = json.loads(data_raw.decode('utf-8'))
+                    else:
+                        data = json.loads(data_raw)
+
                     if channel == self._options_channel:
                         await self._aggregator.handle_option(data)
                     elif channel == self._underlying_channel:
                         await self._aggregator.handle_underlying(data)
+                    else:
+                        logger.warning(f"Unknown channel: {channel}")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

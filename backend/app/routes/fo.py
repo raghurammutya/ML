@@ -613,16 +613,27 @@ def _classify_moneyness_bucket(strike: float, underlying: float, gap: int = 50) 
 @router.get("/strike-distribution")
 async def strike_distribution(
     symbol: str = Query(settings.monitor_default_symbol),
-    timeframe: str = Query("1min"),
+    timeframe: str = Query("5min"),  # Changed default from 1min to 5min for better data
     indicator: str = Query("iv"),
     expiry: Optional[List[str]] = Query(default=None),
     bucket_time: Optional[int] = None,
-    strike_range: int = Query(10, description="ATM ± N strikes to return"),
+    strike_range: int = Query(50, description="ATM ± N strikes to return"),  # Increased to 50 for better coverage
     dm: DataManager = Depends(get_data_manager),
 ):
     """
     Return strike distribution for vertical panels.
-    Frontend sends multiple expiries and expects data grouped by expiry.
+    Frontend expects separate call/put arrays per expiry with complete Greek coverage.
+
+    Returns format:
+    {
+      "series": [
+        {
+          "expiry": "2025-11-04",
+          "call": [{"strike": 25000, "iv": 0.18, "delta": 0.45, ...}, ...],
+          "put": [{"strike": 25000, "iv": 0.20, "delta": -0.55, ...}, ...]
+        }
+      ]
+    }
     """
     indicator = indicator.lower()
     if indicator not in SUPPORTED_INDICATORS - {"max_pain"}:
@@ -651,24 +662,28 @@ async def strike_distribution(
             break
 
     # Calculate strike range if we have underlying price
-    if underlying_ltp:
+    # Also verify the underlying price is reasonable (between 10000 and 50000 for NIFTY)
+    if underlying_ltp and 10000 <= underlying_ltp <= 50000:
         gap = settings.fo_strike_gap  # 50 for NIFTY
         atm_strike = round(underlying_ltp / gap) * gap
         min_strike = atm_strike - (strike_range * gap)
         max_strike = atm_strike + (strike_range * gap)
+        logger.info(f"Using strike range: {min_strike} to {max_strike} (ATM={atm_strike}, underlying={underlying_ltp})")
     else:
-        # No filtering if we don't have underlying price
+        # No filtering if we don't have underlying price or it's unreliable
         min_strike = None
         max_strike = None
-
-    grouped: Dict[str, Dict[str, List[Dict[str, float]]]] = defaultdict(lambda: defaultdict(list))
-    for row in rows:
-        bucket_ts = row["bucket_time"]
-        if isinstance(bucket_ts, datetime):
-            ts = int(bucket_ts.replace(tzinfo=timezone.utc).timestamp())
+        atm_strike = None
+        if underlying_ltp:
+            logger.warning(f"Unreliable underlying price {underlying_ltp}, returning all strikes")
         else:
-            ts = int(bucket_ts)
+            logger.info("No underlying price available, returning all strikes")
 
+    # Group by expiry and strike, collecting latest data for each
+    # Structure: {expiry: {strike: row_data}}
+    expiry_strikes: Dict[str, Dict[float, Dict]] = defaultdict(dict)
+
+    for row in rows:
         expiry_key = row["expiry"].isoformat()
         strike = float(row["strike"])
 
@@ -677,42 +692,106 @@ async def strike_distribution(
             if strike < min_strike or strike > max_strike:
                 continue
 
-        underlying = row.get("underlying_close")
-        call_val = _indicator_value(row, indicator, "call")
-        put_val = _indicator_value(row, indicator, "put")
-        combined = _combine_sides(indicator, call_val, put_val)
-        value = combined if indicator != "pcr" else _indicator_value(row, "pcr", "call")
+        # Keep the latest data for each expiry-strike combo
+        if strike not in expiry_strikes[expiry_key]:
+            expiry_strikes[expiry_key][strike] = row
+        else:
+            # Compare bucket times, keep newer
+            existing_ts = expiry_strikes[expiry_key][strike]["bucket_time"]
+            new_ts = row["bucket_time"]
+            if new_ts > existing_ts:
+                expiry_strikes[expiry_key][strike] = row
 
-        if value is None:
+    # Build series with separate call/put arrays
+    series = []
+    for expiry_key in sorted(expiry_strikes.keys()):
+        strikes_data = expiry_strikes[expiry_key]
+
+        if not strikes_data:
             continue
 
-        grouped[expiry_key]["points"].append({
-            "strike": strike,
-            "value": round(value, 4),
-            "call": round(call_val, 4) if call_val is not None else None,
-            "put": round(put_val, 4) if put_val is not None else None,
-            "call_oi": float(row.get("call_oi_sum")) if row.get("call_oi_sum") else 0,
-            "put_oi": float(row.get("put_oi_sum")) if row.get("put_oi_sum") else 0,
-            "bucket_time": ts,
-            "underlying": underlying,
-        })
+        call_strikes = []
+        put_strikes = []
+        bucket_ts = None
 
-    series = []
-    for expiry_key, data in grouped.items():
-        points = sorted(data["points"], key=lambda item: item["strike"])
-        bucket_ts = points[0]["bucket_time"] if points else None
+        for strike in sorted(strikes_data.keys()):
+            row = strikes_data[strike]
+
+            if bucket_ts is None:
+                ts = row["bucket_time"]
+                if isinstance(ts, datetime):
+                    bucket_ts = int(ts.replace(tzinfo=timezone.utc).timestamp())
+                else:
+                    bucket_ts = int(ts)
+
+            # Build call strike object with all Greeks
+            call_obj = {"strike": strike}
+
+            # Add all available Greeks (omit if 0 or None)
+            if row.get("call_iv_avg"):
+                call_obj["iv"] = round(float(row["call_iv_avg"]), 4)
+            if row.get("call_delta_avg"):
+                call_obj["delta"] = round(float(row["call_delta_avg"]), 4)
+            if row.get("call_gamma_avg"):
+                call_obj["gamma"] = round(float(row["call_gamma_avg"]), 6)
+            if row.get("call_theta_avg"):
+                call_obj["theta"] = round(float(row["call_theta_avg"]), 4)
+            if row.get("call_vega_avg"):
+                call_obj["vega"] = round(float(row["call_vega_avg"]), 4)
+            if row.get("call_oi_sum"):
+                call_obj["oi"] = int(float(row["call_oi_sum"]))
+
+            # Build put strike object with all Greeks
+            put_obj = {"strike": strike}
+
+            if row.get("put_iv_avg"):
+                put_obj["iv"] = round(float(row["put_iv_avg"]), 4)
+            if row.get("put_delta_avg"):
+                put_obj["delta"] = round(float(row["put_delta_avg"]), 4)
+            if row.get("put_gamma_avg"):
+                put_obj["gamma"] = round(float(row["put_gamma_avg"]), 6)
+            if row.get("put_theta_avg"):
+                put_obj["theta"] = round(float(row["put_theta_avg"]), 4)
+            if row.get("put_vega_avg"):
+                put_obj["vega"] = round(float(row["put_vega_avg"]), 4)
+            if row.get("put_oi_sum"):
+                put_obj["oi"] = int(float(row["put_oi_sum"]))
+
+            call_strikes.append(call_obj)
+            put_strikes.append(put_obj)
+
+        # Determine data availability
+        has_greeks = any(
+            "iv" in s or "delta" in s or "gamma" in s
+            for s in call_strikes + put_strikes
+        )
+        has_oi = any("oi" in s for s in call_strikes + put_strikes)
+
         series.append({
             "expiry": expiry_key,
             "bucket_time": bucket_ts,
-            "points": points,
+            "call": call_strikes,
+            "put": put_strikes,
+            "metadata": {
+                "strike_count": len(call_strikes),
+                "has_greeks": has_greeks,
+                "has_oi": has_oi,
+                "atm_strike": atm_strike if underlying_ltp else None
+            }
         })
 
     return {
         "status": "ok",
         "symbol": symbol_db,
         "timeframe": normalized_tf,
-        "indicator": indicator,
+        "indicator": indicator,  # Kept for backwards compatibility
         "series": series,
+        "metadata": {
+            "total_expiries": len(series),
+            "underlying_price": underlying_ltp,
+            "strike_range": f"ATM ± {strike_range} strikes",
+            "data_available": len(series) > 0
+        }
     }
 
 
@@ -841,6 +920,554 @@ async def strike_history(
     }
 
 
+# =====================================================
+# V2 ENDPOINTS - Enhanced with Expiry Labeling
+# =====================================================
+
+@router.get("/expiries-v2")
+async def get_expiries_v2(
+    symbol: str = Query(..., description="Underlying symbol (NIFTY, BANKNIFTY, etc.)"),
+    backfill_days: int = Query(30, description="Days of historical labels to compute"),
+    dm: DataManager = Depends(get_data_manager)
+):
+    """
+    Get all expiries with relative labels and metadata.
+
+    Returns:
+    - is_weekly, is_monthly, is_quarterly flags
+    - relative_label_today (e.g., "NWeek+1", "NMonth+0")
+    - relative_label_timestamp (historical labels for each business day)
+
+    Example:
+    ```
+    GET /fo/expiries-v2?symbol=NIFTY&backfill_days=30
+    ```
+
+    Response:
+    ```json
+    {
+      "symbol": "NIFTY",
+      "as_of_date": "2024-11-05",
+      "expiries": [
+        {
+          "date": "2024-11-07",
+          "is_weekly": true,
+          "is_monthly": false,
+          "relative_label_today": "NWeek+1",
+          "relative_rank": 1,
+          "relative_label_timestamp": [
+            {"time": "2024-11-01", "label": "NWeek+2"},
+            {"time": "2024-11-04", "label": "NWeek+1"}
+          ]
+        }
+      ]
+    }
+    ```
+    """
+    from app.services.expiry_labeler import ExpiryLabeler
+
+    symbol_norm = _normalize_symbol(symbol)
+    as_of_date = date.today()
+
+    # Get expiry metadata from database (pre-computed or on-the-fly)
+    metadata_list = await dm.get_expiry_metadata(symbol_norm, as_of_date)
+
+    if not metadata_list:
+        raise HTTPException(status_code=404, detail=f"No expiries found for {symbol}")
+
+    # Initialize labeler for historical computation
+    labeler = ExpiryLabeler(dm.pool)
+
+    expiries = []
+    for meta in metadata_list:
+        # Compute historical labels for this expiry
+        historical = await labeler.compute_historical_labels(
+            symbol_norm,
+            meta['expiry'],
+            backfill_days=backfill_days
+        )
+
+        expiries.append({
+            "date": meta['expiry'].isoformat(),
+            "is_weekly": meta['is_weekly'],
+            "is_monthly": meta['is_monthly'],
+            "is_quarterly": meta['is_quarterly'],
+            "days_to_expiry": meta['days_to_expiry'],
+            "relative_label_today": meta['relative_label'],
+            "relative_rank": meta['relative_rank'],
+            "relative_label_timestamp": [point.to_dict() for point in historical]
+        })
+
+    return {
+        "symbol": symbol_norm,
+        "as_of_date": as_of_date.isoformat(),
+        "expiries": expiries
+    }
+
+
+@router.get("/moneyness-series-v2")
+async def get_moneyness_series_v2(
+    symbol: str = Query(..., description="Underlying symbol"),
+    timeframe: str = Query("5min", description="Timeframe (1min, 5min, 15min)"),
+    indicator: str = Query(..., description="Indicator (iv, delta, theta, vega, oi, pcr)"),
+    option_side: str = Query("both", description="Option side (both, call, put)"),
+    expiries: Optional[List[str]] = Query(None, description="List of expiry dates (YYYY-MM-DD)"),
+    hours: int = Query(6, description="Lookback hours"),
+    dm: DataManager = Depends(get_data_manager)
+):
+    """
+    Get moneyness series with expiry labels (v2 - enhanced with relative labels).
+
+    Each series point includes:
+    - expiry_relative_label (e.g., "NWeek+1")
+    - relative_rank (1, 2, 3... for weeklies; 0 for monthly)
+
+    Example:
+    ```
+    GET /fo/moneyness-series-v2?symbol=NIFTY&timeframe=5min&indicator=iv&expiries[]=2024-11-07
+    ```
+    """
+    from collections import defaultdict
+
+    # Validate inputs
+    symbol_norm = _normalize_symbol(symbol)
+    normalized_tf = _normalize_timeframe(timeframe)
+
+    if indicator not in SUPPORTED_INDICATORS:
+        raise HTTPException(status_code=400, detail=f"Unsupported indicator: {indicator}")
+
+    if option_side not in {"call", "put", "both"}:
+        raise HTTPException(status_code=400, detail=f"Invalid option_side: {option_side}")
+
+    # Parse expiries or get defaults
+    if expiries:
+        expiry_dates = []
+        for exp_str in expiries:
+            try:
+                expiry_dates.append(datetime.fromisoformat(exp_str).date())
+            except ValueError:
+                logger.warning(f"Invalid expiry format: {exp_str}")
+        if not expiry_dates:
+            raise HTTPException(status_code=400, detail="No valid expiries provided")
+    else:
+        expiry_dates = await dm.get_next_expiries(symbol_norm, limit=2)
+
+    if not expiry_dates:
+        raise HTTPException(status_code=404, detail=f"No expiries found for {symbol_norm}")
+
+    # Get expiry label map
+    label_map = await dm.get_expiry_label_map(symbol_norm)
+
+    # Calculate time range
+    to_dt = datetime.now(timezone.utc)
+    from_dt = to_dt - timedelta(hours=hours)
+
+    # Map indicator to column expression
+    if option_side == "both":
+        column_map = {
+            "iv": "(COALESCE(call_iv_avg, 0) + COALESCE(put_iv_avg, 0)) / 2.0",
+            "delta": "ABS(COALESCE(call_delta_avg, 0)) + ABS(COALESCE(put_delta_avg, 0))",
+            "gamma": "(COALESCE(call_gamma_avg, 0) + COALESCE(put_gamma_avg, 0)) / 2.0",
+            "theta": "(COALESCE(call_theta_avg, 0) + COALESCE(put_theta_avg, 0)) / 2.0",
+            "vega": "(COALESCE(call_vega_avg, 0) + COALESCE(put_vega_avg, 0)) / 2.0",
+            "oi": "COALESCE(call_oi_sum, 0) + COALESCE(put_oi_sum, 0)",
+            "pcr": "CASE WHEN COALESCE(call_oi_sum, 0) > 0 THEN COALESCE(put_oi_sum, 0) / call_oi_sum ELSE NULL END",
+        }
+    elif option_side == "call":
+        column_map = {
+            "iv": "call_iv_avg",
+            "delta": "call_delta_avg",
+            "gamma": "call_gamma_avg",
+            "theta": "call_theta_avg",
+            "vega": "call_vega_avg",
+            "oi": "call_oi_sum",
+        }
+    else:  # put
+        column_map = {
+            "iv": "put_iv_avg",
+            "delta": "put_delta_avg",
+            "gamma": "put_gamma_avg",
+            "theta": "put_theta_avg",
+            "vega": "put_vega_avg",
+            "oi": "put_oi_sum",
+        }
+
+    value_expr = column_map.get(indicator)
+    if not value_expr:
+        raise HTTPException(status_code=400, detail=f"Invalid indicator: {indicator}")
+
+    # Get correct table/view based on timeframe
+    table_name = _fo_strike_table(timeframe)
+
+    # Query database
+    query = f"""
+        SELECT
+            bucket_time,
+            expiry,
+            strike,
+            underlying_close,
+            {value_expr} as value
+        FROM {table_name}
+        WHERE symbol = $1
+          AND expiry = ANY($2)
+          AND bucket_time BETWEEN $3 AND $4
+          AND {value_expr} IS NOT NULL
+        ORDER BY bucket_time, expiry, strike
+    """
+
+    async with dm.pool.acquire() as conn:
+        rows = await conn.fetch(
+            query,
+            symbol_norm,
+            expiry_dates,
+            from_dt,
+            to_dt
+        )
+
+    logger.info(f"Moneyness-v2 query returned {len(rows)} rows for {symbol_norm} timeframe={normalized_tf}")
+
+    # Group by (expiry, bucket, time)
+    # Store as {(expiry, bucket): {timestamp: value}}
+    series_data = defaultdict(lambda: defaultdict(list))
+
+    for row in rows:
+        expiry_key = row['expiry']
+        expiry_str = expiry_key.isoformat()
+        timestamp = int(row['bucket_time'].timestamp())
+        strike = float(row['strike'])
+        underlying = float(row['underlying_close']) if row['underlying_close'] else None
+        value = float(row['value']) if row['value'] is not None else None
+
+        if value is None or underlying is None:
+            logger.debug(f"Skipping row: value={value}, underlying={underlying}")
+            continue
+
+        # Classify moneyness bucket
+        bucket = _classify_moneyness_bucket(strike, underlying, settings.fo_strike_gap)
+
+        # Get label and rank for this expiry
+        expiry_label, relative_rank = label_map.get(expiry_key, ("Unknown", 999))
+
+        # Store point - group by timestamp, average if multiple strikes in same bucket
+        key = (expiry_str, bucket, expiry_label, relative_rank)
+        series_data[key][timestamp].append(value)
+
+    # Format response - average values at same timestamp
+    series = []
+    for (expiry_str, bucket, expiry_label, relative_rank), time_points in series_data.items():
+        points = [
+            {"time": ts, "value": round(sum(vals) / len(vals), 4)}
+            for ts, vals in sorted(time_points.items())
+        ]
+
+        if points:
+            series.append({
+                "expiry": expiry_str,
+                "expiry_relative_label": expiry_label,
+                "relative_rank": relative_rank,
+                "bucket": bucket,
+                "points": points
+            })
+
+    return {
+        "symbol": symbol_norm,
+        "indicator": indicator,
+        "timeframe": normalized_tf,
+        "option_side": option_side,
+        "series": series
+    }
+
+
+@router.get("/strike-distribution-v2")
+async def get_strike_distribution_v2(
+    symbol: str = Query(..., description="Underlying symbol"),
+    timeframe: str = Query("5min", description="Timeframe"),
+    indicator: str = Query("iv", description="Indicator"),
+    expiries: Optional[List[str]] = Query(None, description="List of expiry dates"),
+    strike_range: int = Query(30, description="ATM ± N strikes to return (default: 30 = 1500 point range for NIFTY)"),
+    dm: DataManager = Depends(get_data_manager)
+):
+    """
+    Get current strike distribution with expiry labels (v2).
+
+    Returns strike data grouped by expiry, with each expiry including:
+    - expiry_relative_label
+    - relative_rank
+
+    Example:
+    ```
+    GET /fo/strike-distribution-v2?symbol=NIFTY&indicator=iv&expiries[]=2024-11-07
+    ```
+    """
+    symbol_norm = _normalize_symbol(symbol)
+    normalized_tf = _normalize_timeframe(timeframe)
+
+    if indicator not in SUPPORTED_INDICATORS - {"max_pain"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported indicator: {indicator}")
+
+    # Parse expiries
+    expiry_dates = _parse_expiry_params(expiries)
+    if not expiry_dates:
+        expiry_dates = await dm.get_next_expiries(symbol_norm, limit=2)
+
+    if not expiry_dates:
+        raise HTTPException(status_code=404, detail=f"No expiries found for {symbol_norm}")
+
+    # Get label map
+    label_map = await dm.get_expiry_label_map(symbol_norm)
+
+    # Get latest data point
+    table_name = _fo_strike_table(normalized_tf)
+
+    query = f"""
+        WITH latest_time AS (
+            SELECT MAX(bucket_time) as max_time
+            FROM {table_name}
+            WHERE symbol = $1
+              AND expiry = ANY($2)
+        )
+        SELECT
+            bucket_time,
+            expiry,
+            strike,
+            call_iv_avg,
+            put_iv_avg,
+            call_delta_avg,
+            put_delta_avg,
+            call_gamma_avg,
+            put_gamma_avg,
+            call_theta_avg,
+            put_theta_avg,
+            call_vega_avg,
+            put_vega_avg,
+            call_oi_sum,
+            put_oi_sum,
+            call_volume,
+            put_volume,
+            underlying_close
+        FROM {table_name}
+        WHERE symbol = $1
+          AND expiry = ANY($2)
+          AND bucket_time = (SELECT max_time FROM latest_time)
+        ORDER BY expiry, strike
+    """
+
+    async with dm.pool.acquire() as conn:
+        rows = await conn.fetch(query, symbol_norm, expiry_dates)
+
+    logger.info(f"Strike distribution v2: fetched {len(rows)} rows for expiries={expiry_dates}")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No data found for the specified criteria")
+
+    # Get latest underlying price to determine ATM
+    underlying_ltp = None
+    for row in rows:
+        if row.get("underlying_close"):
+            underlying_ltp = float(row["underlying_close"])
+            break
+
+    # Calculate strike range if we have underlying price
+    if underlying_ltp:
+        gap = settings.fo_strike_gap  # 50 for NIFTY
+        atm_strike = round(underlying_ltp / gap) * gap
+        min_strike = atm_strike - (strike_range * gap)
+        max_strike = atm_strike + (strike_range * gap)
+    else:
+        # No filtering if we don't have underlying price
+        min_strike = None
+        max_strike = None
+
+    # Group by expiry
+    grouped_by_expiry = {}
+    filtered_count = 0
+
+    for row in rows:
+        expiry_key = row['expiry']
+        expiry_str = expiry_key.isoformat()
+        strike = float(row['strike'])
+
+        # Filter by strike range (ATM ± N strikes)
+        if min_strike is not None and max_strike is not None:
+            if strike < min_strike or strike > max_strike:
+                filtered_count += 1
+                continue
+
+        expiry_label, relative_rank = label_map.get(expiry_key, ("Unknown", 999))
+
+        if expiry_str not in grouped_by_expiry:
+            grouped_by_expiry[expiry_str] = {
+                "expiry": expiry_str,
+                "expiry_relative_label": expiry_label,
+                "relative_rank": relative_rank,
+                "underlying_price": float(row['underlying_close']) if row['underlying_close'] else None,
+                "timestamp": int(row['bucket_time'].timestamp()),
+                "points": []
+            }
+
+        # Get indicator value for call and put
+        call_val = _indicator_value(row, indicator, "call")
+        put_val = _indicator_value(row, indicator, "put")
+        combined = _combine_sides(indicator, call_val, put_val)
+        value = combined if indicator != "pcr" else _indicator_value(row, "pcr", "call")
+
+        # Classify moneyness bucket
+        underlying = row.get("underlying_close")
+        bucket = _classify_moneyness_bucket(strike, underlying, settings.fo_strike_gap) if underlying else "Unknown"
+
+        grouped_by_expiry[expiry_str]["points"].append({
+            "strike": strike,
+            "moneyness_bucket": bucket,
+            "value": round(value, 4) if value is not None else None,
+            "call": round(call_val, 4) if call_val is not None else None,
+            "put": round(put_val, 4) if put_val is not None else None,
+            "call_oi": float(row.get("call_oi_sum")) if row.get("call_oi_sum") else 0,
+            "put_oi": float(row.get("put_oi_sum")) if row.get("put_oi_sum") else 0,
+            "distance_from_atm": strike - underlying if underlying else None
+        })
+
+    logger.info(f"Strike distribution v2: processed {len(rows)} rows, filtered {filtered_count} by strike range, grouped into {len(grouped_by_expiry)} expiries with {sum(len(v['points']) for v in grouped_by_expiry.values())} total points")
+
+    return {
+        "symbol": symbol_norm,
+        "indicator": indicator,
+        "timeframe": normalized_tf,
+        "grouped_by_expiry": list(grouped_by_expiry.values())
+    }
+
+
+@router.websocket("/stream-aggregated")
+async def fo_stream_aggregated(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint for aggregated FO analytics stream.
+
+    Emits all FO analytics in one stream with expiry labels so the
+    TradingDashboard stays lightweight.
+
+    All updates include:
+    - expiry_relative_label (e.g., "NWeek+1", "NMonth+0")
+    - relative_rank (1, 2, 3... for weeklies; 0 for monthly)
+
+    Connection URL:
+    ```
+    ws://localhost:8081/fo/stream-aggregated?symbol=NIFTY
+    ```
+    """
+    if _hub is None:
+        await websocket.close(code=1013)
+        logger.warning("FO stream-aggregated rejected: hub not initialized")
+        return
+
+    await websocket.accept()
+
+    # Parse query params
+    query_params = dict(websocket.query_params)
+    symbol = query_params.get("symbol", settings.monitor_default_symbol)
+    symbol_norm = _normalize_symbol(symbol)
+
+    # Get DataManager instance from app state (global variable in main.py)
+    from app.main import data_manager as dm
+
+    # Get initial expiry label map
+    label_map = await dm.get_expiry_label_map(symbol_norm)
+
+    queue = await _hub.subscribe()
+    logger.info(f"FO stream-aggregated connection accepted for {symbol_norm}")
+
+    try:
+        last_sent = time.time()
+        idle_timeout = 60
+        heartbeat_interval = 30
+        last_ping = time.time()
+        label_refresh_interval = 300  # Refresh labels every 5 minutes
+        last_label_refresh = time.time()
+
+        while True:
+            # Refresh label map periodically
+            if time.time() - last_label_refresh >= label_refresh_interval:
+                try:
+                    label_map = await dm.get_expiry_label_map(symbol_norm)
+                    last_label_refresh = time.time()
+                    logger.debug(f"Refreshed expiry label map for {symbol_norm}")
+                except Exception as e:
+                    logger.warning(f"Failed to refresh label map: {e}")
+
+            # Wait for message from the hub queue
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                message = None
+
+            # Process and enhance message with expiry labels
+            if message and websocket.client_state == WebSocketState.CONNECTED:
+                message_type = message.get("type")
+
+                # Only process FO bucket messages
+                if message_type == "fo_bucket":
+                    msg_symbol = message.get("symbol", "").upper()
+
+                    # Filter by requested symbol
+                    if msg_symbol == symbol_norm.upper():
+                        # Enhance message with expiry labels
+                        expiry_str = message.get("expiry")
+                        if expiry_str:
+                            try:
+                                expiry_date = datetime.fromisoformat(expiry_str).date()
+                                expiry_label, relative_rank = label_map.get(expiry_date, ("Unknown", 999))
+
+                                # Add labels to message
+                                message["expiry_relative_label"] = expiry_label
+                                message["relative_rank"] = relative_rank
+
+                                # Enhance each strike with moneyness bucket
+                                underlying = message.get("underlying_close")
+                                if underlying and "strikes" in message:
+                                    for strike_data in message["strikes"]:
+                                        strike = strike_data.get("strike")
+                                        if strike:
+                                            bucket = _classify_moneyness_bucket(
+                                                strike,
+                                                underlying,
+                                                settings.fo_strike_gap
+                                            )
+                                            strike_data["moneyness_bucket"] = bucket
+
+                            except (ValueError, AttributeError) as e:
+                                logger.warning(f"Failed to parse expiry {expiry_str}: {e}")
+
+                        # Send enhanced message
+                        try:
+                            await websocket.send_json(message)
+                            last_sent = time.time()
+                        except (ConnectionClosed, ConnectionClosedOK):
+                            logger.info("WebSocket closed during send")
+                            break
+                        except Exception as exc:
+                            logger.error("WebSocket send error: %s", exc)
+                            break
+
+            # Heartbeat ping
+            if time.time() - last_ping >= heartbeat_interval:
+                try:
+                    await websocket.send_json({"type": "ping", "timestamp": datetime.now(timezone.utc).isoformat()})
+                    last_ping = time.time()
+                except ConnectionClosed:
+                    logger.info("FO stream-aggregated closed during ping")
+                    break
+
+            # Idle timeout
+            if time.time() - last_sent > idle_timeout:
+                logger.info("FO stream-aggregated idle timeout — closing")
+                await websocket.close(code=1000)
+                break
+
+    except Exception as exc:
+        logger.error("FO stream-aggregated error: %s", exc, exc_info=True)
+    finally:
+        await _hub.unsubscribe(queue)
+        logger.info(f"FO stream-aggregated connection closed for {symbol_norm}")
+
+
 @router.websocket("/stream")
 async def fo_stream_socket(websocket: WebSocket) -> None:
     if _hub is None:
@@ -866,14 +1493,19 @@ async def fo_stream_socket(websocket: WebSocket) -> None:
                 strike = message.get("strike")
                 expiry = message.get("expiry")
                 timeframe = message.get("timeframe", "1m")
-                
+                option_side = message.get("option_side", "call")
+
+                if option_side not in {"call", "put", "both"}:
+                    option_side = "call"
+
                 # Create subscription key
-                sub_key = f"{underlying}:{strike}:{expiry}:{timeframe}"
+                sub_key = f"{underlying}:{strike}:{expiry}:{timeframe}:{option_side}"
                 popup_subscriptions[sub_key] = {
                     "underlying": underlying,
                     "strike": strike,
                     "expiry": expiry,
                     "timeframe": timeframe,
+                    "option_side": option_side,
                     "seq": 0
                 }
                 
@@ -931,27 +1563,41 @@ async def fo_stream_socket(websocket: WebSocket) -> None:
                                 if strike_data.get("strike") == sub_info["strike"]:
                                     # Create popup update message
                                     sub_info["seq"] += 1
+                                    side_key = sub_info.get("option_side", "call")
+                                    primary_key = "call" if side_key == "call" else "put"
+                                    secondary_key = "put" if primary_key == "call" else "call"
+
+                                    primary = strike_data.get(primary_key, {}) or {}
+                                    secondary = strike_data.get(secondary_key, {}) or {}
+
+                                    price_raw = primary.get("ltp") or primary.get("close") or secondary.get("ltp")
+                                    price_candidate = float(price_raw) if price_raw is not None else 0.0
+                                    volume_candidate = int(primary.get("volume", 0) or 0)
+                                    oi_candidate = int(primary.get("oi", 0) or 0)
+                                    oi_delta_candidate = int(primary.get("oi_change", 0) or 0)
+
                                     popup_update = {
                                         "type": "popup_update",
                                         "seq": sub_info["seq"],
                                         "timestamp": message.get("bucket_time", datetime.now(timezone.utc).isoformat()),
                                         "candle": {
-                                            "o": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
-                                            "h": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
-                                            "l": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
-                                            "c": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
-                                            "v": strike_data.get("call", {}).get("volume", 0) + strike_data.get("put", {}).get("volume", 0)
+                                            "o": price_candidate or 0,
+                                            "h": price_candidate or 0,
+                                            "l": price_candidate or 0,
+                                            "c": price_candidate or 0,
+                                            "v": volume_candidate,
                                         },
                                         "metrics": {
-                                            "iv": strike_data.get("call", {}).get("iv", 0) or strike_data.get("put", {}).get("iv", 0),
-                                            "delta": strike_data.get("call", {}).get("delta", 0) or strike_data.get("put", {}).get("delta", 0),
-                                            "gamma": strike_data.get("call", {}).get("gamma", 0) or strike_data.get("put", {}).get("gamma", 0),
-                                            "theta": strike_data.get("call", {}).get("theta", 0) or strike_data.get("put", {}).get("theta", 0),
-                                            "vega": strike_data.get("call", {}).get("vega", 0) or strike_data.get("put", {}).get("vega", 0),
-                                            "premium": strike_data.get("call", {}).get("ltp", 0) or strike_data.get("put", {}).get("ltp", 0),
-                                            "oi": strike_data.get("call", {}).get("oi", 0) + strike_data.get("put", {}).get("oi", 0),
-                                            "oi_delta": strike_data.get("call", {}).get("oi_change", 0) + strike_data.get("put", {}).get("oi_change", 0)
-                                        }
+                                            "iv": float(primary.get("iv") or secondary.get("iv") or 0),
+                                            "delta": float(primary.get("delta") or secondary.get("delta") or 0),
+                                            "gamma": float(primary.get("gamma") or secondary.get("gamma") or 0),
+                                            "theta": float(primary.get("theta") or secondary.get("theta") or 0),
+                                            "vega": float(primary.get("vega") or secondary.get("vega") or 0),
+                                            "premium": price_candidate or 0,
+                                            "oi": oi_candidate,
+                                            "oi_delta": oi_delta_candidate,
+                                        },
+                                        "option_side": side_key,
                                     }
                                     
                                     # Send popup update

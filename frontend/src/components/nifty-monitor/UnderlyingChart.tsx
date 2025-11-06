@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { createChart, type IChartApi, type ISeriesApi, type CandlestickData, type Time, type MouseEventParams, type Range, type BusinessDay } from 'lightweight-charts'
 import { useMonitorSync } from './MonitorSyncContext'
-import { ChartLabels } from '../chart-labels/ChartLabels'
+import { ChartLabels, type ChartContextMenuAction } from '../chart-labels/ChartLabels'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Label } from '../../types/labels'
 import ShowChartPopup from '../ShowChartPopup/DerivativesChartPopup'
@@ -14,12 +14,49 @@ import {
   parseLabelMessage,
   timestampToUTC
 } from '../../services/labels'
+import {
+  fetchMonitorMetadata,
+  createMonitorSession,
+  deleteMonitorSession,
+  connectMonitorStream,
+  fetchMonitorSnapshot,
+} from '../../services/monitor'
+import type { MonitorMetadataResponse, MonitorStreamMessage } from '../../types'
+import { normalizeUnderlyingSymbol } from '../../utils/symbols'
 
 type Timeframe = '1' | '2' | '3' | '5' | '15' | '30' | '60' | '1D'
+
+export type UnderlyingContextAction =
+  | {
+      kind: 'copy'
+      symbol: string
+      timeframe: Timeframe
+      timestamp: number | null
+      price: number | null
+    }
+  | {
+      kind: 'alerts'
+      symbol: string
+      timeframe: Timeframe
+      timestamp: number | null
+      price: number | null
+    }
+  | {
+      kind: 'show-chart'
+      variant: 'call-strike' | 'put-strike' | 'straddle-strike'
+      symbol: string
+      timeframe: Timeframe
+      timestamp: number | null
+      price: number | null
+    }
 
 export interface UnderlyingChartProps {
   symbol: string
   timeframe: Timeframe
+  surfaceId?: string
+  reportDimensions?: boolean
+  enableRealtime?: boolean
+  onContextAction?: (action: UnderlyingContextAction) => void
 }
 
 interface Bar {
@@ -74,10 +111,54 @@ const toCandle = (bar: Bar): CandlestickData => ({
   close: bar.close,
 })
 
-const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
+const timeframeToSeconds = (timeframe: Timeframe): number => {
+  switch (timeframe) {
+    case '1':
+      return 60
+    case '2':
+      return 120
+    case '3':
+      return 180
+    case '5':
+      return 300
+    case '15':
+      return 900
+    case '30':
+      return 1800
+    case '60':
+      return 3600
+    case '1D':
+    default:
+      return 86400
+  }
+}
+
+const startOfDaySeconds = (epochSeconds: number): number => {
+  const date = new Date(epochSeconds * 1000)
+  date.setUTCHours(0, 0, 0, 0)
+  return Math.floor(date.getTime() / 1000)
+}
+
+const normalizeBucketTime = (timestampSeconds: number, timeframe: Timeframe): number => {
+  if (timeframe === '1D') {
+    return startOfDaySeconds(timestampSeconds)
+  }
+  const interval = timeframeToSeconds(timeframe)
+  return timestampSeconds - (timestampSeconds % interval)
+}
+
+const UnderlyingChart = ({
+  symbol,
+  timeframe,
+  surfaceId,
+  reportDimensions = false,
+  enableRealtime = false,
+  onContextAction,
+}: UnderlyingChartProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const lastBarRef = useRef<CandlestickData | null>(null)
   const [loading, setLoading] = useState(false)
   const [labels, setLabels] = useState<Label[]>([])
   const [showChartPopup, setShowChartPopup] = useState<{
@@ -87,7 +168,22 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     expiry: string
   } | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const { setTimeRange, setCrosshairTime, setPriceRange } = useMonitorSync()
+  const monitorWsRef = useRef<WebSocket | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
+  const snapshotIntervalRef = useRef<number | null>(null)
+  const streamConnectedRef = useRef(false)
+  const reconnectAttemptsRef = useRef(0)
+  const lastStreamUpdateRef = useRef<number>(0)
+  const lastStreamErrorRef = useRef<number>(0)
+  const [metadata, setMetadata] = useState<MonitorMetadataResponse | null>(null)
+  const {
+    setTimeRange,
+    setCrosshairTime,
+    setPriceRange,
+    setCrosshairRatio,
+    setCrosshairWidth,
+    setCrosshairPrice,
+  } = useMonitorSync()
 
   const syncPriceRange = useCallback(() => {
     const series = seriesRef.current
@@ -101,6 +197,77 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
       // series might be disposed while the chart is recreating
     }
   }, [setPriceRange])
+
+  const extractPrice = useCallback((payload: Record<string, unknown> | null | undefined): number | null => {
+    if (!payload || typeof payload !== 'object') return null
+    const candidates = ['close', 'price', 'last_price', 'ltp', 'trade_price']
+    for (const field of candidates) {
+      const value = (payload as Record<string, unknown>)[field]
+      const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
+      if (!Number.isNaN(numeric)) return numeric
+    }
+    return null
+  }, [])
+
+  const extractTimestamp = useCallback((payload: Record<string, unknown> | null | undefined): number => {
+    if (!payload || typeof payload !== 'object') return Math.floor(Date.now() / 1000)
+    const candidates = ['timestamp', 'time', 'ts', 'exchange_timestamp', 'last_trade_time']
+    for (const field of candidates) {
+      const value = (payload as Record<string, unknown>)[field]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value)
+      }
+      if (typeof value === 'string') {
+        const parsed = Number(value)
+        if (!Number.isNaN(parsed)) {
+          return parsed > 1e12 ? Math.floor(parsed / 1000) : Math.floor(parsed)
+        }
+      }
+    }
+    return Math.floor(Date.now() / 1000)
+  }, [])
+
+  const updateRealtimeBar = useCallback(
+    (price: number, timestampSeconds: number) => {
+      const series = seriesRef.current
+      if (!series || !Number.isFinite(price)) return
+      const bucketTime = normalizeBucketTime(timestampSeconds, timeframe)
+      const interval = timeframeToSeconds(timeframe)
+      const lastBar = lastBarRef.current
+
+      if (lastBar && typeof lastBar.time === 'number' && lastBar.time === bucketTime) {
+        const updated: CandlestickData = {
+          ...lastBar,
+          close: price,
+          high: Math.max(lastBar.high, price),
+          low: Math.min(lastBar.low, price),
+        }
+        lastBarRef.current = updated
+        series.update(updated)
+        return
+      }
+
+      const previousClose = lastBar?.close ?? price
+      const newBar: CandlestickData = {
+        time: bucketTime as Time,
+        open:
+          lastBar && typeof lastBar.time === 'number' && bucketTime - lastBar.time <= interval
+            ? lastBar.close
+            : price,
+        high: Math.max(previousClose, price),
+        low: Math.min(previousClose, price),
+        close: price,
+      }
+      lastBarRef.current = newBar
+      series.update(newBar)
+    },
+    [timeframe],
+  )
+
+  useEffect(() => {
+    lastBarRef.current = null
+    lastStreamUpdateRef.current = 0
+  }, [symbol, timeframe])
 
   // Label handlers
   const handleLabelCreate = useCallback(async (timestamp: number, labelType: Label['label_type']) => {
@@ -162,6 +329,8 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     });
   }, [labels, symbol]);
 
+  const backendSymbol = useMemo(() => normalizeUnderlyingSymbol(symbol), [symbol])
+
   useEffect(() => {
     if (!containerRef.current) return
     chartRef.current?.remove()
@@ -210,10 +379,21 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     chartRef.current = chart
     seriesRef.current = series
 
-    const resize = () => {
-      chart.applyOptions({ width: containerRef.current?.clientWidth ?? 800 })
+    const updateDimensions = () => {
+      const width = containerRef.current?.clientWidth ?? 0
+      chart.applyOptions({ width: width || 800 })
+      if (reportDimensions) {
+        setCrosshairWidth(width || null)
+      }
     }
-    window.addEventListener('resize', resize)
+    updateDimensions()
+    window.addEventListener('resize', updateDimensions)
+
+    let resizeObserver: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+      resizeObserver = new ResizeObserver(() => updateDimensions())
+      resizeObserver.observe(containerRef.current)
+    }
 
     const handleTimeRange = (range: Range<Time> | null) => {
       if (range) {
@@ -226,7 +406,27 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     const handleCrosshair = (param: MouseEventParams<Time>) => {
       if (param.time) {
         setCrosshairTime(Number(param.time))
+      } else {
+        setCrosshairTime(null)
       }
+
+      if (param.point && containerRef.current) {
+        const width = containerRef.current.clientWidth || 1
+        const ratio = Math.min(Math.max(param.point.x / width, 0), 1)
+        setCrosshairRatio(ratio)
+        if (seriesRef.current) {
+          const maybePrice = seriesRef.current.coordinateToPrice(param.point.y)
+          if (typeof maybePrice === 'number' && Number.isFinite(maybePrice)) {
+            setCrosshairPrice(maybePrice)
+          } else {
+            setCrosshairPrice(null)
+          }
+        }
+      } else {
+        setCrosshairRatio(null)
+        setCrosshairPrice(null)
+      }
+
       syncPriceRange()
     }
     chart.subscribeCrosshairMove(handleCrosshair)
@@ -238,23 +438,41 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     container?.addEventListener('mouseup', handleMouseUp)
 
     return () => {
-      window.removeEventListener('resize', resize)
+      window.removeEventListener('resize', updateDimensions)
+      resizeObserver?.disconnect()
       chart.timeScale().unsubscribeVisibleTimeRangeChange(handleTimeRange)
       chart.unsubscribeCrosshairMove(handleCrosshair)
       container?.removeEventListener('wheel', handleWheel)
       container?.removeEventListener('mouseup', handleMouseUp)
+      setCrosshairRatio(null)
+      setCrosshairPrice(null)
+      if (reportDimensions) {
+        setCrosshairWidth(null)
+      }
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
     }
-  }, [symbol, timeframe, setTimeRange, setCrosshairTime, syncPriceRange])
+  }, [
+    symbol,
+    timeframe,
+    reportDimensions,
+    setTimeRange,
+    setCrosshairTime,
+    setCrosshairRatio,
+    setCrosshairWidth,
+    setCrosshairPrice,
+    syncPriceRange,
+  ])
 
   useEffect(() => {
     const load = async () => {
       if (!seriesRef.current) return
       setLoading(true)
       const bars = await fetchBars(symbol, timeframe)
-      seriesRef.current.setData(bars.map(toCandle))
+      const candles = bars.map(toCandle)
+      seriesRef.current.setData(candles)
+      lastBarRef.current = candles.length ? candles[candles.length - 1] : null
       if (bars.length) {
         const highs = bars.map(bar => bar.high)
         const lows = bars.map(bar => bar.low)
@@ -266,6 +484,203 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
     }
     load()
   }, [symbol, timeframe, setPriceRange, setTimeRange, syncPriceRange])
+
+  useEffect(() => {
+    if (!enableRealtime || !backendSymbol) {
+      setMetadata(null)
+      return
+    }
+    let cancelled = false
+    fetchMonitorMetadata({ symbol: backendSymbol })
+      .then((response) => {
+        if (!cancelled) {
+          setMetadata(response)
+        }
+      })
+      .catch((error) => {
+        console.error('[UnderlyingChart] Failed to load monitor metadata', error)
+        if (!cancelled) setMetadata(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [enableRealtime, backendSymbol])
+
+  useEffect(() => {
+    if (!enableRealtime) return
+    const token = metadata?.underlying?.instrument_token
+    if (!token) return
+    let cancelled = false
+
+    const establishSession = async () => {
+      try {
+        if (sessionIdRef.current) {
+          const existing = sessionIdRef.current
+          sessionIdRef.current = null
+          await deleteMonitorSession(existing).catch(() => undefined)
+        }
+        const response = await createMonitorSession({ tokens: [token] })
+        if (cancelled) {
+          await deleteMonitorSession(response.session_id).catch(() => undefined)
+          return
+        }
+        sessionIdRef.current = response.session_id
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[UnderlyingChart] Failed to create monitor session', error)
+        }
+      }
+    }
+
+    establishSession()
+    return () => {
+      cancelled = true
+      const sessionId = sessionIdRef.current
+      sessionIdRef.current = null
+      if (sessionId) {
+        deleteMonitorSession(sessionId).catch(() => undefined)
+      }
+    }
+  }, [enableRealtime, metadata?.underlying?.instrument_token])
+
+  useEffect(() => {
+    if (!enableRealtime) return
+    const channel = metadata?.meta?.redis_channels?.underlying
+    if (!channel) return
+
+    let active = true
+
+    const connectStream = () => {
+      if (!active) return
+      const ws = connectMonitorStream()
+      monitorWsRef.current = ws
+
+      ws.onopen = () => {
+        streamConnectedRef.current = true
+        reconnectAttemptsRef.current = 0
+        lastStreamUpdateRef.current = Date.now()
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          if (typeof event.data !== 'string' || !event.data.startsWith('{')) {
+            return
+          }
+          const message: MonitorStreamMessage = JSON.parse(event.data)
+          if (!message || typeof message !== 'object') return
+          if (message.channel !== channel) return
+          const price = extractPrice(message.payload)
+          if (price == null) return
+          const timestamp = extractTimestamp(message.payload)
+          updateRealtimeBar(price, timestamp)
+          lastStreamUpdateRef.current = Date.now()
+        } catch (error) {
+          console.error('[UnderlyingChart] Failed to process monitor payload', error)
+        }
+      }
+
+      ws.onerror = (error) => {
+        const now = Date.now()
+        if (now - lastStreamErrorRef.current > 5000) {
+          console.error('[UnderlyingChart] Monitor stream error', error)
+          lastStreamErrorRef.current = now
+        }
+        streamConnectedRef.current = false
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          try {
+            ws.close()
+          } catch (closeError) {
+            console.error('[UnderlyingChart] Failed to close monitor stream after error', closeError)
+          }
+        }
+      }
+
+      ws.onclose = () => {
+        monitorWsRef.current = null
+        streamConnectedRef.current = false
+        if (!active) return
+        const attempt = (reconnectAttemptsRef.current += 1)
+        const retryDelay = Math.min(5000, 500 * attempt)
+        window.setTimeout(connectStream, retryDelay)
+      }
+    }
+
+    connectStream()
+
+    return () => {
+      active = false
+      streamConnectedRef.current = false
+      const ws = monitorWsRef.current
+      monitorWsRef.current = null
+      if (ws) {
+        try {
+          ws.close()
+        } catch (error) {
+          console.error('[UnderlyingChart] Failed to close monitor stream during cleanup', error)
+        }
+      }
+    }
+  }, [enableRealtime, metadata?.meta?.redis_channels?.underlying, extractPrice, extractTimestamp, updateRealtimeBar])
+
+  useEffect(() => {
+    if (!enableRealtime) {
+      if (snapshotIntervalRef.current != null) {
+        window.clearInterval(snapshotIntervalRef.current)
+        snapshotIntervalRef.current = null
+      }
+      return
+    }
+
+    const pollSnapshot = async () => {
+      try {
+        const snapshot = await fetchMonitorSnapshot({
+          symbol: backendSymbol || undefined,
+          timeframe,
+        })
+        const payload = snapshot?.underlying ?? null
+        const price = extractPrice(payload)
+        if (price == null) return
+        const timestamp = extractTimestamp(payload)
+        updateRealtimeBar(price, timestamp)
+      } catch (error) {
+        console.error('[UnderlyingChart] Snapshot poll failed', error)
+      }
+    }
+
+    pollSnapshot()
+    snapshotIntervalRef.current = window.setInterval(() => {
+      const lastStream = lastStreamUpdateRef.current
+      const now = Date.now()
+      if (!streamConnectedRef.current || now - lastStream > 2000) {
+        pollSnapshot()
+      }
+    }, 1000)
+
+    return () => {
+      if (snapshotIntervalRef.current != null) {
+        window.clearInterval(snapshotIntervalRef.current)
+        snapshotIntervalRef.current = null
+      }
+    }
+  }, [enableRealtime, backendSymbol, timeframe, extractPrice, extractTimestamp, updateRealtimeBar])
+
+  useEffect(() => {
+    return () => {
+      const sessionId = sessionIdRef.current
+      sessionIdRef.current = null
+      if (sessionId) {
+        deleteMonitorSession(sessionId).catch(() => undefined)
+      }
+      if (monitorWsRef.current) {
+        monitorWsRef.current.close()
+        monitorWsRef.current = null
+      }
+      if (snapshotIntervalRef.current != null) {
+        window.clearInterval(snapshotIntervalRef.current)
+        snapshotIntervalRef.current = null
+      }
+    }
+  }, [])
 
   // Fetch labels on symbol/timeframe change
   useEffect(() => {
@@ -358,7 +773,11 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
         </div>
         {loading && <span className="monitor-card__badge">Loading…</span>}
       </div>
-      <div ref={containerRef} style={{ width: '100%', height: CHART_HEIGHT }} />
+      <div
+        ref={containerRef}
+        data-surface-id={surfaceId}
+        style={{ width: '100%', height: CHART_HEIGHT }}
+      />
       <ErrorBoundary fallback={<div style={{ padding: '10px', color: '#666' }}>Labels temporarily unavailable</div>}>
         <ChartLabels
           chart={chartRef.current}
@@ -370,6 +789,16 @@ const UnderlyingChart = ({ symbol, timeframe }: UnderlyingChartProps) => {
           onLabelUpdate={handleLabelUpdate}
           onLabelDelete={handleLabelDelete}
           onShowChart={handleShowChart}
+          onContextAction={
+            onContextAction
+              ? (action: ChartContextMenuAction) =>
+                  onContextAction({
+                    ...action,
+                    symbol,
+                    timeframe,
+                  })
+              : undefined
+          }
         />
       </ErrorBoundary>
 

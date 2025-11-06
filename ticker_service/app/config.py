@@ -84,6 +84,24 @@ class Settings(BaseSettings):
         description="Enable mock data generation outside market hours. Set to False to disable all mock data.",
     )
 
+    # Option Greeks calculation configuration
+    option_greeks_interest_rate: float = Field(
+        default=0.10,
+        description="Risk-free interest rate for Greeks calculation (as decimal, e.g., 0.10 for 10%)",
+    )
+    option_greeks_dividend_yield: float = Field(
+        default=0.0,
+        description="Dividend yield for Greeks calculation (as decimal, e.g., 0.02 for 2%)",
+    )
+    option_expiry_time_hour: int = Field(
+        default=15,
+        description="Hour of option expiry time in 24h format (IST timezone)",
+    )
+    option_expiry_time_minute: int = Field(
+        default=30,
+        description="Minute of option expiry time (IST timezone)",
+    )
+
     # OrderExecutor configuration
     order_executor_worker_poll_interval: float = Field(
         default=1.0,
@@ -160,6 +178,30 @@ class Settings(BaseSettings):
         """Ensure basis points are non-negative"""
         if v < 0:
             raise ValueError(f"mock_price_variation_bps must be non-negative, got {v}")
+        return v
+
+    @field_validator("option_greeks_interest_rate", "option_greeks_dividend_yield")
+    @classmethod
+    def validate_rates(cls, v: float, info) -> float:
+        """Ensure rates are valid (0 to 1)"""
+        if not (0 <= v <= 1):
+            raise ValueError(f"{info.field_name} must be between 0 and 1 (as decimal), got {v}")
+        return v
+
+    @field_validator("option_expiry_time_hour")
+    @classmethod
+    def validate_hour(cls, v: int) -> int:
+        """Ensure hour is valid (0-23)"""
+        if not (0 <= v <= 23):
+            raise ValueError(f"option_expiry_time_hour must be between 0 and 23, got {v}")
+        return v
+
+    @field_validator("option_expiry_time_minute")
+    @classmethod
+    def validate_minute(cls, v: int) -> int:
+        """Ensure minute is valid (0-59)"""
+        if not (0 <= v <= 59):
+            raise ValueError(f"option_expiry_time_minute must be between 0 and 59, got {v}")
         return v
 
     @field_validator("stream_interval_seconds", "order_executor_worker_poll_interval", "order_executor_worker_error_backoff")

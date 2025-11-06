@@ -108,6 +108,21 @@ class OrderStreamManager:
                     logger.info(f"WebSocket connected for account: {account_id}")
                     retry_delay = 1  # Reset retry delay on successful connection
 
+                    # Send authentication message
+                    # ticker_service expects: {"type": "auth", "api_key": "YOUR_KEY"}
+                    # With API_KEY_ENABLED=false, any key works
+                    auth_msg = json.dumps({"type": "auth", "api_key": "dummy_key"})
+                    await websocket.send(auth_msg)
+                    logger.info(f"Sent authentication message for account: {account_id}")
+
+                    # Wait for authentication confirmation
+                    auth_response = await websocket.recv()
+                    auth_data = json.loads(auth_response)
+                    if auth_data.get("type") != "authenticated":
+                        logger.error(f"Authentication failed for {account_id}: {auth_data}")
+                        return
+                    logger.info(f"WebSocket authenticated for account: {account_id}")
+
                     # Keep-alive task
                     keep_alive_task = asyncio.create_task(
                         self._send_keep_alive(websocket)

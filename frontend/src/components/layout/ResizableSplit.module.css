@@ -1,0 +1,98 @@
+.container {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+.horizontal {
+  flex-direction: row;
+}
+
+.vertical {
+  flex-direction: column;
+}
+
+.panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+.primary {
+  flex: 0 0 auto;
+}
+
+.secondary {
+  flex: 1 1 auto;
+}
+
+.divider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+.horizontalDivider {
+  width: 8px;
+  cursor: col-resize;
+}
+
+.verticalDivider {
+  height: 8px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+.dividerHandle {
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.4);
+  transition: background 160ms ease;
+}
+
+.horizontalDivider .dividerHandle {
+  width: 2px;
+  height: 48px;
+}
+
+.verticalDivider .dividerHandle {
+  width: 48px;
+  height: 2px;
+}
+
+.divider:hover .dividerHandle,
+.divider:focus-visible .dividerHandle,
+.dragging .dividerHandle {
+  background: rgba(99, 102, 241, 0.75);
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.horizontalDivider .overlay {
+  border-left: 1px solid rgba(148, 163, 184, 0.12);
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.verticalDivider .overlay {
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.divider:hover .overlay,
+.divider:focus-visible .overlay,
+.dragging .overlay {
+  opacity: 1;
+}
+

@@ -33,7 +33,7 @@ class OrderStreamManager:
         self._heartbeat_task = None
 
     async def connect(self, websocket: WebSocket, account_id: str) -> None:
-        """Register a new WebSocket connection"""
+        """Register a new WebSocket connection (websocket must already be accepted)"""
         # Check connection limit
         async with self._lock:
             current_connections = len(self._connections.get(account_id, set()))
@@ -42,7 +42,7 @@ class OrderStreamManager:
                 logger.warning(f"WebSocket connection rejected for account {account_id}: Limit exceeded")
                 return
 
-        await websocket.accept()
+        # Note: websocket.accept() should be called by the route handler before calling this method
 
         async with self._lock:
             if account_id not in self._connections:

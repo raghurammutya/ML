@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import CustomChartWithMLLabels from './components/CustomChartWithMLLabels'
 import Sidebar from './components/Sidebar'
 import Header from './components/Header'
+import { ResizableSplit } from './components/layout/ResizableSplit'
 import { HealthStatus, CacheStats, LabelDistribution } from './types'
 import { fetchHealth, fetchCacheStats } from './services/api'
 
@@ -67,98 +68,190 @@ const App: React.FC = () => {
     <div className="app-container">
       <Header health={health} />
 
-      <div className="main-content">
-        <div className="chart-container">
-
-          {/* Top-left info pill */}
-          <div style={{
-            position: 'absolute', top: 48, left: 12, zIndex: 1000,
-            background: 'rgba(19, 23, 34, 0.98)', border: '2px solid #26a69a',
-            borderRadius: 8, padding: '8px 14px', display: 'flex', gap: 12, alignItems: 'center'
-          }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#d1d4dc' }}>{symbol}</div>
-            <div style={{ fontSize: 12, color: '#26a69a', background: '#1e222d', padding: '4px 8px', borderRadius: 4, border: '1px solid #26a69a' }}>
-              {selectedTimeframe}m • {chartType}
+      <ResizableSplit
+        className="dashboard-split"
+        initialPrimaryPercentage={70}
+        minPrimaryPx={520}
+        minSecondaryPx={320}
+        primary={
+          <div className="chart-container">
+            {/* Top-left info pill */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 48,
+                left: 12,
+                zIndex: 1000,
+                background: 'rgba(19, 23, 34, 0.98)',
+                border: '2px solid #26a69a',
+                borderRadius: 8,
+                padding: '8px 14px',
+                display: 'flex',
+                gap: 12,
+                alignItems: 'center',
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#d1d4dc' }}>{symbol}</div>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: '#26a69a',
+                  background: '#1e222d',
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  border: '1px solid #26a69a',
+                }}
+              >
+                {selectedTimeframe}m • {chartType}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: '#8c93a7',
+                  background: '#1e222d',
+                  padding: '3px 6px',
+                  borderRadius: 3,
+                  border: '1px solid #2a2e39',
+                }}
+              >
+                {fromSec && toSec ? 'Custom range' : 'Auto range (~6 months)'}
+              </div>
             </div>
-            <div style={{ fontSize: 11, color: '#8c93a7', background: '#1e222d', padding: '3px 6px', borderRadius: 3, border: '1px solid #2a2e39' }}>
-              {fromSec && toSec ? 'Custom range' : 'Auto range (~6 months)'}
-            </div>
-          </div>
 
-          {/* Top-right controls: timeframe + chart type + date range */}
-          <div style={{
-            position: 'absolute', top: 48, right: 12, zIndex: 1000,
-            background: 'rgba(19, 23, 34, 0.95)', border: '1px solid #2a2e39', borderRadius: 8, padding: 8,
-            display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap'
-          }}>
-            {/* Timeframes */}
-            <div style={{ display: 'flex', gap: 4 }}>
-              {supportedTimeframes.map(tf => (
-                <button key={tf}
-                  onClick={() => setSelectedTimeframe(tf)}
+            {/* Top-right controls: timeframe + chart type + date range */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 48,
+                right: 12,
+                zIndex: 1000,
+                background: 'rgba(19, 23, 34, 0.95)',
+                border: '1px solid #2a2e39',
+                borderRadius: 8,
+                padding: 8,
+                display: 'flex',
+                gap: 8,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ display: 'flex', gap: 4 }}>
+                {supportedTimeframes.map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setSelectedTimeframe(tf)}
+                    style={{
+                      backgroundColor: selectedTimeframe === tf ? '#26a69a' : '#2a2e39',
+                      color: selectedTimeframe === tf ? '#000' : '#d1d4dc',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '4px 8px',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {tf === '60' ? '1h' : tf === '1D' ? '1D' : `${tf}m`}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', gap: 4, marginLeft: 6 }}>
+                {(['candle', 'line'] as ChartType[]).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setChartType(t)}
+                    style={{
+                      backgroundColor: chartType === t ? '#26a69a' : '#2a2e39',
+                      color: chartType === t ? '#000' : '#d1d4dc',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '4px 8px',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  placeholder="From (YYYY-MM-DD HH:mm)"
+                  value={fromInput}
+                  onChange={(e) => setFromInput(e.target.value)}
                   style={{
-                    backgroundColor: selectedTimeframe === tf ? '#26a69a' : '#2a2e39',
-                    color: selectedTimeframe === tf ? '#000' : '#d1d4dc',
-                    border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer'
-                  }}>{tf === '60' ? '1h' : tf === '1D' ? '1D' : `${tf}m`}</button>
-              ))}
-            </div>
-
-            {/* Chart type */}
-            <div style={{ display: 'flex', gap: 4, marginLeft: 6 }}>
-              {(['candle', 'line'] as ChartType[]).map(t => (
-                <button key={t}
-                  onClick={() => setChartType(t)}
+                    background: '#131722',
+                    color: '#d1d4dc',
+                    border: '1px solid #2a2e39',
+                    borderRadius: 4,
+                    padding: '4px 8px',
+                    width: 180,
+                  }}
+                />
+                <input
+                  placeholder="To (YYYY-MM-DD HH:mm)"
+                  value={toInput}
+                  onChange={(e) => setToInput(e.target.value)}
                   style={{
-                    backgroundColor: chartType === t ? '#26a69a' : '#2a2e39',
-                    color: chartType === t ? '#000' : '#d1d4dc',
-                    border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer'
-                  }}>{t}</button>
-              ))}
+                    background: '#131722',
+                    color: '#d1d4dc',
+                    border: '1px solid #2a2e39',
+                    borderRadius: 4,
+                    padding: '4px 8px',
+                    width: 180,
+                  }}
+                />
+                <button
+                  onClick={applyRange}
+                  style={{
+                    background: '#26a69a',
+                    color: '#000',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '4px 8px',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Apply
+                </button>
+                <button
+                  onClick={clearRange}
+                  style={{
+                    background: '#2a2e39',
+                    color: '#d1d4dc',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '4px 8px',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
             </div>
 
-            {/* Date range */}
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <input
-                placeholder="From (YYYY-MM-DD HH:mm)"
-                value={fromInput}
-                onChange={(e) => setFromInput(e.target.value)}
-                style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #2a2e39', borderRadius: 4, padding: '4px 8px', width: 180 }}
-              />
-              <input
-                placeholder="To (YYYY-MM-DD HH:mm)"
-                value={toInput}
-                onChange={(e) => setToInput(e.target.value)}
-                style={{ background: '#131722', color: '#d1d4dc', border: '1px solid #2a2e39', borderRadius: 4, padding: '4px 8px', width: 180 }}
-              />
-              <button onClick={applyRange}
-                style={{ background: '#26a69a', color: '#000', border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer' }}>
-                Apply
-              </button>
-              <button onClick={clearRange}
-                style={{ background: '#2a2e39', color: '#d1d4dc', border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer' }}>
-                Clear
-              </button>
-            </div>
+            <CustomChartWithMLLabels
+              symbol={symbol}
+              timeframe={selectedTimeframe}
+              chartType={chartType}
+              height={520}
+              fromSec={fromSec}
+              toSec={toSec}
+            />
           </div>
-
-          <CustomChartWithMLLabels
-            symbol={symbol}
-            timeframe={selectedTimeframe}
-            chartType={chartType}
-            height={520}
-            fromSec={fromSec}
-            toSec={toSec}
+        }
+        secondary={
+          <Sidebar
+            health={health}
+            cacheStats={cacheStats}
+            labelDistribution={labelDistribution}
+            selectedTimeframe={selectedTimeframe}
           />
-        </div>
-
-        <Sidebar
-          health={health}
-          cacheStats={cacheStats}
-          labelDistribution={labelDistribution}
-          selectedTimeframe={selectedTimeframe}
-        />
-      </div>
+        }
+      />
     </div>
   )
 }

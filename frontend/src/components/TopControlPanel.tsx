@@ -1,70 +1,95 @@
 import React from 'react'
+import styles from './TopControlPanel.module.css'
 import { UserMenuDropdown } from './UserMenuDropdown'
+import { UniverseTabsBar } from './UniverseTabsBar'
+import { ChartControlPanel } from './ChartControlPanel'
+import { TopControlPanelProps } from './tradingDashboard/types'
 
-/**
- * TopControlPanel - Horizontal sticky panel at the top of Trading Dashboard
- *
- * This component provides the main navigation and control interface for the dashboard.
- * It's divided into three semantic zones:
- *
- * 1. LeftZone: User profile, settings, and account management (Phase 2: ✅ Complete)
- * 2. CenterZone: Universe tabs and symbol search (Phase 3: Pending)
- * 3. RightZone: Chart controls and notifications (Phase 4: Pending)
- *
- * Design principles:
- * - Sticky positioning for persistent access
- * - Clean separation of concerns via zones
- * - Modular structure ready for incremental feature addition
- */
-export const TopControlPanel: React.FC = () => {
+export const TopControlPanel: React.FC<TopControlPanelProps> = ({
+  tabs,
+  activeTab,
+  onTabClick,
+  onCloseTab,
+  onAddTabs,
+  replayEnabled,
+  onReplayToggle,
+  replaySpeed,
+  onReplaySpeedChange,
+  timeframe,
+  onTimeframeChange,
+  selectedIndicators,
+  onIndicatorsChange,
+  alertCount,
+  messageCount,
+  onSaveLayout,
+  onLoadLayout,
+  onAlertsClick,
+  onMessagesClick,
+  availableSymbols,
+  onSearchSymbols,
+  indicatorOptions,
+  expiryOptions,
+  selectedExpiries,
+  onExpiriesChange,
+  moneynessOptions,
+  selectedMoneyness,
+  onMoneynessChange,
+}) => {
   const handleThemeToggle = () => {
     console.log('Theme toggle clicked')
-    // TODO: Implement theme toggle logic
   }
 
   const handleLogout = () => {
     console.log('Logout clicked')
-    // TODO: Implement logout logic
   }
 
   return (
-    <header className="sticky top-0 z-50 bg-neutral-900 border-b border-gray-800">
-      <div className="flex items-center justify-between px-6 py-3 gap-4">
-        {/* Left Zone: User Menu Dropdown - Phase 2 Complete */}
-        <div className="flex items-center gap-4 min-w-fit">
-          <UserMenuDropdown
-            userName="Raghuram"
-            userEmail="raghuram@trading.com"
-            onThemeToggle={handleThemeToggle}
-            onLogout={handleLogout}
-          />
-        </div>
+    <header className={styles.wrapper}>
+      <div className={styles.leftZone}>
+        <UserMenuDropdown
+          userName="Raghuram"
+          userEmail="raghuram@trading.com"
+          onThemeToggle={handleThemeToggle}
+          onLogout={handleLogout}
+        />
+      </div>
 
-        {/* Center Zone: Universe Tabs & Symbol Search - Phase 3 Pending */}
-        <div className="flex items-center gap-4 flex-1 justify-center max-w-3xl">
-          {/* Universe Tabs Placeholder */}
-          <div className="h-10 px-4 bg-gray-800 rounded border border-gray-700 flex items-center justify-center">
-            <span className="text-sm text-gray-400">Universe Tabs</span>
-          </div>
+      <div className={styles.centerZone}>
+        <UniverseTabsBar
+          tabs={tabs}
+          activeTab={activeTab}
+          onTabClick={onTabClick}
+          onCloseTab={onCloseTab}
+          onAddTabs={onAddTabs}
+          availableSymbols={availableSymbols}
+          onSearchSymbols={onSearchSymbols}
+        />
+      </div>
 
-          {/* Symbol Search Placeholder */}
-          <div className="flex-1 max-w-md h-10 px-4 bg-gray-800 rounded border border-gray-700 flex items-center justify-center">
-            <span className="text-sm text-gray-400">Symbol Search</span>
-          </div>
-        </div>
-
-        {/* Right Zone: Chart Controls & Notifications - Phase 4 Pending */}
-        <div className="flex items-center gap-3 min-w-fit">
-          {/* Chart Controls Placeholder */}
-          <div className="h-10 px-4 bg-gray-800 rounded border border-gray-700 flex items-center justify-center">
-            <span className="text-sm text-gray-400">Chart Controls</span>
-          </div>
-
-          {/* Notifications Placeholder */}
-          <div className="w-10 h-10 bg-gray-800 rounded border border-gray-700 flex items-center justify-center">
-            <span className="text-sm text-gray-400">🔔</span>
-          </div>
-        </div>
+      <div className={styles.rightZone}>
+        <ChartControlPanel
+          replayEnabled={replayEnabled}
+          onReplayToggle={onReplayToggle}
+          replaySpeed={replaySpeed}
+          onReplaySpeedChange={onReplaySpeedChange}
+          timeframe={timeframe}
+          onTimeframeChange={onTimeframeChange}
+          selectedIndicators={selectedIndicators}
+          onIndicatorsChange={onIndicatorsChange}
+          alertCount={alertCount}
+          messageCount={messageCount}
+          onSaveLayout={onSaveLayout}
+          onLoadLayout={onLoadLayout}
+          onAlertsClick={onAlertsClick}
+          onMessagesClick={onMessagesClick}
+          indicatorOptions={indicatorOptions}
+          expiryOptions={expiryOptions}
+          selectedExpiries={selectedExpiries}
+          onExpiriesChange={onExpiriesChange}
+          moneynessOptions={moneynessOptions}
+          selectedMoneyness={selectedMoneyness}
+          onMoneynessChange={onMoneynessChange}
+        />
       </div>
     </header>
   )

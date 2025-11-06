@@ -1,0 +1,244 @@
+.wrapper {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: var(--chart-width, 720px);
+  margin-left: var(--chart-offset-left, 0px);
+}
+
+.panelColumn {
+  width: 100%;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panel {
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 16px;
+  padding: 12px 0;
+  box-shadow:
+    0 18px 36px -28px rgba(15, 23, 42, 0.85),
+    inset 0 1px 0 rgba(148, 163, 184, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  --panel-chart-height: 160px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.title h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.subtitle {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.72);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.value {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.button {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  color: #cbd5f5;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.button:hover {
+  background: rgba(51, 65, 85, 0.85);
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sliderRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.sliderRow input[type='range'] {
+  flex: 1;
+}
+
+.chart {
+  height: var(--panel-chart-height);
+  min-height: 48px;
+}
+
+.collapsed {
+  padding-bottom: 10px;
+}
+
+.empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 13px;
+}
+
+.radarCard {
+  width: 180px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow:
+    0 18px 36px -28px rgba(15, 23, 42, 0.85),
+    inset 0 1px 0 rgba(148, 163, 184, 0.12);
+}
+
+.radarHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.radarTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.radarSubtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.75);
+}
+
+.radarChart {
+  flex: 1;
+  min-height: 200px;
+}
+
+.compact {
+  width: var(--chart-width, 360px);
+}
+
+.compact .panelColumn {
+  width: 100%;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.groupTitleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.groupTitleBlock h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #f8fafc;
+}
+
+.groupTitleBlock p {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.radarMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin-top: 8px;
+}
+
+.radarMetric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(203, 213, 225, 0.82);
+}
+
+.radarMetricLabel {
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.radarMetricValue {
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.groupToggle {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  color: #cbd5f5;
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.groupToggle:hover {
+  background: rgba(51, 65, 85, 0.85);
+  border-color: rgba(148, 163, 184, 0.4);
+}

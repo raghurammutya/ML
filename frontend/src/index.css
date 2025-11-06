@@ -54,23 +54,29 @@ body {
   background-color: #ef5350;
 }
 
-.main-content {
+.dashboard-split {
   flex: 1;
   display: flex;
-  overflow: hidden;
+  min-height: 0;
 }
 
 .chart-container {
   flex: 1;
   position: relative;
+  min-height: 0;
+  min-width: 0;
 }
 
 .sidebar {
-  width: 350px;
+  flex: 1;
+  min-width: 260px;
+  max-width: 520px;
+  width: 100%;
   background-color: #131722;
   border-left: 1px solid #2a2e39;
   padding: 20px;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .sidebar h2 {
@@ -284,6 +290,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+  max-height: calc(100vh - 180px);
 }
 
 .monitor-card {
@@ -331,6 +339,34 @@ body {
   border-radius: 10px;
   padding: 12px;
   margin-bottom: 16px;
+}
+
+.monitor-left-duplicate {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: #111823;
+  border: 1px solid #1c2431;
+  border-radius: 12px;
+}
+
+.monitor-left-duplicate__frame {
+  width: 100%;
+  max-width: 720px;
+}
+
+.monitor-right-chart {
+  background: #111823;
+  border: 1px solid #1c2431;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+.monitor-right-chart > div {
+  width: 100%;
 }
 
 .monitor-expiries button {
