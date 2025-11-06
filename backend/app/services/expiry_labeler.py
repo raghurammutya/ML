@@ -164,25 +164,23 @@ class ExpiryLabeler:
         Classify expiry as weekly/monthly/quarterly.
 
         Rules (NSE F&O):
-        - Weekly: Every Thursday (excluding last Thursday of month)
-        - Monthly: Last Thursday of each month
-        - Quarterly: Last Thursday of Mar/Jun/Sep/Dec
+        - Weekly: Any expiry that's not the last expiry of month
+        - Monthly: Last expiry of each month
+        - Quarterly: Last expiry of Mar/Jun/Sep/Dec
+
+        NOTE: NSE changes expiry days (was Thursday, now Tuesday for NIFTY).
+        We don't hardcode weekday checks - if it's in the database, it's valid.
 
         Returns:
             (is_weekly, is_monthly, is_quarterly)
         """
-        # Check if Thursday (NSE expiries are on Thursdays)
-        # weekday: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
-        if expiry.weekday() != 3:
-            # Not a Thursday - not a valid expiry
-            return (False, False, False)
-
-        # Check if last Thursday of the month
+        # Check if last expiry of the month
         # Strategy: Add 7 days and check if month changes
+        # This works regardless of which day of week expiries fall on
         next_week = expiry + timedelta(days=7)
-        is_last_thursday = (next_week.month != expiry.month)
+        is_last_of_month = (next_week.month != expiry.month)
 
-        if is_last_thursday:
+        if is_last_of_month:
             # This is a monthly expiry
             is_quarterly = expiry.month in [3, 6, 9, 12]
             return (False, True, is_quarterly)
@@ -314,8 +312,8 @@ class ExpiryLabeler:
                 relative_rank = 0  # Monthly gets special rank 0
                 monthly_count += 1
             else:
-                # Not a valid expiry (not Thursday)
-                logger.warning(f"Skipping invalid expiry {expiry} for {symbol} (not Thursday)")
+                # Should not happen - classify_expiry always returns weekly or monthly
+                logger.debug(f"Expiry {expiry} for {symbol} classified as neither weekly nor monthly")
                 continue
 
             # Calculate days to expiry
