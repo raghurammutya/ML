@@ -1230,6 +1230,155 @@ class DataManager:
             rows = await conn.fetch(query, symbol_norm, limit)
         return [row['expiry'] for row in rows]
 
+    async def get_all_expiries(
+        self,
+        symbol: str,
+        min_date: Optional[date] = None,
+        max_date: Optional[date] = None
+    ) -> List[date]:
+        """
+        Get all distinct expiries for a symbol from fo_option_strike_bars.
+
+        Args:
+            symbol: Underlying symbol (NIFTY, BANKNIFTY, etc.)
+            min_date: Minimum expiry date (default: today)
+            max_date: Maximum expiry date (optional)
+        """
+        if not self.pool:
+            return []
+
+        symbol_norm = _normalize_symbol(symbol)
+        min_date = min_date or date.today()
+
+        if max_date:
+            query = """
+                SELECT DISTINCT expiry
+                FROM fo_option_strike_bars
+                WHERE symbol = $1
+                  AND expiry >= $2
+                  AND expiry <= $3
+                ORDER BY expiry
+            """
+            params = [symbol_norm, min_date, max_date]
+        else:
+            query = """
+                SELECT DISTINCT expiry
+                FROM fo_option_strike_bars
+                WHERE symbol = $1
+                  AND expiry >= $2
+                ORDER BY expiry
+            """
+            params = [symbol_norm, min_date]
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        return [row['expiry'] for row in rows]
+
+    async def get_expiry_metadata(
+        self,
+        symbol: str,
+        as_of_date: Optional[date] = None
+    ) -> List[Dict]:
+        """
+        Get pre-computed expiry metadata from fo_expiry_metadata table.
+
+        Returns list of dicts with keys:
+        - expiry, is_weekly, is_monthly, is_quarterly
+        - relative_label, relative_rank, days_to_expiry
+
+        Falls back to computing labels on-the-fly if table is not populated.
+        """
+        if not self.pool:
+            return []
+
+        as_of_date = as_of_date or date.today()
+        symbol_norm = _normalize_symbol(symbol)
+
+        # Try exact date match first
+        query = """
+            SELECT
+                expiry,
+                is_weekly,
+                is_monthly,
+                is_quarterly,
+                relative_label,
+                relative_rank,
+                days_to_expiry
+            FROM fo_expiry_metadata
+            WHERE symbol = $1
+              AND as_of_date = $2
+            ORDER BY expiry
+        """
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, symbol_norm, as_of_date)
+
+            # If no data for exact date, get most recent data
+            if not rows:
+                query_recent = """
+                    SELECT
+                        expiry,
+                        is_weekly,
+                        is_monthly,
+                        is_quarterly,
+                        relative_label,
+                        relative_rank,
+                        days_to_expiry
+                    FROM fo_expiry_metadata
+                    WHERE symbol = $1
+                      AND as_of_date <= $2
+                    ORDER BY as_of_date DESC, expiry
+                    LIMIT 20
+                """
+                rows = await conn.fetch(query_recent, symbol_norm, as_of_date)
+
+        if rows:
+            return [dict(row) for row in rows]
+
+        # Fallback: compute on-the-fly using database function
+        logger.warning(
+            f"No pre-computed expiry metadata for {symbol} on {as_of_date}. "
+            "Computing on-the-fly (consider running refresh_expiry_metadata)"
+        )
+
+        query_compute = """
+            SELECT
+                expiry,
+                is_weekly,
+                is_monthly,
+                is_quarterly,
+                relative_label,
+                relative_rank,
+                days_to_expiry
+            FROM compute_expiry_labels($1, $2)
+        """
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query_compute, symbol_norm, as_of_date)
+
+        return [dict(row) for row in rows]
+
+    async def get_expiry_label_map(
+        self,
+        symbol: str,
+        as_of_date: Optional[date] = None
+    ) -> Dict[date, Tuple[str, int]]:
+        """
+        Get mapping of expiry -> (relative_label, relative_rank) for a symbol.
+
+        Used by routes to attach labels to series data without re-computing.
+
+        Returns:
+            Dictionary mapping expiry date to (label, rank) tuple
+        """
+        metadata = await self.get_expiry_metadata(symbol, as_of_date)
+
+        return {
+            row['expiry']: (row['relative_label'], row['relative_rank'])
+            for row in metadata
+        }
+
     async def get_pool_stats(self) -> dict:
         """
         Async to match main.py's `await data_manager.get_pool_stats()`.
