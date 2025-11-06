@@ -113,11 +113,11 @@ async def borrow_with_failover(
                 f"Attempting {operation} with account {account_id} (attempt {attempt}/{max_attempts})"
             )
 
-            async with orchestrator.borrow(account_id) as lease:
+            async with orchestrator.borrow(account_id) as client:
                 # Yield the client - the caller will use it
                 # If it succeeds, we're done
                 # If it fails, we catch below and try next account
-                yield lease.client
+                yield client
                 return  # Success - exit
 
         except Exception as error:

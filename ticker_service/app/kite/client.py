@@ -164,17 +164,15 @@ class KiteClient:
 
         return await asyncio.to_thread(_fetch)
 
-    def fetch_instruments(self, segment: str) -> List[Dict[str, Any]]:
+    async def fetch_instruments(self, segment: str) -> List[Dict[str, Any]]:
         def _download():
-            # Temporarily override the token header for this call
-            self._kite.set_access_token(f"token {self.api_key}:{self.access_token}")
-            try:
-                return self._kite.instruments(segment)
-            finally:
-                # Restore raw token for other API calls
-                self._kite.set_access_token(self.access_token)
+            # Create a separate KiteConnect instance for instruments API
+            # to avoid race condition with historical_data API token format
+            temp_kite = KiteConnect(api_key=self.api_key)
+            temp_kite.set_access_token(f"token {self.api_key}:{self.access_token}")
+            return temp_kite.instruments(segment)
 
-        return asyncio.to_thread(_download)
+        return await asyncio.to_thread(_download)
 
 
     async def get_last_price(self, tradingsymbol: str) -> float:
@@ -301,6 +299,18 @@ class KiteClient:
 
         # Initialize pool if needed
         self._ensure_pool()
+
+        # Update pool handlers in case they changed
+        if self._ws_pool:
+            logger.info(
+                "DEBUG: Updating pool handlers - tick_handler=%s error_handler=%s",
+                "SET" if self._tick_handler else "None",
+                "SET" if self._error_handler else "None"
+            )
+            self._ws_pool._tick_handler = self._tick_handler
+            self._ws_pool._error_handler = self._error_handler
+            self._ws_pool._loop = self._loop
+            logger.info("DEBUG: Pool handlers updated successfully")
 
         # Subscribe via pool (automatically handles multi-connection scaling)
         logger.info(
