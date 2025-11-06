@@ -28,8 +28,12 @@ from .routes_trading_accounts import router as trading_accounts_router
 from .subscription_store import SubscriptionRecord, subscription_store
 from .account_store import initialize_account_store, get_account_store
 from .jwt_auth import get_current_user, get_optional_user
+from .historical_greeks import HistoricalGreeksEnricher
 
 settings = get_settings()
+
+# Global instance for historical Greeks enricher (initialized at startup)
+historical_greeks_enricher: Optional[HistoricalGreeksEnricher] = None
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
@@ -100,11 +104,30 @@ async def lifespan(app: FastAPI):
         encryption_key = os.getenv("ACCOUNT_ENCRYPTION_KEY")
         await initialize_account_store(db_conn_string, encryption_key)
         logger.info("Account store initialized")
+
+        # Initialize Historical Greeks Enricher
+        global historical_greeks_enricher
+        account_store = get_account_store()
+        historical_greeks_enricher = HistoricalGreeksEnricher(
+            db_pool=account_store._pool,
+            kite_fetch_fn=ticker_loop.fetch_history
+        )
+        logger.info("Historical Greeks enricher initialized")
+
     except Exception as exc:
         logger.warning(f"Failed to initialize account store: {exc}")
         logger.warning("Trading account management endpoints will not be available")
 
     await ticker_loop.start()
+
+    # Start strike rebalancer for automatic option subscription management
+    try:
+        from .strike_rebalancer import strike_rebalancer
+        await strike_rebalancer.start()
+        logger.info("Strike rebalancer started")
+    except Exception as exc:
+        logger.warning(f"Failed to start strike rebalancer: {exc}")
+        # Non-critical, continue startup
 
     # Initialize OrderExecutor with config values
     init_executor(
@@ -157,6 +180,14 @@ async def lifespan(app: FastAPI):
             logger.warning("OrderExecutor worker did not stop within timeout")
             executor_task.cancel()
         logger.info("OrderExecutor worker stopped")
+
+        # Stop strike rebalancer
+        try:
+            from .strike_rebalancer import strike_rebalancer
+            await strike_rebalancer.stop()
+            logger.info("Strike rebalancer stopped")
+        except Exception as exc:
+            logger.error(f"Error stopping strike rebalancer: {exc}")
 
         await ticker_loop.stop()
         await redis_publisher.close()
@@ -494,6 +525,21 @@ async def history(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Historical fetch failed: {exc}") from exc
+
+    # Enrich option candles with Greeks if requested
+    if oi and historical_greeks_enricher and metadata.segment in ("NFO-OPT", "BFO-OPT", "MCX-OPT"):
+        try:
+            logger.info(f"Enriching {len(candles)} historical candles with Greeks for {metadata.tradingsymbol}")
+            candles = await historical_greeks_enricher.enrich_option_candles(
+                option_metadata=metadata,
+                option_candles=candles,
+                from_ts=from_epoch,
+                to_ts=to_epoch,
+                interval=interval
+            )
+        except Exception as exc:
+            logger.error(f"Failed to enrich historical candles with Greeks: {exc}", exc_info=True)
+            # Continue without Greeks enrichment
 
     for candle in candles:
         ts = candle.get("date")
