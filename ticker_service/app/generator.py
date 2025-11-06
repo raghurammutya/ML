@@ -17,7 +17,7 @@ from .instrument_registry import instrument_registry
 from .subscription_store import SubscriptionRecord, subscription_store
 from .kite.client import KiteClient
 from .publisher import publish_option_snapshot, publish_underlying_bar
-from .schema import Instrument, OptionSnapshot
+from .schema import Instrument, OptionSnapshot, DepthLevel, MarketDepth
 from .greeks_calculator import GreeksCalculator
 from .utils.symbol_utils import normalize_symbol
 
@@ -549,6 +549,14 @@ class MultiAccountTickerLoop:
             state.base_volume = max(1, int((state.base_volume * 0.7) + (volume * 0.3)))
             state.base_oi = max(0, int((state.base_oi * 0.7) + (oi * 0.3)))
 
+            # Generate mock market depth
+            tick_size = instrument.tick_size or 0.05
+            mock_depth = self._generate_mock_market_depth(new_price, tick_size)
+
+            # Calculate total buy/sell quantities
+            total_buy_qty = sum(level.quantity for level in mock_depth.buy)
+            total_sell_qty = sum(level.quantity for level in mock_depth.sell)
+
             return OptionSnapshot(
                 instrument=instrument,
                 last_price=round(new_price, 2),
@@ -561,7 +569,50 @@ class MultiAccountTickerLoop:
                 vega=state.vega,
                 timestamp=int(time.time()),
                 is_mock=False,  # TEMP: Changed from True for testing
+                depth=mock_depth,
+                total_buy_quantity=total_buy_qty,
+                total_sell_quantity=total_sell_qty,
             )
+
+    @staticmethod
+    def _generate_mock_market_depth(last_price: float, tick_size: float = 0.05) -> MarketDepth:
+        """
+        Generate realistic mock market depth.
+
+        Args:
+            last_price: Current option price
+            tick_size: Minimum price increment
+
+        Returns:
+            MarketDepth with 5 bid and 5 ask levels
+        """
+        # Generate 5 bid levels (descending prices)
+        buy_levels = []
+        for i in range(5):
+            bid_price = last_price - (tick_size * (i + 1))
+            if bid_price < tick_size:
+                bid_price = tick_size
+            quantity = random.randint(25, 200) * (5 - i)  # More quantity at better prices
+            orders = random.randint(2, 8)
+            buy_levels.append(DepthLevel(
+                quantity=quantity,
+                price=round(bid_price, 2),
+                orders=orders
+            ))
+
+        # Generate 5 ask levels (ascending prices)
+        sell_levels = []
+        for i in range(5):
+            ask_price = last_price + (tick_size * (i + 1))
+            quantity = random.randint(25, 200) * (5 - i)  # More quantity at better prices
+            orders = random.randint(2, 8)
+            sell_levels.append(DepthLevel(
+                quantity=quantity,
+                price=round(ask_price, 2),
+                orders=orders
+            ))
+
+        return MarketDepth(buy=buy_levels, sell=sell_levels)
 
     @staticmethod
     def _jitter_int(base: int, proportion: float, minimum: int = 0) -> int:
@@ -930,6 +981,37 @@ class MultiAccountTickerLoop:
                 # Normalize the underlying symbol (e.g., NIFTY 50 -> NIFTY)
                 canonical_symbol = normalize_symbol(instrument.symbol)
 
+                # Extract market depth if available
+                depth_data = tick.get("depth")
+                market_depth = None
+                total_buy_qty = int(tick.get("total_buy_quantity", 0))
+                total_sell_qty = int(tick.get("total_sell_quantity", 0))
+
+                if depth_data:
+                    try:
+                        # Extract buy (bid) levels
+                        buy_levels = []
+                        for level in depth_data.get("buy", []):
+                            buy_levels.append(DepthLevel(
+                                quantity=int(level.get("quantity", 0)),
+                                price=float(level.get("price", 0.0)) / 100.0,  # Convert paise to rupees
+                                orders=int(level.get("orders", 0))
+                            ))
+
+                        # Extract sell (ask) levels
+                        sell_levels = []
+                        for level in depth_data.get("sell", []):
+                            sell_levels.append(DepthLevel(
+                                quantity=int(level.get("quantity", 0)),
+                                price=float(level.get("price", 0.0)) / 100.0,  # Convert paise to rupees
+                                orders=int(level.get("orders", 0))
+                            ))
+
+                        if buy_levels or sell_levels:
+                            market_depth = MarketDepth(buy=buy_levels, sell=sell_levels)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse market depth for {instrument.tradingsymbol}: {e}")
+
                 # Create a normalized instrument with canonical underlying symbol
                 normalized_instrument = Instrument(
                     symbol=canonical_symbol,  # Normalized underlying (NIFTY)
@@ -955,6 +1037,9 @@ class MultiAccountTickerLoop:
                     theta=theta,
                     vega=vega,
                     timestamp=int(tick.get("timestamp", int(time.time()))),
+                    depth=market_depth,
+                    total_buy_quantity=total_buy_qty,
+                    total_sell_quantity=total_sell_qty,
                 )
                 await publish_option_snapshot(snapshot)
 
