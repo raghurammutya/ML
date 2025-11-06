@@ -134,10 +134,91 @@ LABEL_COLORS: Dict[str, str] = {
     "Bullish": "#00E676",   # bright green
     "Bearish": "#FF1744",   # bright red
     "Neutral": "#9CA3AF",   # neutral grey
-    # Optional extras (kept, but won’t be used unless you emit those labels):
+    # Optional extras (kept, but won't be used unless you emit those labels):
     "Reversal": "#EAB308",
     "Breakout": "#3B82F6",
 }
+
+
+def _aggregate_liquidity_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract and aggregate liquidity metrics from row data.
+
+    This function is called before writing to the database to prepare
+    aggregated liquidity metrics from ticker service tick data.
+
+    Args:
+        row: Row dictionary containing 'liquidity' key from ticker service
+
+    Returns:
+        Dictionary with aggregated liquidity metrics ready for database insertion
+    """
+    from collections import Counter
+
+    liquidity = row.get("liquidity", {})
+
+    if not liquidity:
+        # Return None for all columns if no liquidity data
+        return {
+            "liquidity_score_avg": None,
+            "liquidity_score_min": None,
+            "liquidity_tier": None,
+            "spread_abs_avg": None,
+            "spread_pct_avg": None,
+            "spread_pct_max": None,
+            "depth_imbalance_pct_avg": None,
+            "book_pressure_avg": None,
+            "total_bid_quantity_avg": None,
+            "total_ask_quantity_avg": None,
+            "depth_at_best_bid_avg": None,
+            "depth_at_best_ask_avg": None,
+            "microprice_avg": None,
+            "market_impact_100_avg": None,
+            "is_illiquid": None,
+            "illiquid_tick_count": None,
+            "total_tick_count": None,
+        }
+
+    # For single-row insert (real-time ticks), liquidity is already computed per tick
+    # We just extract the values directly
+    score = liquidity.get("score")
+    tier = liquidity.get("tier")
+    spread_pct = liquidity.get("spread_pct")
+    spread_abs = liquidity.get("spread_abs")
+    depth_imbalance_pct = liquidity.get("depth_imbalance_pct")
+    book_pressure = liquidity.get("book_pressure")
+    total_bid_qty = liquidity.get("total_bid_quantity")
+    total_ask_qty = liquidity.get("total_ask_quantity")
+    depth_best_bid = liquidity.get("depth_at_best_bid")
+    depth_best_ask = liquidity.get("depth_at_best_ask")
+    microprice = liquidity.get("microprice")
+    market_impact_100 = liquidity.get("market_impact_cost_100")
+
+    # For tick-level data, we treat each tick as a sample of size 1
+    is_illiquid = (score < 40) if score is not None else None
+    illiquid_tick_count = 1 if is_illiquid else 0
+    total_tick_count = 1
+
+    return {
+        "liquidity_score_avg": score,
+        "liquidity_score_min": score,  # Same as avg for single tick
+        "liquidity_tier": tier,
+        "spread_abs_avg": spread_abs,
+        "spread_pct_avg": spread_pct,
+        "spread_pct_max": spread_pct,  # Same as avg for single tick
+        "depth_imbalance_pct_avg": depth_imbalance_pct,
+        "book_pressure_avg": book_pressure,
+        "total_bid_quantity_avg": total_bid_qty,
+        "total_ask_quantity_avg": total_ask_qty,
+        "depth_at_best_bid_avg": depth_best_bid,
+        "depth_at_best_ask_avg": depth_best_ask,
+        "microprice_avg": microprice,
+        "market_impact_100_avg": market_impact_100,
+        "is_illiquid": is_illiquid,
+        "illiquid_tick_count": illiquid_tick_count,
+        "total_tick_count": total_tick_count,
+    }
+
 
 FO_STRIKE_TABLES: Dict[str, str] = {
     # 1min: Base table with all columns including call_oi_sum and put_oi_sum
@@ -685,9 +766,36 @@ class DataManager:
                 call_count,
                 put_count,
                 call_oi_sum,
-                put_oi_sum
+                put_oi_sum,
+                call_rho_per_1pct_avg,
+                put_rho_per_1pct_avg,
+                call_intrinsic_avg,
+                put_intrinsic_avg,
+                call_extrinsic_avg,
+                put_extrinsic_avg,
+                call_theta_daily_avg,
+                put_theta_daily_avg,
+                call_model_price_avg,
+                put_model_price_avg,
+                liquidity_score_avg,
+                liquidity_score_min,
+                liquidity_tier,
+                spread_abs_avg,
+                spread_pct_avg,
+                spread_pct_max,
+                depth_imbalance_pct_avg,
+                book_pressure_avg,
+                total_bid_quantity_avg,
+                total_ask_quantity_avg,
+                depth_at_best_bid_avg,
+                depth_at_best_ask_avg,
+                microprice_avg,
+                market_impact_100_avg,
+                is_illiquid,
+                illiquid_tick_count,
+                total_tick_count
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49
             )
             ON CONFLICT (symbol, expiry, timeframe, bucket_time, strike)
             DO UPDATE SET
@@ -708,6 +816,33 @@ class DataManager:
                 put_count = EXCLUDED.put_count,
                 call_oi_sum = EXCLUDED.call_oi_sum,
                 put_oi_sum = EXCLUDED.put_oi_sum,
+                call_rho_per_1pct_avg = EXCLUDED.call_rho_per_1pct_avg,
+                put_rho_per_1pct_avg = EXCLUDED.put_rho_per_1pct_avg,
+                call_intrinsic_avg = EXCLUDED.call_intrinsic_avg,
+                put_intrinsic_avg = EXCLUDED.put_intrinsic_avg,
+                call_extrinsic_avg = EXCLUDED.call_extrinsic_avg,
+                put_extrinsic_avg = EXCLUDED.put_extrinsic_avg,
+                call_theta_daily_avg = EXCLUDED.call_theta_daily_avg,
+                put_theta_daily_avg = EXCLUDED.put_theta_daily_avg,
+                call_model_price_avg = EXCLUDED.call_model_price_avg,
+                put_model_price_avg = EXCLUDED.put_model_price_avg,
+                liquidity_score_avg = EXCLUDED.liquidity_score_avg,
+                liquidity_score_min = EXCLUDED.liquidity_score_min,
+                liquidity_tier = EXCLUDED.liquidity_tier,
+                spread_abs_avg = EXCLUDED.spread_abs_avg,
+                spread_pct_avg = EXCLUDED.spread_pct_avg,
+                spread_pct_max = EXCLUDED.spread_pct_max,
+                depth_imbalance_pct_avg = EXCLUDED.depth_imbalance_pct_avg,
+                book_pressure_avg = EXCLUDED.book_pressure_avg,
+                total_bid_quantity_avg = EXCLUDED.total_bid_quantity_avg,
+                total_ask_quantity_avg = EXCLUDED.total_ask_quantity_avg,
+                depth_at_best_bid_avg = EXCLUDED.depth_at_best_bid_avg,
+                depth_at_best_ask_avg = EXCLUDED.depth_at_best_ask_avg,
+                microprice_avg = EXCLUDED.microprice_avg,
+                market_impact_100_avg = EXCLUDED.market_impact_100_avg,
+                is_illiquid = EXCLUDED.is_illiquid,
+                illiquid_tick_count = EXCLUDED.illiquid_tick_count,
+                total_tick_count = EXCLUDED.total_tick_count,
                 updated_at = NOW()
         """
         records = []
@@ -716,6 +851,10 @@ class DataManager:
             put = row["put"]
             call_oi = call.get("oi") if isinstance(call, dict) else None
             put_oi = put.get("oi") if isinstance(put, dict) else None
+
+            # Aggregate liquidity metrics
+            liq_metrics = _aggregate_liquidity_metrics(row)
+
             records.append((
                 row["bucket_time"],
                 _normalize_timeframe(row["timeframe"]),
@@ -739,6 +878,34 @@ class DataManager:
                 put.get("count"),
                 float(call_oi) if call_oi is not None else None,
                 float(put_oi) if put_oi is not None else None,
+                call.get("rho"),
+                put.get("rho"),
+                call.get("intrinsic"),
+                put.get("intrinsic"),
+                call.get("extrinsic"),
+                put.get("extrinsic"),
+                call.get("theta_daily"),
+                put.get("theta_daily"),
+                call.get("model_price"),
+                put.get("model_price"),
+                # Liquidity metrics
+                liq_metrics.get("liquidity_score_avg"),
+                liq_metrics.get("liquidity_score_min"),
+                liq_metrics.get("liquidity_tier"),
+                liq_metrics.get("spread_abs_avg"),
+                liq_metrics.get("spread_pct_avg"),
+                liq_metrics.get("spread_pct_max"),
+                liq_metrics.get("depth_imbalance_pct_avg"),
+                liq_metrics.get("book_pressure_avg"),
+                liq_metrics.get("total_bid_quantity_avg"),
+                liq_metrics.get("total_ask_quantity_avg"),
+                liq_metrics.get("depth_at_best_bid_avg"),
+                liq_metrics.get("depth_at_best_ask_avg"),
+                liq_metrics.get("microprice_avg"),
+                liq_metrics.get("market_impact_100_avg"),
+                liq_metrics.get("is_illiquid"),
+                liq_metrics.get("illiquid_tick_count"),
+                liq_metrics.get("total_tick_count"),
             ))
 
         # Sort by conflict keys: (symbol, expiry, timeframe, bucket_time, strike)

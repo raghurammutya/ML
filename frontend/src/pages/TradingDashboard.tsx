@@ -45,6 +45,8 @@ const MONEYNESS_BUCKETS = [
   ...Array.from({ length: 10 }, (_, index) => `ITM${index + 1}`),
 ]
 
+const FALLBACK_EXPIRIES = ['2025-11-07', '2025-11-14', '2025-11-28']
+
 type RightPanePageType = 'futures' | 'call-strike' | 'put-strike' | 'straddle-strike'
 
 interface RightPanePage {
@@ -163,18 +165,20 @@ const TradingDashboard: React.FC = () => {
   const createDefaultFilterState = useCallback(
     (_symbol: string, previous?: SymbolFilterState): SymbolFilterState => {
       const baseExpiries = expiryValues.length ? [...expiryValues] : previous?.selectedExpiries ?? []
-      const sanitizedExpiries = (previous?.selectedExpiries ?? baseExpiries).filter((value) =>
-        baseExpiries.includes(value),
+      const fallbackExpiries = baseExpiries.length ? baseExpiries : FALLBACK_EXPIRIES
+      const sanitizedExpiries = (previous?.selectedExpiries ?? fallbackExpiries).filter((value) =>
+        fallbackExpiries.includes(value),
       )
-      const selectedExpiries = sanitizedExpiries.length ? sanitizedExpiries : baseExpiries
-      const sanitizedMoneyness = (previous?.selectedMoneyness ?? MONEYNESS_BUCKETS).filter((value) =>
+      const selectedExpiries = sanitizedExpiries.length ? sanitizedExpiries : fallbackExpiries
+      const fallbackMoneyness = ['ATM']
+      const sanitizedMoneyness = (previous?.selectedMoneyness ?? fallbackMoneyness).filter((value) =>
         MONEYNESS_BUCKETS.includes(value),
       )
-      const selectedMoneyness = sanitizedMoneyness.length ? sanitizedMoneyness : [...MONEYNESS_BUCKETS]
+      const selectedMoneyness = sanitizedMoneyness.length ? sanitizedMoneyness : fallbackMoneyness
       const rightExpiry =
-        previous?.rightExpiry && baseExpiries.includes(previous.rightExpiry)
+        previous?.rightExpiry && fallbackExpiries.includes(previous.rightExpiry)
           ? previous.rightExpiry
-          : baseExpiries[0] ?? null
+          : fallbackExpiries[0] ?? null
       return {
         selectedExpiries,
         selectedMoneyness,
@@ -232,7 +236,7 @@ const TradingDashboard: React.FC = () => {
   const handleMoneynessFilterChange = useCallback(
     (values: string[]) => {
       const valid = values.filter((value) => MONEYNESS_BUCKETS.includes(value))
-      const nextValues = valid.length ? valid : [...MONEYNESS_BUCKETS]
+      const nextValues = valid.length ? valid : ['ATM']
       setSymbolFilters((prev) => {
         const base = createDefaultFilterState(activeTab, prev[activeTab])
         return {

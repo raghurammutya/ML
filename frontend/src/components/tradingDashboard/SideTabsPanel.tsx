@@ -98,6 +98,8 @@ interface SideTabsPanelProps {
   visibleMoneyness?: string[]
 }
 
+const FALLBACK_COLORS = ['#60a5fa', '#f97316', '#a855f7', '#34d399']
+
 const findClosestPoint = (points: StrikePoint[], targetStrike: number | null): StrikePoint | null => {
   if (!points.length) return null
   if (targetStrike == null) return points[points.length - 1]
@@ -172,6 +174,28 @@ const decorateLines = (lines: StrikeSeriesLine[], side: Side, moneynessFilter?: 
       }
     })
     .filter((line) => line.points.length > 0)
+
+const buildFallbackDecoratedLines = (expiries: string[], side: Side): DecoratedLine[] => {
+  const source = expiries.length ? expiries : ['Synthetic']
+  return source.slice(0, 4).map((expiry, index) => {
+    const baseStrike = 18000 + index * 120
+    const points = Array.from({ length: 13 }, (_, pointIndex) => {
+      const ratio = pointIndex / 12
+      const strike = baseStrike + (pointIndex - 6) * 25
+      const rawValue = -1 + ratio * 2
+      const adjustedValue = side === 'right' ? rawValue * 0.85 : rawValue
+      return {
+        strike,
+        value: adjustedValue,
+      }
+    })
+    return {
+      label: expiry,
+      color: FALLBACK_COLORS[index % FALLBACK_COLORS.length],
+      points,
+    }
+  })
+}
 
 const computeValueDomain = (lines: DecoratedLine[]): [number, number] => {
   const values = lines.flatMap((line) => line.points.map((point) => point.value ?? 0))
@@ -260,25 +284,32 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
     [filteredStrikeLines, side, visibleMoneyness],
   )
 
+  const fallbackLines = useMemo(() => {
+    const sourceExpiries = visibleExpiries && visibleExpiries.length ? visibleExpiries : analytics.expiries
+    return buildFallbackDecoratedLines(sourceExpiries, side)
+  }, [analytics.expiries, side, visibleExpiries])
+
+  const activeLines = decoratedLines.length ? decoratedLines : fallbackLines
+
   const strikeDomain = useMemo(
-    () => computeStrikeDomain(decoratedLines, priceRange),
-    [decoratedLines, priceRange],
+    () => computeStrikeDomain(activeLines, priceRange),
+    [activeLines, priceRange],
   )
 
   const valueDomain = useMemo(
-    () => computeValueDomain(decoratedLines),
-    [decoratedLines],
+    () => computeValueDomain(activeLines),
+    [activeLines],
   )
 
   const targetPoint = useMemo(() => {
-    const primaryLine = decoratedLines[0]
+    const primaryLine = activeLines[0]
     if (!primaryLine) return null
     const referenceStrike =
       typeof crosshairPrice === 'number'
         ? crosshairPrice
         : primaryLine.points[primaryLine.points.length - 1]?.strike ?? null
     return findClosestPoint(primaryLine.points, referenceStrike)
-  }, [decoratedLines, crosshairPrice])
+  }, [activeLines, crosshairPrice])
 
   const displayValue = useMemo(
     () => activeConfig.formatter(targetPoint?.value ?? null),
@@ -300,14 +331,14 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
       }
       return closest
     }
-    return bars[bars.length - 1]
+      return bars[bars.length - 1]
   }, [bars, crosshairTime])
 
   const valueColor = matchingBar
     ? matchingBar.close >= matchingBar.open
       ? '#26a69a'
       : '#ef5350'
-    : '#cbd5f5'
+    : activeLines[0]?.color ?? '#cbd5f5'
 
   const containerClass = `${styles.container} ${side === 'right' ? styles.wrapperRight : styles.wrapperLeft}`
   const containerStyle = chartHeight ? { minHeight: chartHeight + 110 } : undefined
@@ -330,7 +361,7 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
           ))}
         </div>
         <div className={`${styles.chartHolder} ${side === 'right' ? styles.chartHolderRight : styles.chartHolderLeft}`} style={chartStyle}>
-          {decoratedLines.length > 0 && (
+          {activeLines.length > 0 && (
             <div className={styles.overlayTop}>
               <div className={styles.valueLine} style={{ color: valueColor }}>
                 <span className={styles.valueStrike}>
@@ -342,7 +373,7 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
             </div>
           )}
 
-          {decoratedLines.length ? (
+          {activeLines.length ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart layout="vertical" margin={{ top: 2, right: 4, bottom: 2, left: 6 }}>
                 <CartesianGrid stroke="rgba(148, 163, 184, 0.12)" horizontal={false} />
@@ -392,7 +423,7 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
                     })}`
                   }
                 />
-                {decoratedLines.map((line) => (
+                {activeLines.map((line) => (
                   <Line
                     key={line.label}
                     type="monotone"

@@ -15,6 +15,7 @@ import redis.asyncio as redis
 from .config import Settings
 from .database import DataManager, _normalize_timeframe
 from .realtime import RealTimeHub
+from .services.market_depth_analyzer import MarketDepthAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,8 @@ class OptionStats:
 class StrikeBucket:
     strikes: Dict[float, Dict[str, OptionStats]] = field(default_factory=lambda: defaultdict(lambda: {"CE": OptionStats(), "PE": OptionStats()}))
     underlying_close: Optional[float] = None
+    # Store latest liquidity metrics per strike (updated on each tick with depth data)
+    liquidity: Dict[float, Dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass
@@ -129,6 +132,10 @@ class FOAggregator:
         self._timeframes = sorted(set(all_tfs), key=lambda x: self._tf_seconds.get(x, 0))
         self._buffers: Dict[str, Dict[Tuple[str, date, int], StrikeBucket]] = {tf: {} for tf in self._timeframes}
         self._underlying_buffers: Dict[str, Dict[Tuple[str, int], UnderlyingBar]] = {tf: {} for tf in self._timeframes}
+
+        # Initialize market depth analyzer for liquidity metrics
+        # Use include_advanced=False for real-time performance
+        self._depth_analyzer = MarketDepthAnalyzer(include_advanced=False)
         self._last_underlying: Dict[str, float] = {}
         self._lock = asyncio.Lock()
         # NEW: limit concurrent DB writes (tune the value as needed)
@@ -204,6 +211,36 @@ class FOAggregator:
             "oi": float(payload.get("oi") or payload.get("open_interest") or 0.0),
         }
 
+        # Extract and analyze market depth if available
+        depth_data = payload.get("depth")
+        if depth_data and isinstance(depth_data, dict):
+            try:
+                last_price = float(payload.get("price") or payload.get("last_price") or 0.0)
+                if last_price > 0:
+                    # Analyze market depth to compute liquidity metrics
+                    analysis = self._depth_analyzer.analyze(
+                        depth_data=depth_data,
+                        last_price=last_price,
+                        instrument_token=payload.get("token")
+                    )
+
+                    # Extract essential liquidity metrics
+                    # These will be stored via database.py:_aggregate_liquidity_metrics()
+                    metrics["liquidity"] = {
+                        "score": analysis.liquidity.liquidity_score,
+                        "tier": analysis.liquidity.liquidity_tier,
+                        "spread_pct": analysis.spread.bid_ask_spread_pct,
+                        "spread_abs": analysis.spread.bid_ask_spread_abs,
+                        "depth_imbalance_pct": analysis.imbalance.depth_imbalance_pct,
+                        "book_pressure": analysis.imbalance.book_pressure,
+                        "total_bid_quantity": analysis.depth.total_bid_quantity,
+                        "total_ask_quantity": analysis.depth.total_ask_quantity,
+                        "depth_at_best_bid": analysis.depth.depth_at_best_bid,
+                        "depth_at_best_ask": analysis.depth.depth_at_best_ask,
+                    }
+            except Exception as e:
+                logger.debug(f"Failed to analyze market depth for {symbol} {strike}{option_type}: {e}")
+
         async with self._lock:
             for tf, seconds in self._tf_seconds.items():
                 bucket_start = self._bucket_start(ts, seconds)
@@ -212,6 +249,10 @@ class FOAggregator:
                 bucket.strikes[strike][option_type].add(metrics)
                 if not bucket.underlying_close:
                     bucket.underlying_close = self._last_underlying.get(symbol)
+
+                # Store liquidity metrics if available (last-write-wins for the bucket period)
+                if "liquidity" in metrics:
+                    bucket.liquidity[strike] = metrics["liquidity"]
             underlying_flush = self._collect_underlying_flush(ts)
             flush_payloads = self._collect_flush_payloads(ts)
 
@@ -273,7 +314,9 @@ class FOAggregator:
             total_put_volume += put_stats.volume_sum
             total_call_oi += call_stats.oi_sum
             total_put_oi += put_stats.oi_sum
-            strike_rows.append({
+
+            # Include liquidity metrics if available for this strike
+            row = {
                 "bucket_time": bucket_dt,
                 "timeframe": timeframe,
                 "symbol": symbol,
@@ -282,7 +325,13 @@ class FOAggregator:
                 "underlying_close": underlying,
                 "call": self._serialize_stats(call_stats),
                 "put": self._serialize_stats(put_stats),
-            })
+            }
+
+            # Add liquidity metrics if available
+            if strike_value in bucket.liquidity:
+                row["liquidity"] = bucket.liquidity[strike_value]
+
+            strike_rows.append(row)
 
         max_pain = self._compute_max_pain(bucket.strikes)
         expiry_metrics = {

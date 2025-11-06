@@ -23,7 +23,7 @@ router = APIRouter(prefix="/fo", tags=["fo"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-SUPPORTED_INDICATORS = {"iv", "delta", "gamma", "theta", "vega", "oi", "pcr", "max_pain"}
+SUPPORTED_INDICATORS = {"iv", "delta", "gamma", "theta", "vega", "rho", "oi", "pcr", "max_pain"}
 SUPPORTED_SEGMENTS = {"NFO-OPT", "NFO-FUT", "CDS-OPT", "CDS-FUT", "MCX-OPT", "MCX-FUT"}
 SUPPORTED_OPTION_TYPES = {"CE", "PE"}
 SUPPORTED_INSTRUMENT_TYPES = {"CE", "PE", "FUT"}
@@ -741,6 +741,18 @@ async def strike_distribution(
             if row.get("call_oi_sum"):
                 call_obj["oi"] = int(float(row["call_oi_sum"]))
 
+            # Enhanced Greeks
+            if row.get("call_rho_per_1pct_avg"):
+                call_obj["rho"] = round(float(row["call_rho_per_1pct_avg"]), 6)
+            if row.get("call_intrinsic_avg"):
+                call_obj["intrinsic"] = round(float(row["call_intrinsic_avg"]), 2)
+            if row.get("call_extrinsic_avg"):
+                call_obj["extrinsic"] = round(float(row["call_extrinsic_avg"]), 2)
+            if row.get("call_theta_daily_avg"):
+                call_obj["theta_daily"] = round(float(row["call_theta_daily_avg"]), 4)
+            if row.get("call_model_price_avg"):
+                call_obj["model_price"] = round(float(row["call_model_price_avg"]), 2)
+
             # Build put strike object with all Greeks
             put_obj = {"strike": strike}
 
@@ -756,6 +768,18 @@ async def strike_distribution(
                 put_obj["vega"] = round(float(row["put_vega_avg"]), 4)
             if row.get("put_oi_sum"):
                 put_obj["oi"] = int(float(row["put_oi_sum"]))
+
+            # Enhanced Greeks
+            if row.get("put_rho_per_1pct_avg"):
+                put_obj["rho"] = round(float(row["put_rho_per_1pct_avg"]), 6)
+            if row.get("put_intrinsic_avg"):
+                put_obj["intrinsic"] = round(float(row["put_intrinsic_avg"]), 2)
+            if row.get("put_extrinsic_avg"):
+                put_obj["extrinsic"] = round(float(row["put_extrinsic_avg"]), 2)
+            if row.get("put_theta_daily_avg"):
+                put_obj["theta_daily"] = round(float(row["put_theta_daily_avg"]), 4)
+            if row.get("put_model_price_avg"):
+                put_obj["model_price"] = round(float(row["put_model_price_avg"]), 2)
 
             call_strikes.append(call_obj)
             put_strikes.append(put_obj)

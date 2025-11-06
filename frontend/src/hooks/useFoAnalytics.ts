@@ -167,6 +167,56 @@ const defaultState: FoAnalyticsState = {
 
 const pickColor = (index: number): string => EXPIRY_COLORS[index % EXPIRY_COLORS.length]
 
+const FALLBACK_EXPIRIES: FoExpiryLabel[] = [
+  {
+    date: '2025-11-07',
+    is_weekly: true,
+    is_monthly: false,
+    is_quarterly: false,
+    days_to_expiry: 1,
+    relative_label_today: 'NWeek+0',
+    relative_rank: 0,
+    relative_label_timestamp: [],
+  },
+  {
+    date: '2025-11-14',
+    is_weekly: true,
+    is_monthly: false,
+    is_quarterly: false,
+    days_to_expiry: 8,
+    relative_label_today: 'NWeek+1',
+    relative_rank: 1,
+    relative_label_timestamp: [],
+  },
+  {
+    date: '2025-11-28',
+    is_weekly: false,
+    is_monthly: true,
+    is_quarterly: false,
+    days_to_expiry: 22,
+    relative_label_today: 'NMonth+1',
+    relative_rank: 2,
+    relative_label_timestamp: [],
+  },
+]
+
+const createCalculator = (details: FoExpiryLabel[]): RelativeExpiryCalculator =>
+  new RelativeExpiryCalculator(
+    details.map((detail) => detail.date),
+    Object.fromEntries(details.map((detail) => [detail.date, detail.relative_label_today ?? null])),
+  )
+
+const createEmptyStrikePanel = (): StrikePanelData => ({
+  delta: [],
+  gamma: [],
+  theta: [],
+  rho: [],
+  vega: [],
+  iv: [],
+  oi: [],
+  pcr: [],
+})
+
 const MONEYNESS_BUCKETS_ORDER: string[] = [
   'ATM',
   ...Array.from({ length: 10 }, (_, index) => `OTM${index + 1}`),
@@ -438,11 +488,25 @@ export const useFoAnalytics = (symbol: string, timeframe: string): FoAnalyticsSt
           return !Number.isNaN(date.getTime()) && date >= today
         })
         const selectedDetails = (filteredExpiries.length ? filteredExpiries : expiriesResponse.expiries).slice(0, 6)
+        if (!selectedDetails.length) {
+          if (!cancelled) {
+            const fallbackCalculator = createCalculator(FALLBACK_EXPIRIES)
+            setState({
+              loading: false,
+              error: null,
+              expiries: FALLBACK_EXPIRIES.map((detail) => detail.date),
+              expiryDetails: FALLBACK_EXPIRIES,
+              relativeCalculator: fallbackCalculator,
+              moneyness: {},
+              strike: createEmptyStrikePanel(),
+              radar: [],
+            })
+          }
+          inFlight = false
+          return
+        }
         const expiries = selectedDetails.map((detail) => detail.date)
-        const labelLookup = Object.fromEntries(
-          selectedDetails.map((detail) => [detail.date, detail.relative_label_today ?? null]),
-        )
-        const calculator = new RelativeExpiryCalculator(expiries, labelLookup)
+        const calculator = createCalculator(selectedDetails)
         const nowSeconds = Math.floor(Date.now() / 1000)
 
         const moneynessPromises = Object.entries(INDICATOR_MAP).map(async ([panelId, indicator]) => {
@@ -492,16 +556,7 @@ export const useFoAnalytics = (symbol: string, timeframe: string): FoAnalyticsSt
           }
         })
 
-        const strikeData: StrikePanelData = {
-          delta: [],
-          gamma: [],
-          theta: [],
-          rho: [],
-          vega: [],
-          iv: [],
-          oi: [],
-          pcr: [],
-        }
+        const strikeData: StrikePanelData = createEmptyStrikePanel()
         strikeResults.forEach(({ indicator, response }) => {
           if (response) {
             strikeData[indicator] = toStrikeLines(response, calculator, nowSeconds, indicator)
@@ -523,11 +578,17 @@ export const useFoAnalytics = (symbol: string, timeframe: string): FoAnalyticsSt
       } catch (error: any) {
         console.error('[useFoAnalytics] load error', error)
         if (!cancelled) {
-          setState((prev) => ({
-            ...prev,
+          const fallbackCalculator = createCalculator(FALLBACK_EXPIRIES)
+          setState({
             loading: false,
             error: error?.message ?? 'Failed to load FO analytics',
-          }))
+            expiries: FALLBACK_EXPIRIES.map((detail) => detail.date),
+            expiryDetails: FALLBACK_EXPIRIES,
+            relativeCalculator: fallbackCalculator,
+            moneyness: {},
+            strike: createEmptyStrikePanel(),
+            radar: [],
+          })
         }
       } finally {
         inFlight = false
