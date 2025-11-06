@@ -20,7 +20,15 @@ from loguru import logger
 
 try:
     from py_vollib.black_scholes import black_scholes
+    from py_vollib.black_scholes_merton import black_scholes_merton
     from py_vollib.black_scholes.greeks.analytical import delta, gamma, theta, vega, rho
+    from py_vollib.black_scholes_merton.greeks.analytical import (
+        delta as delta_bsm,
+        gamma as gamma_bsm,
+        theta as theta_bsm,
+        vega as vega_bsm,
+        rho as rho_bsm,
+    )
     from py_vollib.black_scholes.implied_volatility import implied_volatility
     VOLLIB_AVAILABLE = True
 except ImportError:
@@ -246,6 +254,298 @@ class GreeksCalculator:
         except Exception as e:
             logger.error(f"Error calculating Greeks: {e}")
             return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
+
+    def bs_greeks_and_values(
+        self,
+        flag: str,
+        S: float,
+        K: float,
+        t: float,
+        r: float,
+        sigma: float,
+        option_price: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """
+        Calculate option Greeks and values using Black-Scholes model.
+
+        Args:
+            flag: 'c' for call, 'p' for put
+            S: Spot price of underlying
+            K: Strike price
+            t: Time to expiry in years
+            r: Risk-free interest rate (continuous, as decimal)
+            sigma: Volatility (as decimal)
+            option_price: Market price (optional, for calculating extrinsic value)
+
+        Returns:
+            Dictionary with:
+            - model_price: Theoretical price from Black-Scholes
+            - rho_annual: Rho (annual)
+            - rho_per_1pct_rate_change: Rho per 1% rate change
+            - theta_annual: Theta (annual)
+            - theta_daily_decay: Theta per day
+            - intrinsic: Intrinsic value
+            - extrinsic: Extrinsic value (market_price - intrinsic if provided)
+            - delta, gamma, vega: Standard Greeks
+        """
+        if not VOLLIB_AVAILABLE:
+            return {
+                "model_price": 0.0,
+                "rho_annual": 0.0,
+                "rho_per_1pct_rate_change": 0.0,
+                "theta_annual": 0.0,
+                "theta_daily_decay": 0.0,
+                "intrinsic": 0.0,
+                "extrinsic": 0.0,
+                "delta": 0.0,
+                "gamma": 0.0,
+                "vega": 0.0,
+            }
+
+        try:
+            # Input validation
+            if S <= 0 or K <= 0 or t < 0 or sigma <= 0:
+                logger.debug(f"BS: Invalid inputs S={S}, K={K}, t={t}, sigma={sigma}")
+                return {
+                    "model_price": 0.0,
+                    "rho_annual": 0.0,
+                    "rho_per_1pct_rate_change": 0.0,
+                    "theta_annual": 0.0,
+                    "theta_daily_decay": 0.0,
+                    "intrinsic": 0.0,
+                    "extrinsic": 0.0,
+                    "delta": 0.0,
+                    "gamma": 0.0,
+                    "vega": 0.0,
+                }
+
+            # Normalize flag
+            flag = flag.lower()
+            if flag not in ('c', 'p'):
+                flag = 'c'
+
+            # Calculate intrinsic value
+            if flag == 'c':
+                intrinsic = max(0.0, S - K)
+            else:  # put
+                intrinsic = max(0.0, K - S)
+
+            # Calculate model price
+            if t > 0:
+                model_price = black_scholes(flag, S, K, t, r, sigma)
+            else:
+                # At expiry, option value equals intrinsic value
+                model_price = intrinsic
+
+            # Calculate extrinsic value
+            if option_price is not None and option_price > 0:
+                extrinsic = max(0.0, option_price - intrinsic)
+            else:
+                extrinsic = max(0.0, model_price - intrinsic)
+
+            # Calculate Greeks
+            if t > 0:
+                # Rho (annual - per unit change in r)
+                rho_annual = rho(flag, S, K, t, r, sigma)
+                # Rho per 1% rate change = rho_annual / 100
+                rho_per_1pct = rho_annual / 100.0
+
+                # Theta (annual - per year)
+                theta_annual = theta(flag, S, K, t, r, sigma)
+                # Theta daily decay = theta_annual / 365
+                theta_daily = theta_annual / 365.0
+
+                # Other Greeks
+                delta_val = delta(flag, S, K, t, r, sigma)
+                gamma_val = gamma(flag, S, K, t, r, sigma)
+                vega_val = vega(flag, S, K, t, r, sigma) / 100.0  # per 1% vol change
+            else:
+                # At expiry
+                if flag == 'c':
+                    delta_val = 1.0 if S > K else 0.0
+                else:
+                    delta_val = -1.0 if S < K else 0.0
+                gamma_val = 0.0
+                theta_annual = 0.0
+                theta_daily = 0.0
+                vega_val = 0.0
+                rho_annual = 0.0
+                rho_per_1pct = 0.0
+
+            return {
+                "model_price": model_price,
+                "rho_annual": rho_annual,
+                "rho_per_1pct_rate_change": rho_per_1pct,
+                "theta_annual": theta_annual,
+                "theta_daily_decay": theta_daily,
+                "intrinsic": intrinsic,
+                "extrinsic": extrinsic,
+                "delta": delta_val,
+                "gamma": gamma_val,
+                "vega": vega_val,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in bs_greeks_and_values: {e}")
+            return {
+                "model_price": 0.0,
+                "rho_annual": 0.0,
+                "rho_per_1pct_rate_change": 0.0,
+                "theta_annual": 0.0,
+                "theta_daily_decay": 0.0,
+                "intrinsic": 0.0,
+                "extrinsic": 0.0,
+                "delta": 0.0,
+                "gamma": 0.0,
+                "vega": 0.0,
+            }
+
+    def bsm_greeks_and_values(
+        self,
+        flag: str,
+        S: float,
+        K: float,
+        t: float,
+        r: float,
+        sigma: float,
+        q: float,
+        option_price: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """
+        Calculate option Greeks and values using Black-Scholes-Merton model (with dividends).
+
+        Args:
+            flag: 'c' for call, 'p' for put
+            S: Spot price of underlying
+            K: Strike price
+            t: Time to expiry in years
+            r: Risk-free interest rate (continuous, as decimal)
+            sigma: Volatility (as decimal)
+            q: Dividend yield (continuous, as decimal)
+            option_price: Market price (optional, for calculating extrinsic value)
+
+        Returns:
+            Dictionary with:
+            - model_price: Theoretical price from Black-Scholes-Merton
+            - rho_annual: Rho (annual)
+            - rho_per_1pct_rate_change: Rho per 1% rate change
+            - theta_annual: Theta (annual)
+            - theta_daily_decay: Theta per day
+            - intrinsic: Intrinsic value
+            - extrinsic: Extrinsic value (market_price - intrinsic if provided)
+            - delta, gamma, vega: Standard Greeks
+        """
+        if not VOLLIB_AVAILABLE:
+            return {
+                "model_price": 0.0,
+                "rho_annual": 0.0,
+                "rho_per_1pct_rate_change": 0.0,
+                "theta_annual": 0.0,
+                "theta_daily_decay": 0.0,
+                "intrinsic": 0.0,
+                "extrinsic": 0.0,
+                "delta": 0.0,
+                "gamma": 0.0,
+                "vega": 0.0,
+            }
+
+        try:
+            # Input validation
+            if S <= 0 or K <= 0 or t < 0 or sigma <= 0:
+                logger.debug(f"BSM: Invalid inputs S={S}, K={K}, t={t}, sigma={sigma}")
+                return {
+                    "model_price": 0.0,
+                    "rho_annual": 0.0,
+                    "rho_per_1pct_rate_change": 0.0,
+                    "theta_annual": 0.0,
+                    "theta_daily_decay": 0.0,
+                    "intrinsic": 0.0,
+                    "extrinsic": 0.0,
+                    "delta": 0.0,
+                    "gamma": 0.0,
+                    "vega": 0.0,
+                }
+
+            # Normalize flag
+            flag = flag.lower()
+            if flag not in ('c', 'p'):
+                flag = 'c'
+
+            # Calculate intrinsic value
+            if flag == 'c':
+                intrinsic = max(0.0, S - K)
+            else:  # put
+                intrinsic = max(0.0, K - S)
+
+            # Calculate model price
+            if t > 0:
+                model_price = black_scholes_merton(flag, S, K, t, r, sigma, q)
+            else:
+                # At expiry, option value equals intrinsic value
+                model_price = intrinsic
+
+            # Calculate extrinsic value
+            if option_price is not None and option_price > 0:
+                extrinsic = max(0.0, option_price - intrinsic)
+            else:
+                extrinsic = max(0.0, model_price - intrinsic)
+
+            # Calculate Greeks
+            if t > 0:
+                # Rho (annual - per unit change in r)
+                rho_annual = rho_bsm(flag, S, K, t, r, sigma, q)
+                # Rho per 1% rate change = rho_annual / 100
+                rho_per_1pct = rho_annual / 100.0
+
+                # Theta (annual - per year)
+                theta_annual = theta_bsm(flag, S, K, t, r, sigma, q)
+                # Theta daily decay = theta_annual / 365
+                theta_daily = theta_annual / 365.0
+
+                # Other Greeks
+                delta_val = delta_bsm(flag, S, K, t, r, sigma, q)
+                gamma_val = gamma_bsm(flag, S, K, t, r, sigma, q)
+                vega_val = vega_bsm(flag, S, K, t, r, sigma, q) / 100.0  # per 1% vol change
+            else:
+                # At expiry
+                if flag == 'c':
+                    delta_val = 1.0 if S > K else 0.0
+                else:
+                    delta_val = -1.0 if S < K else 0.0
+                gamma_val = 0.0
+                theta_annual = 0.0
+                theta_daily = 0.0
+                vega_val = 0.0
+                rho_annual = 0.0
+                rho_per_1pct = 0.0
+
+            return {
+                "model_price": model_price,
+                "rho_annual": rho_annual,
+                "rho_per_1pct_rate_change": rho_per_1pct,
+                "theta_annual": theta_annual,
+                "theta_daily_decay": theta_daily,
+                "intrinsic": intrinsic,
+                "extrinsic": extrinsic,
+                "delta": delta_val,
+                "gamma": gamma_val,
+                "vega": vega_val,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in bsm_greeks_and_values: {e}")
+            return {
+                "model_price": 0.0,
+                "rho_annual": 0.0,
+                "rho_per_1pct_rate_change": 0.0,
+                "theta_annual": 0.0,
+                "theta_daily_decay": 0.0,
+                "intrinsic": 0.0,
+                "extrinsic": 0.0,
+                "delta": 0.0,
+                "gamma": 0.0,
+                "vega": 0.0,
+            }
 
     def calculate_option_greeks(
         self,
