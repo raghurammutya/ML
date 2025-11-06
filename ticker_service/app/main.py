@@ -29,6 +29,7 @@ from .subscription_store import SubscriptionRecord, subscription_store
 from .account_store import initialize_account_store, get_account_store
 from .jwt_auth import get_current_user, get_optional_user
 from .historical_greeks import HistoricalGreeksEnricher
+from .utils.symbol_utils import normalize_symbol
 
 settings = get_settings()
 
@@ -465,6 +466,9 @@ async def create_subscription(request: Request, payload: SubscriptionRequest) ->
     if not tradingsymbol:
         raise HTTPException(status_code=400, detail="Instrument metadata missing tradingsymbol/name")
 
+    # Normalize the symbol for consistency across all brokers
+    normalized_symbol = normalize_symbol(tradingsymbol)
+
     account_id = payload.account_id
     if account_id:
         accounts = ticker_loop.list_accounts()
@@ -473,7 +477,7 @@ async def create_subscription(request: Request, payload: SubscriptionRequest) ->
 
     await subscription_store.upsert(
         instrument_token=payload.instrument_token,
-        tradingsymbol=tradingsymbol,
+        tradingsymbol=normalized_symbol,  # Store normalized symbol
         segment=metadata.segment or "",
         requested_mode=requested_mode,
         account_id=account_id,
@@ -546,9 +550,14 @@ async def history(
         if isinstance(ts, datetime):
             candle["date"] = ts.isoformat()
 
+    # Normalize the symbol for consistency across all brokers
+    raw_symbol = metadata.tradingsymbol or metadata.name
+    normalized_symbol = normalize_symbol(raw_symbol) if raw_symbol else raw_symbol
+
     return {
         "instrument_token": instrument_token,
-        "tradingsymbol": metadata.tradingsymbol or metadata.name,
+        "symbol": normalized_symbol,  # Canonical symbol (e.g., NIFTY)
+        "tradingsymbol": raw_symbol,  # Original tradingsymbol from Kite (e.g., NIFTY 50)
         "segment": metadata.segment,
         "interval": interval,
         "from_ts": from_ts,

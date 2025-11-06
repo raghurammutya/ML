@@ -19,6 +19,7 @@ from .kite.client import KiteClient
 from .publisher import publish_option_snapshot, publish_underlying_bar
 from .schema import Instrument, OptionSnapshot
 from .greeks_calculator import GreeksCalculator
+from .utils.symbol_utils import normalize_symbol
 
 settings = get_settings()
 
@@ -862,8 +863,12 @@ class MultiAccountTickerLoop:
             # Route index/underlying instruments to underlying channel
             if instrument.segment == "INDICES":
                 last_price = float(tick.get("last_price") or 0.0)
+
+                # Normalize symbol to canonical form (NIFTY 50 -> NIFTY)
+                canonical_symbol = normalize_symbol(instrument.tradingsymbol)
+
                 bar = {
-                    "symbol": instrument.tradingsymbol,
+                    "symbol": canonical_symbol,
                     "instrument_token": instrument.instrument_token,
                     "last_price": last_price,
                     "volume": int(tick.get("volume_traded_today") or tick.get("volume") or 0),
@@ -872,7 +877,7 @@ class MultiAccountTickerLoop:
                 }
                 # Track underlying price for Greeks calculation
                 self._last_underlying_price = last_price
-                logger.info(f"GREEKS TEST: Underlying price updated to {last_price}")
+                logger.info(f"GREEKS TEST: Underlying {canonical_symbol} price updated to {last_price}")
                 await publish_underlying_bar(bar)
             else:
                 # Route option instruments to options channel
@@ -922,8 +927,25 @@ class MultiAccountTickerLoop:
                             e,
                         )
 
+                # Normalize the underlying symbol (e.g., NIFTY 50 -> NIFTY)
+                canonical_symbol = normalize_symbol(instrument.symbol)
+
+                # Create a normalized instrument with canonical underlying symbol
+                normalized_instrument = Instrument(
+                    symbol=canonical_symbol,  # Normalized underlying (NIFTY)
+                    instrument_token=instrument.instrument_token,
+                    tradingsymbol=instrument.tradingsymbol,  # Keep full option name as-is (NIFTY25NOV25000CE)
+                    segment=instrument.segment,
+                    exchange=instrument.exchange,
+                    strike=instrument.strike,
+                    expiry=instrument.expiry,
+                    instrument_type=instrument.instrument_type,
+                    lot_size=instrument.lot_size,
+                    tick_size=instrument.tick_size,
+                )
+
                 snapshot = OptionSnapshot(
-                    instrument=instrument,
+                    instrument=normalized_instrument,
                     last_price=market_price,
                     volume=int(tick.get("volume_traded_today") or tick.get("volume") or 0),
                     oi=int(tick.get("oi") or tick.get("open_interest") or 0),
