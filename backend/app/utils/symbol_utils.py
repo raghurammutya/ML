@@ -9,23 +9,24 @@ from typing import List, Set, Dict
 def normalize_symbol(symbol: str) -> str:
     """
     Canonicalize an incoming symbol string by trimming whitespace, removing
-    exchange prefixes and squashing spaces. Known aliases (e.g. NIFTY50) are
-    folded into their canonical counterparts, but other symbols are left as-is
-    once normalized.
+    exchange prefixes. Known aliases (e.g. NIFTY50, NIFTY) are folded into
+    their canonical counterparts matching Kite API format.
 
     Args:
         symbol: Raw symbol string (e.g., "NSE:NIFTY", "NIFTY 50", "^NSEI")
 
     Returns:
-        Normalized symbol (e.g., "NIFTY50")
+        Normalized symbol (e.g., "NIFTY 50")
 
     Examples:
         >>> normalize_symbol("NSE:NIFTY")
-        'NIFTY50'
+        'NIFTY 50'
         >>> normalize_symbol("^NSEI")
-        'NIFTY50'
+        'NIFTY 50'
         >>> normalize_symbol("  nifty 50  ")
-        'NIFTY50'
+        'NIFTY 50'
+        >>> normalize_symbol("NIFTY50")
+        'NIFTY 50'
     """
     s = (symbol or "").strip().upper()
     if not s:
@@ -39,13 +40,14 @@ def normalize_symbol(symbol: str) -> str:
     if s.startswith("^"):
         s = s[1:]
 
-    # Remove spaces
-    s = s.replace(" ", "")
+    # Normalize internal whitespace (multiple spaces -> single space)
+    s = " ".join(s.split())
 
-    # Apply known aliases
+    # Apply known aliases - map to Kite API format (with space for indices)
     aliases = {
-        "NSEI": "NIFTY50",
-        "NIFTY": "NIFTY50",
+        "NSEI": "NIFTY 50",
+        "NIFTY": "NIFTY 50",
+        "NIFTY50": "NIFTY 50",  # Legacy format without space
     }
 
     return aliases.get(s, s)
@@ -54,8 +56,8 @@ def normalize_symbol(symbol: str) -> str:
 def get_symbol_variants(symbol: str) -> List[str]:
     """
     Return the canonical symbol alongside any common aliases so we can
-    gracefully query mixed historical datasets (e.g., FO tables that still
-    use NIFTY while the canonical minute bars now use NIFTY50).
+    gracefully query mixed historical datasets (e.g., FO tables that may use
+    NIFTY, NIFTY50, or "NIFTY 50" depending on data source).
 
     Args:
         symbol: Symbol to get variants for
@@ -65,16 +67,20 @@ def get_symbol_variants(symbol: str) -> List[str]:
 
     Examples:
         >>> get_symbol_variants("NIFTY")
-        ['NIFTY50', 'NIFTY']
+        ['NIFTY 50', 'NIFTY', 'NIFTY50']
         >>> get_symbol_variants("NIFTY50")
-        ['NIFTY50', 'NIFTY']
+        ['NIFTY 50', 'NIFTY', 'NIFTY50']
+        >>> get_symbol_variants("NIFTY 50")
+        ['NIFTY 50', 'NIFTY', 'NIFTY50']
     """
     primary = normalize_symbol(symbol)
 
     # Define reverse aliases (canonical -> variants)
+    # Include all common formats for backward compatibility
     aliases: Dict[str, Set[str]] = {
-        "NIFTY50": {"NIFTY"},
-        "NIFTY": {"NIFTY50"},
+        "NIFTY 50": {"NIFTY", "NIFTY50"},
+        "NIFTY": {"NIFTY 50", "NIFTY50"},
+        "NIFTY50": {"NIFTY 50", "NIFTY"},
     }
 
     variants = {primary}
