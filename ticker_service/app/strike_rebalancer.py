@@ -80,8 +80,8 @@ class StrikeRebalancer:
 
     async def _rebalance_all(self):
         """Check and rebalance all configured underlyings."""
-        # Get configured underlyings from settings (currently hardcoded to NIFTY/NIFTY50)
-        underlyings = ["NIFTY50", "NIFTY"]
+        # Get configured underlyings from settings (supports multiple instruments)
+        underlyings = self._settings.fo_underlyings
 
         for underlying in underlyings:
             try:

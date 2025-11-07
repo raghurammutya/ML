@@ -22,6 +22,20 @@ from .instrument_registry import Instrument
 settings = get_settings()
 IST_TZ = ZoneInfo("Asia/Kolkata")
 
+# Mapping of underlying names to their instrument tokens
+# This makes it easy to add new underlyings without code changes
+UNDERLYING_TOKENS = {
+    "NIFTY": 256265,
+    "NIFTY50": 256265,
+    "NIFTY 50": 256265,
+    "BANKNIFTY": 260105,
+    "BANK NIFTY": 260105,
+    "FINNIFTY": 257801,
+    "FIN NIFTY": 257801,
+    "MIDCPNIFTY": 288009,
+    "MIDCAP NIFTY": 288009,
+}
+
 
 class HistoricalGreeksEnricher:
     """Enriches historical option candles with Greeks"""
@@ -76,9 +90,11 @@ class HistoricalGreeksEnricher:
             return option_candles
 
         # Fetch underlying prices
+        # Use configured default underlying if name not available
+        default_name = settings.nifty_quote_symbol or "NIFTY 50"
         underlying_map = await self._fetch_underlying_prices(
             underlying_token,
-            option_metadata.name or "NIFTY 50",
+            option_metadata.name or default_name,
             from_ts,
             to_ts,
             interval
@@ -115,18 +131,17 @@ class HistoricalGreeksEnricher:
             # For now, return None - we'll use the name to look up
             pass
 
-        # For NIFTY options, the underlying is "NIFTY 50" index
-        name = option_metadata.name or ""
-        if "NIFTY" in name.upper():
-            # NIFTY 50 index token is typically 256265
-            return 256265
-        elif "BANKNIFTY" in name.upper():
-            # BANKNIFTY index token
-            return 260105
-        elif "FINNIFTY" in name.upper():
-            return 257801
-        elif "MIDCPNIFTY" in name.upper():
-            return 288009
+        # Look up token from the mapping dictionary
+        name = (option_metadata.name or "").upper().strip()
+
+        # Try exact match first
+        if name in UNDERLYING_TOKENS:
+            return UNDERLYING_TOKENS[name]
+
+        # Try partial match for common variations
+        for key, token in UNDERLYING_TOKENS.items():
+            if key in name:
+                return token
 
         logger.warning(f"Unknown underlying for {option_metadata.tradingsymbol}")
         return None

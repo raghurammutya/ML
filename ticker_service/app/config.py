@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     nifty_symbol: str = Field(default="NSE:NIFTY")
     nifty_quote_symbol: str = Field(default="NSE:NIFTY 50")
     fo_underlying: str = Field(default="NIFTY")
+    fo_underlyings: List[str] = Field(
+        default_factory=lambda: ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+        description="List of underlyings to track for options (used by strike rebalancer and multi-instrument support)",
+    )
     option_expiry_window: int = Field(default=3, description="Number of upcoming expiries to track")
     otm_levels: int = Field(default=10)
     historical_days: int = Field(default=10)
