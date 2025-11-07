@@ -487,11 +487,11 @@ async def create_subscription(request: Request, payload: SubscriptionRequest) ->
     if not record:
         raise HTTPException(status_code=500, detail="Failed to persist subscription")
 
-    try:
-        await ticker_loop.reload_subscriptions()
-    except Exception as exc:
-        logger.exception("Subscription reload failed after create: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Failed to activate subscription: {exc}") from exc
+    # Trigger subscription reload in background (non-blocking)
+    # The ticker loop will pick up the new subscription asynchronously
+    ticker_loop.reload_subscriptions_async()
+    logger.info(f"Subscription created for {payload.instrument_token}, reload triggered in background")
+
     return _record_to_response(record)
 
 
@@ -578,9 +578,9 @@ async def delete_subscription(request: Request, instrument_token: int) -> Subscr
     record = await subscription_store.get(instrument_token)
     if not record:
         raise HTTPException(status_code=500, detail="Failed to fetch updated subscription")
-    try:
-        await ticker_loop.reload_subscriptions()
-    except Exception as exc:
-        logger.exception("Subscription reload failed after delete: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Failed to apply subscription removal: {exc}") from exc
+
+    # Trigger subscription reload in background (non-blocking)
+    ticker_loop.reload_subscriptions_async()
+    logger.info(f"Subscription deleted for {instrument_token}, reload triggered in background")
+
     return _record_to_response(record)

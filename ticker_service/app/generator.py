@@ -200,6 +200,25 @@ class MultiAccountTickerLoop:
                 await self.stop()
             await self.start()
 
+    def reload_subscriptions_async(self) -> None:
+        """
+        Trigger subscription reload in the background without blocking.
+        Returns immediately while the reload happens asynchronously.
+
+        Use this for API endpoints to avoid blocking HTTP responses.
+        """
+        import asyncio
+
+        async def _reload():
+            try:
+                await self.reload_subscriptions()
+                logger.info("Background subscription reload completed")
+            except Exception as exc:
+                logger.error(f"Background subscription reload failed: {exc}", exc_info=True)
+
+        # Create task in the current event loop
+        asyncio.create_task(_reload())
+
     async def fetch_history(
         self,
         instrument_token: int,
