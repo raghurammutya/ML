@@ -2,7 +2,7 @@
 Main TradingClient class - entry point for the SDK.
 """
 
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 from .api import APIClient
 from .cache import SimpleCache
@@ -430,6 +430,126 @@ class TradingClient:
     def clear_cache(self):
         """Clear all cached data."""
         self._cache.clear()
+    
+    # FO-specific methods
+    def get_fo_strike_distribution(
+        self, 
+        symbol: str, 
+        expiry: str, 
+        indicators: Optional[list] = None,
+        cache_ttl: Optional[int] = 300
+    ) -> dict:
+        """
+        Get F&O strike distribution data with Greeks and indicators.
+        
+        Args:
+            symbol: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            expiry: Expiry date in YYYY-MM-DD format
+            indicators: List of indicator specs (e.g., ["RSI:14", "SMA:20"])
+            cache_ttl: Cache TTL in seconds (default: 300)
+            
+        Returns:
+            Strike distribution data with Greeks and indicators
+            
+        Example:
+            >>> distribution = client.get_fo_strike_distribution(
+            ...     symbol="NIFTY",
+            ...     expiry="2025-11-28",
+            ...     indicators=["RSI:14", "MACD:12,26,9"]
+            ... )
+        """
+        params = {
+            "symbol": symbol,
+            "expiry": expiry
+        }
+        if indicators:
+            params["indicators"] = ",".join(indicators)
+            
+        return self._api.get("/fo/strike_distribution", params=params, cache_ttl=cache_ttl)
+    
+    def get_fo_expiry_metrics(
+        self, 
+        symbol: str,
+        cache_ttl: Optional[int] = 300
+    ) -> dict:
+        """
+        Get F&O expiry metrics including rollover analysis.
+        
+        Args:
+            symbol: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            cache_ttl: Cache TTL in seconds (default: 300)
+            
+        Returns:
+            Expiry metrics with OI distribution and rollover analysis
+            
+        Example:
+            >>> metrics = client.get_fo_expiry_metrics("NIFTY")
+            >>> for expiry in metrics["expiries"]:
+            ...     print(f"{expiry['expiry']}: OI={expiry['oi_pct']}%, Pressure={expiry['rollover_pressure']}")
+        """
+        return self._api.get("/fo/expiry_metrics", params={"symbol": symbol}, cache_ttl=cache_ttl)
+    
+    def get_futures_position_signals(
+        self, 
+        symbol: str,
+        expiry: Optional[str] = None,
+        cache_ttl: Optional[int] = 60
+    ) -> dict:
+        """
+        Get futures position signals (long/short buildup).
+        
+        Args:
+            symbol: Futures symbol or underlying
+            expiry: Optional expiry date filter
+            cache_ttl: Cache TTL in seconds (default: 60)
+            
+        Returns:
+            Futures position analysis with signal and sentiment
+            
+        Example:
+            >>> signals = client.get_futures_position_signals("NIFTY")
+            >>> print(f"Signal: {signals['signal']}, Sentiment: {signals['sentiment']}")
+        """
+        params = {"symbol": symbol}
+        if expiry:
+            params["expiry"] = expiry
+            
+        return self._api.get("/fo/futures_positions", params=params, cache_ttl=cache_ttl)
+    
+    def get_option_liquidity_metrics(
+        self, 
+        symbol: str,
+        strike: Optional[float] = None,
+        expiry: Optional[str] = None,
+        cache_ttl: Optional[int] = 300
+    ) -> dict:
+        """
+        Get option liquidity metrics.
+        
+        Args:
+            symbol: Option symbol or underlying
+            strike: Optional strike price filter
+            expiry: Optional expiry date filter
+            cache_ttl: Cache TTL in seconds (default: 300)
+            
+        Returns:
+            Liquidity metrics including spread, depth, and market impact
+            
+        Example:
+            >>> liquidity = client.get_option_liquidity_metrics(
+            ...     symbol="NIFTY",
+            ...     strike=24500,
+            ...     expiry="2025-11-28"
+            ... )
+            >>> print(f"Liquidity Score: {liquidity['score']}, Tier: {liquidity['tier']}")
+        """
+        params = {"symbol": symbol}
+        if strike:
+            params["strike"] = strike
+        if expiry:
+            params["expiry"] = expiry
+            
+        return self._api.get("/fo/liquidity_metrics", params=params, cache_ttl=cache_ttl)
 
     def __repr__(self) -> str:
         auth_method = "API Key" if self.api_key else "JWT"

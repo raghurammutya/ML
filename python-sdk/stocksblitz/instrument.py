@@ -589,12 +589,23 @@ class Instrument:
             if "options" in response and self.tradingsymbol in response["options"]:
                 option_data = response["options"][self.tradingsymbol]
 
-                # Extract Greeks
+                # Extract Greeks (including enhanced Greeks)
                 delta = option_data.get("delta", 0.0)
                 gamma = option_data.get("gamma", 0.0)
                 theta = option_data.get("theta", 0.0)
                 vega = option_data.get("vega", 0.0)
                 iv = option_data.get("iv", 0.0)
+                
+                # Enhanced Greeks
+                rho = option_data.get("rho", 0.0)
+                intrinsic_value = option_data.get("intrinsic", 0.0)
+                extrinsic_value = option_data.get("extrinsic", 0.0)
+                model_price = option_data.get("model_price", 0.0)
+                theta_daily = option_data.get("theta_daily", 0.0)
+                
+                # Premium metrics (if available)
+                premium_abs = option_data.get("premium_abs")
+                premium_pct = option_data.get("premium_pct")
 
                 # Check if Greeks are actually populated (not all zeros)
                 has_greeks = any([delta, gamma, theta, vega, iv])
@@ -614,6 +625,15 @@ class Instrument:
                     "theta": theta,
                     "vega": vega,
                     "iv": iv,
+                    # Enhanced Greeks
+                    "rho": rho,
+                    "intrinsic_value": intrinsic_value,
+                    "extrinsic_value": extrinsic_value,
+                    "model_price": model_price,
+                    "theta_daily": theta_daily,
+                    # Premium metrics
+                    "premium_abs": premium_abs,
+                    "premium_pct": premium_pct,
                     "_state": data_state,
                     "_timestamp": fetch_time,
                     "_reason": reason
@@ -847,6 +867,280 @@ class Instrument:
             )
 
         return float(greeks.get("iv", 0))
+
+    @property
+    def rho(self) -> float:
+        """
+        Option rho (sensitivity to 1% interest rate change).
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return float(greeks.get("rho", 0))
+
+    @property
+    def intrinsic_value(self) -> float:
+        """
+        Option intrinsic value.
+        max(S-K, 0) for calls, max(K-S, 0) for puts.
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return float(greeks.get("intrinsic_value", 0))
+
+    @property
+    def extrinsic_value(self) -> float:
+        """
+        Option extrinsic value (time value).
+        Calculated as: option_price - intrinsic_value.
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return float(greeks.get("extrinsic_value", 0))
+
+    @property
+    def model_price(self) -> float:
+        """
+        Black-Scholes theoretical price.
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return float(greeks.get("model_price", 0))
+
+    @property
+    def theta_daily(self) -> float:
+        """
+        Daily theta decay (annual theta / 365).
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return float(greeks.get("theta_daily", 0))
+
+    @property
+    def premium_pct(self) -> Optional[float]:
+        """
+        Percentage premium/discount vs model price.
+        Calculated as: ((market_price - model_price) / model_price) * 100.
+
+        Returns None if model price is not available.
+
+        Note: Check inst.greeks['_state'] to verify data quality before trading.
+        """
+        greeks = self._fetch_greeks()
+
+        # Warn on missing Greeks
+        if greeks.get("_state") == DataState.NO_DATA:
+            import warnings
+            warnings.warn(
+                f"Greeks not available for {self.tradingsymbol}: {greeks.get('_reason')}",
+                UserWarning,
+                stacklevel=2
+            )
+
+        return greeks.get("premium_pct")
+    
+    @property
+    def market_depth(self) -> Optional[Dict]:
+        """
+        Get market depth (order book) data.
+        
+        Returns:
+            MarketDepth dict with buy/sell levels and microstructure metrics.
+            Returns None if depth data not available.
+            
+        Example:
+            >>> depth = inst.market_depth
+            >>> if depth:
+            ...     print(f"Best bid: {depth['buy_levels'][0]['price']}")
+            ...     print(f"Spread: {depth['spread_pct']:.2f}%")
+        """
+        try:
+            # Fetch from monitor snapshot
+            underlying = self._extract_underlying(self.tradingsymbol)
+            response = self._api.get(
+                "/monitor/snapshot",
+                params={"underlying": underlying},
+                cache_ttl=2  # Very short cache for depth
+            )
+            
+            # Check if option has depth data
+            if "options" in response and self.tradingsymbol in response["options"]:
+                option_data = response["options"][self.tradingsymbol]
+                
+                # Extract depth if available
+                if "depth" in option_data:
+                    return option_data["depth"]
+                    
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to fetch market depth for {self.tradingsymbol}: {e}")
+            return None
+    
+    @property
+    def liquidity_metrics(self) -> Optional[Dict]:
+        """
+        Get liquidity metrics for the instrument.
+        
+        Returns:
+            LiquidityMetrics dict with score, tier, and impact metrics.
+            Returns None if liquidity data not available.
+            
+        Example:
+            >>> liquidity = inst.liquidity_metrics
+            >>> if liquidity:
+            ...     print(f"Liquidity Score: {liquidity['score']}, Tier: {liquidity['tier']}")
+            ...     if liquidity['is_illiquid']:
+            ...         print("WARNING: Low liquidity!")
+        """
+        try:
+            # For options, fetch from FO liquidity endpoint
+            if self._is_option():
+                response = self._api.get(
+                    "/fo/liquidity_metrics",
+                    params={"symbol": self.tradingsymbol},
+                    cache_ttl=300  # 5 min cache
+                )
+                return response.get("metrics")
+                
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to fetch liquidity metrics for {self.tradingsymbol}: {e}")
+            return None
+    
+    @property
+    def position_signal(self) -> Optional[Dict]:
+        """
+        Get futures position signal (for futures only).
+        
+        Returns:
+            FuturesPosition dict with signal, sentiment, and strength.
+            Returns None for non-futures instruments.
+            
+        Example:
+            >>> signal = inst.position_signal
+            >>> if signal:
+            ...     print(f"Signal: {signal['signal']}, Sentiment: {signal['sentiment']}")
+        """
+        try:
+            # Only for futures
+            if self._is_futures():
+                response = self._api.get(
+                    "/fo/futures_positions", 
+                    params={"symbol": self.tradingsymbol},
+                    cache_ttl=60  # 1 min cache
+                )
+                return response
+                
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to fetch position signal for {self.tradingsymbol}: {e}")
+            return None
+    
+    @property
+    def rollover_metrics(self) -> Optional[Dict]:
+        """
+        Get futures rollover metrics (for futures only).
+        
+        Returns:
+            RolloverMetrics dict with pressure, OI %, and recommendations.
+            Returns None for non-futures instruments.
+            
+        Example:
+            >>> rollover = inst.rollover_metrics
+            >>> if rollover and rollover['pressure'] > 70:
+            ...     print(f"High rollover pressure: {rollover['pressure']}")
+            ...     print(f"Consider rolling to: {rollover['recommended_target']}")
+        """
+        try:
+            # Only for futures
+            if self._is_futures():
+                underlying = self._extract_underlying(self.tradingsymbol)
+                response = self._api.get(
+                    "/fo/expiry_metrics",
+                    params={"symbol": underlying},
+                    cache_ttl=300  # 5 min cache
+                )
+                
+                # Find metrics for this futures contract
+                if "futures" in response:
+                    for fut in response["futures"]:
+                        if fut["symbol"] == self.tradingsymbol:
+                            return fut.get("rollover_metrics")
+                            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to fetch rollover metrics for {self.tradingsymbol}: {e}")
+            return None
+    
+    def _is_option(self) -> bool:
+        """Check if instrument is an option."""
+        import re
+        # Options end with PE or CE
+        return bool(re.search(r'(PE|CE)$', self.tradingsymbol))
+    
+    def _is_futures(self) -> bool:
+        """Check if instrument is a futures contract."""
+        import re
+        # Futures end with FUT
+        return bool(re.search(r'FUT$', self.tradingsymbol))
 
     def __getitem__(self, timeframe: str) -> TimeframeProxy:
         """
