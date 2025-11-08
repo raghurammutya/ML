@@ -1,19 +1,20 @@
 version: '3.8'
 
 services:
-  # Production Database
-  postgres-prod:
+  # Database
+  postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: tv-postgres-prod
     environment:
       POSTGRES_DB: ${DB_NAME:-stocksblitz_unified_prod}
       POSTGRES_USER: ${DB_USER:-stocksblitz}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
       TIMESCALEDB_TELEMETRY: "off"
     volumes:
-      - postgres_prod_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
     ports:
-      - "5437:5432"  # Non-conflicting port
+      - "0.0.0.0:5435:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
@@ -21,15 +22,15 @@ services:
       timeout: 5s
       retries: 5
 
-  # Production Redis
-  redis-prod:
+  # Redis Cache
+  redis:
     image: redis:7-alpine
     container_name: tv-redis-prod
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_pass}
     volumes:
-      - redis_prod_data:/data
+      - redis_data:/data
     ports:
-      - "6384:6379"  # Non-conflicting port
+      - "0.0.0.0:6382:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
@@ -37,53 +38,61 @@ services:
       timeout: 3s
       retries: 5
 
-  # Production Backend
-  backend-prod:
+  # Backend API
+  backend:
     build:
       context: ../../backend
       dockerfile: Dockerfile
     container_name: tv-backend-prod
     environment:
-      DB_HOST: postgres-prod
+      DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-stocksblitz_unified_prod}
       DB_USER: ${DB_USER:-stocksblitz}
-      DB_PASSWORD: ${DB_PASSWORD}
-      REDIS_URL: redis://redis-prod:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      DATABASE_URL: postgresql://${DB_USER:-stocksblitz}:${DB_PASSWORD:-dev_password}@postgres:5432/${DB_NAME:-stocksblitz_unified_prod}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev_redis_pass}@redis:6379
       ENVIRONMENT: production
-      DEBUG: "false"
       LOG_LEVEL: INFO
     ports:
-      - "8080:8000"  # Port 8080 for production backend (avoiding 80 conflict)
+      - "0.0.0.0:8080:8000"
     depends_on:
-      postgres-prod:
+      postgres:
         condition: service_healthy
-      redis-prod:
+      redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Production Frontend
-  frontend-prod:
+  # Frontend
+  frontend:
     build:
-      context: ../../frontend
-      dockerfile: Dockerfile
+      context: ../../
+      dockerfile: deployment/docker/Dockerfile.frontend.prod
     container_name: tv-frontend-prod
-    environment:
-      - VITE_API_URL=http://5.223.52.98:8080
-      - VITE_ENVIRONMENT=production
     ports:
-      - "8081:3000"  # Port 8081 for production frontend (avoiding 80 conflict)
+      - "0.0.0.0:3080:80"
+    environment:
+      - VITE_API_BASE_URL=http://5.223.52.98:8080
     depends_on:
-      - backend-prod
+      - backend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 
 volumes:
-  postgres_prod_data:
+  postgres_data:
     driver: local
-  redis_prod_data:
+  redis_data:
     driver: local
 
 networks:
   default:
-    name: tradingview-production-network
+    name: tradingview-network

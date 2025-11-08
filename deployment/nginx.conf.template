@@ -1,0 +1,89 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html index.htm;
+    
+    # Docker DNS resolver
+    resolver 127.0.0.11 valid=30s;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
+
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied expired no-cache no-store private auth;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/xml+rss
+        application/json;
+
+    # Handle React Router
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # TradingView API endpoints prefix - Dynamic backend resolution
+    location /tradingview-api/ {
+        # Direct proxy to backend service
+        proxy_pass http://${BACKEND_SERVICE_NAME}:${API_PORT}/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Environment ${ENVIRONMENT};
+        
+        # Timeout configuration
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+
+    # Direct TradingView UDF endpoints (for compatibility)
+    location ~ ^/(history|marks|symbols|search|config|time)$ {
+        proxy_pass http://${BACKEND_SERVICE_NAME}:${API_PORT}$request_uri;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # API proxy to backend
+    location /api/ {
+        proxy_pass http://${BACKEND_SERVICE_NAME}:${API_PORT}/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+
+    # Environment info endpoint
+    location /env-info {
+        access_log off;
+        add_header Content-Type application/json;
+        return 200 '{"environment":"${ENVIRONMENT}","backend":"${BACKEND_SERVICE_NAME}:${API_PORT}","version":"${APP_VERSION}"}';
+    }
+}

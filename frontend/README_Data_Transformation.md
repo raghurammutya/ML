@@ -1,4 +1,4 @@
-# Data Transformation Pipeline
+It is all# Data Transformation Pipeline
 
 This system transforms 1-minute OHLC data from `nifty50_ohlc` into `ml_labeled_data` across multiple timeframes with proper day boundaries and real-time synchronization.
 

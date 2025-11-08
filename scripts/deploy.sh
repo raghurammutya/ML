@@ -1,244 +1,129 @@
 #!/bin/bash
-
-# TradingView ML Visualization Deployment Script
-# Usage: ./deploy.sh [environment] [action]
-
 set -e
 
-# Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_DIR")" && pwd)"
-DOCKER_DIR="$PROJECT_ROOT/deployment/docker"
+# Unified deployment script for TradingView ML Visualization System
+# Usage: ./deploy.sh [dev|prod] [--build] [--logs]
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Default values
 ENVIRONMENT=${1:-dev}
-ACTION=${2:-start}
+BUILD_FLAG=${2}
+LOGS_FLAG=${3}
 
-# Logging function
-log() {
-    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
-}
-
-success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Help function
-show_help() {
-    cat << EOF
-TradingView ML Visualization Deployment Script
-
-Usage: $0 [ENVIRONMENT] [ACTION]
-
-ENVIRONMENTS:
-    dev         Development environment (ports 3001, 8001)
-    staging     Staging environment (ports 3002, 8002)
-    prod        Production environment (ports 8081, 8080)
-
-ACTIONS:
-    start       Start services (default)
-    stop        Stop services
-    restart     Restart services
-    status      Show service status
-    logs        Show service logs
-    clean       Clean up containers and volumes
-
-External URLs:
-    Current:    http://5.223.52.98:3000 (existing system)
-    Dev:        http://5.223.52.98:3001
-    Staging:    http://5.223.52.98:3002
-    Production: http://5.223.52.98:8081
-
-EOF
-}
+echo "🚀 Deploying TradingView ML Visualization System"
+echo "📌 Environment: $ENVIRONMENT"
+echo "⏰ $(date)"
 
 # Validate environment
-validate_environment() {
-    case $ENVIRONMENT in
-        dev|staging|prod)
-            log "Working with $ENVIRONMENT environment"
-            ;;
-        *)
-            error "Invalid environment: $ENVIRONMENT"
-            error "Valid environments: dev, staging, prod"
-            exit 1
-            ;;
-    esac
-}
+if [[ "$ENVIRONMENT" != "dev" && "$ENVIRONMENT" != "prod" ]]; then
+    echo "❌ Error: Environment must be 'dev' or 'prod'"
+    echo "Usage: $0 [dev|prod] [--build] [--logs]"
+    exit 1
+fi
 
-# Get Docker Compose file
-get_compose_file() {
-    case $ENVIRONMENT in
-        dev)
-            echo "$DOCKER_DIR/docker-compose.dev.yml"
-            ;;
-        staging)
-            echo "$DOCKER_DIR/docker-compose.staging.yml"
-            ;;
-        prod)
-            echo "$DOCKER_DIR/docker-compose.prod.yml"
-            ;;
-    esac
-}
+# Set environment file
+ENV_FILE=".env.$ENVIRONMENT"
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "❌ Error: Environment file $ENV_FILE not found"
+    exit 1
+fi
 
-# Check prerequisites
-check_prerequisites() {
-    log "Checking prerequisites..."
-    
-    if ! command -v docker &> /dev/null; then
-        error "Docker is not installed"
-        exit 1
-    fi
-    
-    if ! command -v docker-compose &> /dev/null; then
-        error "Docker Compose is not installed"
-        exit 1
-    fi
-    
-    if ! docker info &> /dev/null; then
-        error "Docker daemon is not running"
-        exit 1
-    fi
-    
-    success "Prerequisites check passed"
-}
+echo "📄 Using environment file: $ENV_FILE"
+
+# Export environment variables
+set -a
+source "$ENV_FILE"
+set +a
+
+# Generate unique network name
+export COMPOSE_PROJECT_NAME="tradingview-$ENVIRONMENT"
+
+echo "🔧 Configuration:"
+echo "   - Environment: $ENVIRONMENT"
+echo "   - Backend Port: $BACKEND_PORT"
+echo "   - Frontend Port: $FRONTEND_PORT"
+echo "   - Database: $DB_HOST:$DB_PORT/$DB_NAME"
+echo "   - Redis: $REDIS_HOST:$REDIS_PORT"
+echo "   - Backend Service: $BACKEND_SERVICE_NAME"
+echo "   - Frontend Service: $FRONTEND_SERVICE_NAME"
+
+# Stop existing containers
+echo "🛑 Stopping existing containers..."
+docker-compose -f docker-compose.unified.yml --env-file "$ENV_FILE" down --remove-orphans
+
+# Build if requested
+if [[ "$BUILD_FLAG" == "--build" ]]; then
+    echo "🏗️  Building containers..."
+    docker-compose -f docker-compose.unified.yml --env-file "$ENV_FILE" build --no-cache
+fi
 
 # Start services
-start_services() {
-    local compose_file="$(get_compose_file)"
-    log "Starting services for $ENVIRONMENT environment..."
-    
-    cd "$PROJECT_ROOT"
-    docker-compose -f "$compose_file" up -d --build
-    
-    log "Waiting for services to start..."
-    sleep 30
-    
-    # Show URLs
-    case $ENVIRONMENT in
-        dev)
-            success "Development environment started!"
-            success "Frontend: http://5.223.52.98:3001"
-            success "Backend:  http://5.223.52.98:8001"
-            ;;
-        staging)
-            success "Staging environment started!"
-            success "Frontend: http://5.223.52.98:3002"
-            success "Backend:  http://5.223.52.98:8002"
-            ;;
-        prod)
-            success "Production environment started!"
-            success "Frontend: http://5.223.52.98:8081"
-            success "Backend:  http://5.223.52.98:8080"
-            ;;
-    esac
-}
+echo "🚀 Starting services..."
+docker-compose -f docker-compose.unified.yml --env-file "$ENV_FILE" up -d
 
-# Stop services
-stop_services() {
-    local compose_file="$(get_compose_file)"
-    log "Stopping services for $ENVIRONMENT environment..."
-    
-    cd "$PROJECT_ROOT"
-    docker-compose -f "$compose_file" down
-    
-    success "Services stopped successfully"
-}
+# Wait for services to be healthy
+echo "⏳ Waiting for services to be healthy..."
+sleep 10
 
-# Show status
-show_status() {
-    local compose_file="$(get_compose_file)"
-    log "Service status for $ENVIRONMENT environment:"
-    
-    cd "$PROJECT_ROOT"
-    docker-compose -f "$compose_file" ps
-}
+# Health checks
+echo "🔍 Performing health checks..."
 
-# Show logs
-show_logs() {
-    local compose_file="$(get_compose_file)"
-    local service=${3:-}
-    
-    cd "$PROJECT_ROOT"
-    
-    if [[ -n "$service" ]]; then
-        log "Showing logs for service: $service"
-        docker-compose -f "$compose_file" logs -f "$service"
-    else
-        log "Showing logs for all services"
-        docker-compose -f "$compose_file" logs -f
+# Check backend
+BACKEND_URL="http://localhost:$BACKEND_PORT"
+echo "   Checking backend: $BACKEND_URL/health"
+for i in {1..30}; do
+    if curl -s "$BACKEND_URL/health" > /dev/null 2>&1; then
+        echo "   ✅ Backend is healthy"
+        break
     fi
-}
+    if [[ $i -eq 30 ]]; then
+        echo "   ❌ Backend health check failed"
+        exit 1
+    fi
+    sleep 2
+done
 
-# Clean up
-cleanup() {
-    local compose_file="$(get_compose_file)"
-    log "Cleaning up containers and volumes for $ENVIRONMENT environment..."
-    
-    cd "$PROJECT_ROOT"
-    docker-compose -f "$compose_file" down -v --remove-orphans
-    
-    success "Cleanup completed"
-}
+# Check frontend
+FRONTEND_URL="http://localhost:$FRONTEND_PORT"
+echo "   Checking frontend: $FRONTEND_URL/health"
+for i in {1..30}; do
+    if curl -s "$FRONTEND_URL/health" > /dev/null 2>&1; then
+        echo "   ✅ Frontend is healthy"
+        break
+    fi
+    if [[ $i -eq 30 ]]; then
+        echo "   ❌ Frontend health check failed"
+        exit 1
+    fi
+    sleep 2
+done
 
-# Main execution
-main() {
-    case $1 in
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        "")
-            show_help
-            exit 1
-            ;;
-    esac
-    
-    validate_environment
-    check_prerequisites
-    
-    case $ACTION in
-        start)
-            start_services
-            ;;
-        stop)
-            stop_services
-            ;;
-        restart)
-            stop_services
-            start_services
-            ;;
-        status)
-            show_status
-            ;;
-        logs)
-            show_logs "$@"
-            ;;
-        clean)
-            cleanup
-            ;;
-        *)
-            error "Invalid action: $ACTION"
-            show_help
-            exit 1
-            ;;
-    esac
-}
+# Test API connectivity
+echo "   Checking API connectivity: $FRONTEND_URL/tradingview-api/health"
+if curl -s "$FRONTEND_URL/tradingview-api/health" | grep -q "healthy"; then
+    echo "   ✅ API proxy is working"
+else
+    echo "   ⚠️  API proxy may have issues"
+fi
 
-# Run main function with all arguments
-main "$@"
+echo ""
+echo "🎉 Deployment completed successfully!"
+echo ""
+echo "📊 Access URLs:"
+echo "   Frontend: http://localhost:$FRONTEND_PORT"
+if [[ "$ENVIRONMENT" == "prod" ]]; then
+    echo "   Frontend: http://5.223.52.98:$FRONTEND_PORT"
+fi
+echo "   Backend:  $BACKEND_URL"
+echo "   API:      $FRONTEND_URL/tradingview-api/"
+echo ""
+echo "🔧 Management Commands:"
+echo "   View logs:    docker-compose -f docker-compose.unified.yml --env-file $ENV_FILE logs -f"
+echo "   Stop:         docker-compose -f docker-compose.unified.yml --env-file $ENV_FILE down"
+echo "   Restart:      $0 $ENVIRONMENT"
+echo "   Rebuild:      $0 $ENVIRONMENT --build"
+
+# Show logs if requested
+if [[ "$LOGS_FLAG" == "--logs" ]]; then
+    echo ""
+    echo "📋 Showing logs (Ctrl+C to exit)..."
+    docker-compose -f docker-compose.unified.yml --env-file "$ENV_FILE" logs -f
+fi

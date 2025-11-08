@@ -20,7 +20,7 @@ from .monitoring import (
     track_request_metrics, update_db_pool_metrics
 )
 from .models import HealthResponse, CacheStats
-from app.routes import marks_asyncpg, labels
+from app.routes import marks_asyncpg, labels, indicators
 
 # -------- logging --------
 logging.basicConfig(
@@ -114,6 +114,14 @@ async def lifespan(app: FastAPI):
         app.include_router(udf_handler.get_router())
         app.include_router(marks_asyncpg.router)      # asyncpg-backed /marks route
         app.include_router(labels.router)             # labels CRUD endpoints
+        
+        # Set data manager for indicators and include router
+        try:
+            indicators.set_data_manager(data_manager)
+            app.include_router(indicators.router)         # technical indicators endpoints
+            logger.info("Indicators router included successfully")
+        except Exception as e:
+            logger.error(f"Failed to include indicators router: {e}")
         logger.info("UDF routes included successfully")
 
         # Supervise background tasks

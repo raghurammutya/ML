@@ -12,8 +12,9 @@ services:
       TIMESCALEDB_TELEMETRY: "off"
     volumes:
       - postgres_staging_data:/var/lib/postgresql/data
+      - ../database/backup-restore.sh:/docker-entrypoint-initdb.d/01-restore.sh
     ports:
-      - "5436:5432"  # Non-conflicting port
+      - "5434:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-stocksblitz}"]
@@ -29,7 +30,7 @@ services:
     volumes:
       - redis_staging_data:/data
     ports:
-      - "6383:6379"  # Non-conflicting port
+      - "6381:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
@@ -39,9 +40,7 @@ services:
 
   # Staging Backend
   backend-staging:
-    build:
-      context: ../../backend
-      dockerfile: Dockerfile
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAME:-tradingview-ml-viz}-backend:${TAG:-latest}
     container_name: tv-backend-staging
     environment:
       DB_HOST: postgres-staging
@@ -54,27 +53,51 @@ services:
       ENVIRONMENT: staging
       DEBUG: "false"
       LOG_LEVEL: INFO
+      CORS_ORIGINS: ${STAGING_FRONTEND_URL}
     ports:
-      - "8002:8000"  # Port 8002 for staging backend
+      - "8002:8000"
     depends_on:
       postgres-staging:
         condition: service_healthy
       redis-staging:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Staging Frontend
   frontend-staging:
-    build:
-      context: ../../frontend
-      dockerfile: Dockerfile
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAME:-tradingview-ml-viz}-frontend:${TAG:-latest}
     container_name: tv-frontend-staging
     environment:
-      - VITE_API_URL=http://5.223.52.98:8002
-      - VITE_ENVIRONMENT=staging
+      - API_URL=http://backend-staging:8000
     ports:
-      - "3002:3000"  # Port 3002 for staging frontend
+      - "3002:80"
     depends_on:
+      - backend-staging
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Load Balancer for staging
+  nginx-staging:
+    image: nginx:alpine
+    container_name: tv-nginx-staging
+    volumes:
+      - ./nginx-staging.conf:/etc/nginx/nginx.conf:ro
+      - ${SSL_CERT_PATH}:/etc/ssl/certs/
+      - ${SSL_KEY_PATH}:/etc/ssl/private/
+    ports:
+      - "443:443"
+      - "8080:80"
+    depends_on:
+      - frontend-staging
       - backend-staging
     restart: unless-stopped
 
