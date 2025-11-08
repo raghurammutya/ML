@@ -131,13 +131,21 @@ async def get_marks(
     """
 
     pool = await get_pool(request)
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, payload.symbol, timeframe, from_s, to_s)
-    
     import logging
     logger = logging.getLogger(__name__)
-    logger.info(f"Marks query: symbol={payload.symbol}, timeframe={timeframe}, from={from_s}, to={to_s}, found {len(rows)} rows, raw={raw}")
-    logger.info(f"Debug: SQL query with label_pred='{label_pred}' - filtering for user labels only")
+
+    logger.info(f"[MARKS] Request received: symbol={payload.symbol}, timeframe={timeframe}, from={from_s}, to={to_s}, include_neutral={include_neutral}")
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, payload.symbol, timeframe, from_s, to_s)
+        logger.info(f"[MARKS] Query successful: found {len(rows)} rows, raw={raw}")
+        logger.info(f"[MARKS] SQL query with label_pred='{label_pred}' - filtering for user labels only")
+    except Exception as e:
+        logger.error(f"[MARKS] Query failed: {e}")
+        logger.error(f"[MARKS] SQL was: {sql}")
+        logger.error(f"[MARKS] Params: {payload.symbol}, {timeframe}, {from_s}, {to_s}")
+        rows = []
 
     # Return raw data if requested (for frontend processing)
     if raw:
@@ -222,12 +230,16 @@ async def get_marks_raw(
     """
 
     pool = await get_pool(request)
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, payload.symbol, timeframe, from_s, to_s)
-    
     import logging
     logger = logging.getLogger(__name__)
-    logger.info(f"Raw marks query: symbol={payload.symbol}, timeframe={timeframe}, from={from_s}, to={to_s}, found {len(rows)} rows")
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, payload.symbol, timeframe, from_s, to_s)
+        logger.info(f"Raw marks query: symbol={payload.symbol}, timeframe={timeframe}, from={from_s}, to={to_s}, found {len(rows)} rows")
+    except Exception as e:
+        logger.error(f"Raw marks error: {e}")
+        rows = []
 
     # Return raw data for frontend processing
     raw_data = []

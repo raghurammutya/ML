@@ -169,15 +169,20 @@ class DataManager:
             # Skip rows with NULL OHLC values
             if any(r[field] is None for field in ["open", "high", "low", "close"]):
                 continue
-                
+
             # Database stores naive timestamps that represent IST time
-            # We need to treat them as IST and convert to UTC for TradingView
+            # We need to convert IST → UTC for TradingView
             naive_dt = r["ts"]
             if isinstance(naive_dt, datetime):
-                # Treat the naive datetime as IST
-                ist_dt = naive_dt.replace(tzinfo=IST_TIMEZONE)
-                # Convert to UTC timestamp
-                ts = int(ist_dt.timestamp())
+                # The naive datetime represents IST clock time
+                # To convert to UTC epoch: subtract IST offset (5.5 hours = 19800 seconds)
+                # Method: get naive epoch (treats as UTC) then subtract offset
+                naive_epoch = int(naive_dt.timestamp())
+                utc_epoch = naive_epoch - 19800  # Subtract 5.5 hours
+                ts = utc_epoch
+                # Debug logging for first bar
+                if len(t) == 0:
+                    logger.info(f"[HISTORY TZ] First bar: naive_dt={naive_dt}, naive_epoch={naive_epoch}, utc_epoch={utc_epoch}")
             else:
                 # Fallback to original method if timestamp format is unexpected
                 ts = int(naive_dt.timestamp())
@@ -273,7 +278,7 @@ class DataManager:
         to_timestamp: int,
         resolution: str,
         include_neutral: bool = True,     # default now shows all labels incl. Neutral
-        min_confidence: int = 0,          # we don’t filter by confidence by default
+        min_confidence: int = 0,          # we don't filter by confidence by default
         limit: int = 20000,
         change_only: bool = False,        # accepted but ignored
     ) -> Dict[str, Any]:
@@ -286,20 +291,30 @@ class DataManager:
         timeframe = _normalize_timeframe(resolution)
         from_s, to_s = _as_epoch_seconds(from_timestamp, to_timestamp)
 
+        logger.info(f"[DB MARKS] Request: symbol={symbol} -> {symbol_db}, timeframe={resolution} -> {timeframe}, from={from_timestamp} -> {from_s}, to={to_timestamp} -> {to_s}, include_neutral={include_neutral}")
+
         neutral_clause = "" if include_neutral else "AND label IS NOT NULL AND label <> 'Neutral'"
 
-        # Convert IST timestamps to UTC epochs for TradingView
-        # Database stores naive timestamps representing IST (UTC+5:30)
+        # Database stores naive IST timestamps. Frontend sends UTC timestamps.
+        # We need to:
+        # 1. Convert incoming UTC time range to IST for querying
+        # 2. Convert returned IST timestamps back to UTC for TradingView
+
+        # Convert query range from UTC to IST (add 5.5 hours)
+        from_ist_ts = from_s + 19800  # Add 5.5 hours in seconds
+        to_ist_ts = to_s + 19800
+
+        logger.info(f"[DB MARKS] Time range conversion: UTC [{from_s}, {to_s}] → IST [{from_ist_ts}, {to_ist_ts}]")
+
         sql = f"""
             SELECT
-            (EXTRACT(EPOCH FROM time)::bigint - 19800) AS time_s,
+            EXTRACT(EPOCH FROM time)::bigint AS time_ist_epoch,
             label,
             label_confidence
             FROM ml_labeled_data
             WHERE symbol=$1
             AND timeframe=$2
-            AND time BETWEEN (to_timestamp($3) + interval '5 hours 30 minutes') 
-                         AND (to_timestamp($4) + interval '5 hours 30 minutes')
+            AND time BETWEEN to_timestamp($3) AND to_timestamp($4)
             AND label IS NOT NULL
             {neutral_clause}
             ORDER BY time ASC
@@ -307,23 +322,31 @@ class DataManager:
         """
 
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(sql, symbol_db, timeframe, from_s, to_s, int(limit))
+            rows = await conn.fetch(sql, symbol_db, timeframe, from_ist_ts, to_ist_ts, int(limit))
+
+        logger.info(f"[DB MARKS] Query returned {len(rows)} rows")
+        logger.info(f"[DB MARKS] SQL: {sql}")
 
         marks = []
         for i, r in enumerate(rows):
-            ts = int(r["time_s"])
+            # Convert IST epoch back to UTC epoch (subtract 5.5 hours)
+            ist_epoch = int(r["time_ist_epoch"])
+            utc_epoch = ist_epoch - 19800  # Subtract 5.5 hours to get UTC
+
             lbl = r["label"] or "Neutral"
             conf = _to_pct(r["label_confidence"])
             color = LABEL_COLORS.get(lbl, LABEL_COLORS["Neutral"])
             marks.append({
-                "id": f"ml-{ts}-{i}",
-                "time": ts,
+                "id": f"ml-{utc_epoch}-{i}",
+                "time": utc_epoch,  # Return UTC timestamp for TradingView
                 "color": color,
                 "text": f"{lbl}" + (f" | p={conf:.2f}" if r["label_confidence"] is not None else ""),
                 "label": lbl[:1],
                 "labelFontColor": "#FFFFFF",
                 "minSize": 7,
             })
+
+        logger.info(f"[DB MARKS] Returning {len(marks)} marks with UTC timestamps")
         return {"marks": marks}
 
 

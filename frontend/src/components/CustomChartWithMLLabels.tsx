@@ -26,6 +26,8 @@ type CustomChartProps = {
   timeframe?: Timeframe
   chartType?: ChartType
   height?: number
+  fromSec?: number | null
+  toSec?: number | null
 }
 
 const DEFAULT_SYMBOL = 'NIFTY50'
@@ -34,61 +36,62 @@ const DEFAULT_TYPE: ChartType = 'candle'
 
 // Time ranges for different timeframes - now supports infinite scrolling
 const getInitialTimeRange = (timeframe: Timeframe): { from: number; to: number } => {
-  // Use dynamic timestamps based on current time
-  const now = Math.floor(Date.now() / 1000)  // Current time in seconds
-  
+  // Use current time as the reference point for initial view
+  // This shows recent data on load, but allows fetching older/future data via scrolling
+  const now = Math.floor(Date.now() / 1000)
+
   switch (timeframe) {
     case '1D':
-      // For daily data, show last 6 months
-      return { 
-        from: now - (6 * 30 * 24 * 3600),  // 6 months ago
+      // For daily data, show last 6 months from today
+      return {
+        from: now - (6 * 30 * 24 * 3600),  // 6 months back from now
         to: now
       }
     case '60':
       // For hourly data, show last 30 days
       return {
-        from: now - (30 * 24 * 3600),      // 30 days ago
+        from: now - (30 * 24 * 3600),      // 30 days back
         to: now
       }
     case '30':
       // For 30min data, show last 21 days
       return {
-        from: now - (21 * 24 * 3600),      // 21 days ago
+        from: now - (21 * 24 * 3600),      // 21 days back
         to: now
       }
     case '15':
       // For 15min data, show last 14 days
       return {
-        from: now - (14 * 24 * 3600),      // 14 days ago
+        from: now - (14 * 24 * 3600),      // 14 days back
         to: now
       }
     case '5':
       // For 5min data, show last 7 days
       return {
-        from: now - (7 * 24 * 3600),       // 7 days ago
+        from: now - (7 * 24 * 3600),       // 7 days back
         to: now
       }
     case '3':
       // For 3min data, show last 5 days
       return {
-        from: now - (5 * 24 * 3600),       // 5 days ago
+        from: now - (5 * 24 * 3600),       // 5 days back
         to: now
       }
     case '2':
       // For 2min data, show last 3 days
       return {
-        from: now - (3 * 24 * 3600),       // 3 days ago
+        from: now - (3 * 24 * 3600),       // 3 days back
         to: now
       }
     case '1':
       // For 1min data, show last 2 days
       return {
-        from: now - (2 * 24 * 3600),       // 2 days ago
+        from: now - (2 * 24 * 3600),       // 2 days back
         to: now
       }
     default:
       return {
-        from: now - (7 * 24 * 3600),       // 7 days ago
+        from: now - (7 * 24 * 3600),       // 7 days back
         to: now
       }
   }
@@ -128,17 +131,17 @@ const LABEL_COLOR: Record<string, string> = {
 }
 
 function makeTickMarkFormatter() {
-  // Use UTC formatters to match the data
-  const dFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'UTC',
-    day: '2-digit', 
-    month: 'short' 
+  // Use IST timezone for display (Asia/Kolkata)
+  const dFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short'
   })
-  const tFmt = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'UTC',
-    hour: '2-digit', 
-    minute: '2-digit', 
-    hour12: false 
+  const tFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
   })
   let lastDayKey: string | null = null
 
@@ -333,7 +336,7 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
   
   // Infinite scrolling state
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
-  const [oldestTimestamp, setOldestTimestamp] = useState<number | null>(null)
+  const [, setOldestTimestamp] = useState<number | null>(null)
   const [hasMoreData, setHasMoreData] = useState(true)
   
   // Context menu state
@@ -429,6 +432,17 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
       height,
       layout: { background: { color: '#0e1220' }, textColor: '#d1d4dc' },
       grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
+      localization: {
+        timeFormatter: (time: number) => {
+          const d = new Date(time * 1000);
+          return new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          }).format(d);
+        },
+      },
       timeScale: {
         borderColor: '#2b3245',
         timeVisible: true,
@@ -617,9 +631,12 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
         isLoadingOlderRef.current = false
         
         // Fetch bars and labels in parallel
+        // Fetch labels for entire data range to get all user-created labels
+        const dataStart = 1420070400  // Jan 1, 2015
+        const dataEnd = 1798761540    // Dec 31, 2026 (allows for daily updates)
         const [bars, labels] = await Promise.all([
           fetchBars(symbol, timeframe),
-          fetchUserLabels(symbol, timeframe)
+          fetchUserLabels(symbol, timeframe, dataStart, dataEnd)
         ])
 
         if (cancelled) return
@@ -680,9 +697,12 @@ const CustomChartWithMLLabels: React.FC<CustomChartProps> = ({
     
     try {
       console.log('[REFRESH] Refreshing markers...')
-      
-      // Fetch fresh labels
-      const labels = await fetchUserLabels(symbol, timeframe)
+
+      // Fetch fresh labels for the entire data range (2015-2026+)
+      // Use a wide time range to ensure we get all labels including newly created ones
+      const dataStart = 1420070400  // Jan 1, 2015
+      const dataEnd = 1798761540    // Dec 31, 2026 (allows for daily updates)
+      const labels = await fetchUserLabels(symbol, timeframe, dataStart, dataEnd)
       console.log(`[REFRESH] Got ${labels.length} labels`)
       
       // Log a few recent labels to see if new ones are coming through

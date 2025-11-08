@@ -4,10 +4,14 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 import asyncpg
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# IST timezone offset (UTC+5:30)
+IST_OFFSET = timedelta(hours=5, minutes=30)
+IST_TIMEZONE = timezone(IST_OFFSET)
 
 # ---------- Pydantic Models ----------
 class LabelCreate(BaseModel):
@@ -65,9 +69,15 @@ async def create_label(
         
         # Normalize timeframe to match DB format ('5' -> '5min')
         timeframe = f"{label_data.timeframe}min" if label_data.timeframe.isdigit() else label_data.timeframe
-        
+
         # Convert unix timestamp to PostgreSQL timestamp
-        timestamp = datetime.fromtimestamp(label_data.timestamp)
+        # Frontend sends UTC timestamps, but database stores naive IST timestamps
+        # Convert: UTC timestamp → UTC datetime → IST datetime → naive IST datetime
+        utc_dt = datetime.fromtimestamp(label_data.timestamp, tz=timezone.utc)
+        ist_dt = utc_dt.astimezone(IST_TIMEZONE)
+        timestamp = ist_dt.replace(tzinfo=None)  # Make naive for DB storage
+
+        logger.info(f"[LABEL CREATE] UTC timestamp {label_data.timestamp} → UTC {utc_dt} → IST {ist_dt} → naive {timestamp}")
         
         async with pool.acquire() as conn:
             # First check if a label already exists
@@ -121,9 +131,11 @@ async def delete_label(
         
         # Normalize timeframe
         timeframe = f"{label_data.timeframe}min" if label_data.timeframe.isdigit() else label_data.timeframe
-        
-        # Convert unix timestamp to PostgreSQL timestamp
-        timestamp = datetime.fromtimestamp(label_data.timestamp)
+
+        # Convert unix timestamp to PostgreSQL timestamp (UTC → IST naive)
+        utc_dt = datetime.fromtimestamp(label_data.timestamp, tz=timezone.utc)
+        ist_dt = utc_dt.astimezone(IST_TIMEZONE)
+        timestamp = ist_dt.replace(tzinfo=None)  # Make naive for DB storage
         
         async with pool.acquire() as conn:
             result = await conn.execute("""
