@@ -3,6 +3,7 @@ API Key Authentication Module
 
 Provides FastAPI dependency for securing endpoints with API key authentication.
 """
+import secrets
 from typing import Optional
 
 from fastapi import Header, HTTPException, status
@@ -46,8 +47,10 @@ async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Ke
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
-    # Validate API key
-    if x_api_key != settings.api_key:
+    # Validate API key using constant-time comparison to prevent timing attacks
+    # SEC-CRITICAL-001 FIX: Use secrets.compare_digest() instead of direct string comparison
+    # This prevents attackers from using timing analysis to iteratively discover the API key
+    if not secrets.compare_digest(x_api_key, settings.api_key):
         logger.warning("API request rejected: Invalid API key provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

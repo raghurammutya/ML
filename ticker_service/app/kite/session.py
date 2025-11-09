@@ -16,6 +16,9 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError("pyotp is required for Kite session automation") from exc
 
+# SEC-CRITICAL-003 FIX: Import secure token storage
+from .secure_token_storage import get_secure_storage
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -51,10 +54,20 @@ class KiteSession:
 
     # ------------------------------------------------------------------
     def _load_existing_token(self) -> bool:
-        if not self.token_path.exists():
-            return False
+        """
+        Load existing token from secure encrypted storage.
+
+        SEC-CRITICAL-003 FIX: Uses encrypted token storage instead of plaintext.
+        Automatically migrates from old plaintext format if found.
+        """
         try:
-            payload = json.loads(self.token_path.read_text())
+            # SEC-CRITICAL-003 FIX: Load from encrypted storage
+            storage = get_secure_storage()
+            payload = storage.load_token(self.token_path)
+
+            if not payload:
+                return False
+
             expires_at = datetime.fromisoformat(payload["expires_at"])
             if expires_at <= datetime.now():
                 logger.info("Cached token expired at %s", expires_at.isoformat())
@@ -70,13 +83,18 @@ class KiteSession:
                 logger.warning("Cached token failed validation: %s", e)
                 return False
 
-            logger.info("Loaded cached token for %s", self.account_id)
+            logger.info("Loaded cached token for %s (encrypted)", self.account_id)
             return True
         except Exception as exc:
             logger.warning("Failed to load cached token (%s)", exc)
             return False
 
     def _save_access_token(self, access_token: str) -> None:
+        """
+        Save access token to secure encrypted storage.
+
+        SEC-CRITICAL-003 FIX: Uses encrypted token storage with proper file permissions (600).
+        """
         # Many brokers rotate access tokens at start of trading day; keep your heuristic
         expiry = datetime.combine(datetime.now().date() + timedelta(days=1), time(hour=7, minute=30))
         payload = {
@@ -84,8 +102,11 @@ class KiteSession:
             "expires_at": expiry.isoformat(),
             "created_at": datetime.now().isoformat(),
         }
-        self.token_path.write_text(json.dumps(payload, indent=2))
-        logger.info("Saved new access token; expires at %s", payload["expires_at"])
+
+        # SEC-CRITICAL-003 FIX: Save to encrypted storage with 600 permissions
+        storage = get_secure_storage()
+        storage.save_token(self.token_path, payload)
+        logger.info("Saved new access token (encrypted); expires at %s", payload["expires_at"])
 
     # ------------------------------------------------------------------
     def auto_login(self) -> None:

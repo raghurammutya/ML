@@ -211,17 +211,38 @@ class TokenRefresher:
             # Don't re-raise - continue with other accounts
 
     async def _check_preemptive_refresh(self) -> None:
-        """Check if any tokens need preemptive refresh based on expiry time."""
-        import json
+        """
+        Check if any tokens need preemptive refresh based on expiry time.
 
+        SEC-CRITICAL-003 FIX: Updated to work with encrypted token files.
+        """
         if not self._token_dir.exists():
             return
 
-        for token_file in self._token_dir.glob("kite_token_*.json"):
-            try:
-                data = json.loads(token_file.read_text())
-                expires_at_str = data.get("expires_at")
+        # SEC-CRITICAL-003 FIX: Import secure storage
+        try:
+            from ..kite.secure_token_storage import get_secure_storage
+            storage = get_secure_storage()
+        except Exception as e:
+            logger.error(f"Failed to initialize secure storage: {e}")
+            return
 
+        # Check both encrypted (.json.enc) and legacy plaintext (.json) files
+        for token_file in list(self._token_dir.glob("kite_token_*.json.enc")) + list(self._token_dir.glob("kite_token_*.json")):
+            try:
+                # Extract account ID from filename
+                # kite_token_primary.json.enc -> primary
+                # kite_token_primary.json -> primary
+                account_id = token_file.stem.replace("kite_token_", "").replace(".json", "")
+
+                # Load token using secure storage (handles both encrypted and plaintext)
+                base_path = self._token_dir / f"kite_token_{account_id}.json"
+                data = storage.load_token(base_path)
+
+                if not data:
+                    continue
+
+                expires_at_str = data.get("expires_at")
                 if not expires_at_str:
                     continue
 
@@ -232,9 +253,6 @@ class TokenRefresher:
                 time_until_expiry = (expires_at - now).total_seconds() / 60  # minutes
 
                 if 0 < time_until_expiry < self._preemptive_minutes:
-                    # Extract account ID from filename: kite_token_primary.json -> primary
-                    account_id = token_file.stem.replace("kite_token_", "")
-
                     logger.warning(
                         f"Token for {account_id} expires in {time_until_expiry:.0f} minutes, "
                         f"triggering preemptive refresh"
@@ -248,16 +266,35 @@ class TokenRefresher:
                 logger.error(f"Error checking token {token_file.name}: {exc}")
 
     def get_status(self) -> Dict[str, Any]:
-        """Get current status of token refresher."""
-        import json
+        """
+        Get current status of token refresher.
 
+        SEC-CRITICAL-003 FIX: Updated to work with encrypted token files.
+        """
         token_status = []
 
-        if self._token_dir.exists():
-            for token_file in self._token_dir.glob("kite_token_*.json"):
+        # SEC-CRITICAL-003 FIX: Use secure storage to read tokens
+        try:
+            from ..kite.secure_token_storage import get_secure_storage
+            storage = get_secure_storage()
+        except Exception as e:
+            logger.error(f"Failed to initialize secure storage: {e}")
+            storage = None
+
+        if self._token_dir.exists() and storage:
+            # Check both encrypted and plaintext files
+            for token_file in list(self._token_dir.glob("kite_token_*.json.enc")) + list(self._token_dir.glob("kite_token_*.json")):
                 try:
-                    data = json.loads(token_file.read_text())
-                    account_id = token_file.stem.replace("kite_token_", "")
+                    # Extract account ID from filename
+                    account_id = token_file.stem.replace("kite_token_", "").replace(".json", "")
+
+                    # Load token using secure storage
+                    base_path = self._token_dir / f"kite_token_{account_id}.json"
+                    data = storage.load_token(base_path)
+
+                    if not data:
+                        continue
+
                     expires_at_str = data.get("expires_at")
 
                     if expires_at_str:

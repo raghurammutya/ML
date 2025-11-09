@@ -8,8 +8,10 @@ import httpx
 import jwt
 import time
 import logging
+import ipaddress
 from typing import Optional, Dict, Any
 from functools import lru_cache
+from urllib.parse import urlparse
 from fastapi import HTTPException, Security, Depends, status, WebSocket
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -30,11 +32,106 @@ class JWTAuthError(Exception):
         super().__init__(detail)
 
 
+def validate_jwks_url(url: str) -> None:
+    """
+    Validate JWKS URL to prevent SSRF attacks.
+
+    SEC-CRITICAL-002 FIX: Comprehensive SSRF protection for JWKS URL fetching.
+
+    Protections:
+    1. HTTPS-only (prevents downgrade attacks)
+    2. Domain whitelist (only allowed user service domains)
+    3. Private IP blocking (prevents AWS metadata, internal services access)
+
+    Args:
+        url: JWKS URL to validate
+
+    Raises:
+        JWTAuthError: If URL validation fails
+
+    References:
+        - CWE-918: Server-Side Request Forgery (SSRF)
+        - OWASP SSRF Prevention Cheat Sheet
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise JWTAuthError(f"Invalid JWKS URL format: {e}")
+
+    # 1. HTTPS-only enforcement
+    if parsed.scheme != 'https':
+        raise JWTAuthError(
+            f"JWKS URL must use HTTPS protocol, got '{parsed.scheme}://'. "
+            "HTTP is not allowed for security reasons."
+        )
+
+    # 2. Domain whitelist validation
+    # Extract allowed domains from USER_SERVICE_URL
+    allowed_domains = []
+    if USER_SERVICE_URL:
+        try:
+            user_service_parsed = urlparse(USER_SERVICE_URL)
+            if user_service_parsed.hostname:
+                allowed_domains.append(user_service_parsed.hostname)
+        except Exception:
+            pass
+
+    # Add localhost for development (only if USER_SERVICE_URL contains localhost)
+    if any('localhost' in domain or '127.0.0.1' in domain for domain in allowed_domains):
+        allowed_domains.extend(['localhost', '127.0.0.1'])
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise JWTAuthError("JWKS URL must contain a valid hostname")
+
+    # Validate against whitelist
+    if allowed_domains and hostname not in allowed_domains:
+        raise JWTAuthError(
+            f"JWKS URL domain '{hostname}' is not in the allowed whitelist: {allowed_domains}. "
+            "Configure USER_SERVICE_URL to set the allowed domain."
+        )
+
+    # 3. Private IP address blocking (prevent AWS metadata, internal services)
+    try:
+        ip = ipaddress.ip_address(hostname)
+
+        # Block all private IP ranges
+        if ip.is_private:
+            raise JWTAuthError(
+                f"JWKS URL cannot target private IP address: {hostname}. "
+                "Private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are blocked."
+            )
+
+        # Block loopback (unless explicitly allowed via localhost)
+        if ip.is_loopback and hostname not in ['localhost', '127.0.0.1']:
+            raise JWTAuthError(f"JWKS URL cannot target loopback address: {hostname}")
+
+        # Block link-local (AWS metadata service at 169.254.169.254)
+        if ip.is_link_local:
+            raise JWTAuthError(
+                f"JWKS URL cannot target link-local address: {hostname}. "
+                "This blocks access to cloud metadata services (169.254.169.254)."
+            )
+
+        # Block multicast and reserved
+        if ip.is_multicast or ip.is_reserved:
+            raise JWTAuthError(f"JWKS URL cannot target multicast/reserved address: {hostname}")
+
+    except ValueError:
+        # hostname is a domain name, not an IP - this is preferred
+        # Additional DNS rebinding protection could be added here
+        pass
+
+    logger.info(f"JWKS URL validation passed for: {url}")
+
+
 # Cache JWKS for 1 hour (timestamp-based cache key)
 @lru_cache(maxsize=1)
 def get_jwks(timestamp: int) -> Dict[str, Any]:
     """
     Fetch JWKS from user_service (cached per hour)
+
+    SEC-CRITICAL-002 FIX: Added comprehensive SSRF protection before fetching JWKS.
 
     Args:
         timestamp: Current hour timestamp (for cache invalidation)
@@ -43,18 +140,29 @@ def get_jwks(timestamp: int) -> Dict[str, Any]:
         JWKS dictionary
 
     Raises:
-        JWTAuthError: If JWKS fetch fails
+        JWTAuthError: If JWKS fetch fails or URL validation fails
     """
+    # Construct JWKS URL
+    jwks_url = f"{USER_SERVICE_URL}/v1/auth/.well-known/jwks.json"
+
+    # SEC-CRITICAL-002 FIX: Validate URL before fetching to prevent SSRF attacks
+    validate_jwks_url(jwks_url)
+
     try:
+        # Fetch JWKS with timeout (prevents hanging on slow/malicious endpoints)
         response = httpx.get(
-            f"{USER_SERVICE_URL}/v1/auth/.well-known/jwks.json",
-            timeout=5.0
+            jwks_url,
+            timeout=5.0,
+            follow_redirects=False  # Additional protection: don't follow redirects
         )
         response.raise_for_status()
         logger.info("JWKS fetched successfully from user_service")
         return response.json()
     except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch JWKS: {e}")
+        logger.error(f"Failed to fetch JWKS from {jwks_url}: {e}")
+        raise JWTAuthError("Failed to fetch JWT verification keys")
+    except Exception as e:
+        logger.error(f"Unexpected error fetching JWKS: {e}", exc_info=True)
         raise JWTAuthError("Failed to fetch JWT verification keys")
 
 

@@ -27,25 +27,38 @@ class CredentialEncryption:
 
         Args:
             encryption_key: 32-byte encryption key. If None, reads from environment.
+
+        Raises:
+            ValueError: If encryption key is not provided or invalid
+
+        Security Note:
+            SEC-CRITICAL-004 FIX: Encryption key MUST be provided via environment variable.
+            Random key generation has been removed to prevent data loss and key exposure.
         """
         if encryption_key is None:
-            # Read from environment or generate for development
+            # SEC-CRITICAL-004 FIX: REQUIRE encryption key from environment
+            # Never auto-generate keys as this causes data loss on restart
             key_hex = os.environ.get('ENCRYPTION_KEY')
-            if key_hex:
-                encryption_key = bytes.fromhex(key_hex)
-            else:
-                # Development only: Generate a key (should be persisted)
-                logger.warning(
-                    "No ENCRYPTION_KEY found, generating temporary key. "
-                    "THIS IS NOT SECURE FOR PRODUCTION!"
+            if not key_hex:
+                raise ValueError(
+                    "ENCRYPTION_KEY environment variable is required for credential encryption. "
+                    "Generate a key with: python -c 'import os; print(os.urandom(32).hex())' "
+                    "and set it in your environment: export ENCRYPTION_KEY=<generated_key>"
                 )
-                encryption_key = AESGCM.generate_key(bit_length=256)
-                logger.info(f"Generated key (save to env): {encryption_key.hex()}")
+
+            try:
+                encryption_key = bytes.fromhex(key_hex)
+            except ValueError as e:
+                raise ValueError(f"Invalid ENCRYPTION_KEY format. Must be a hex string: {e}")
 
         if len(encryption_key) != 32:
-            raise ValueError("Encryption key must be exactly 32 bytes")
+            raise ValueError(
+                f"Encryption key must be exactly 32 bytes (64 hex characters), got {len(encryption_key)} bytes"
+            )
 
+        # SEC-CRITICAL-004 FIX: Never log encryption keys
         self.cipher = AESGCM(encryption_key)
+        logger.info("Credential encryption initialized successfully")
 
     def encrypt(self, plaintext: str) -> bytes:
         """
