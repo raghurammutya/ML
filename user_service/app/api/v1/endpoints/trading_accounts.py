@@ -703,86 +703,11 @@ async def list_credentials_internal(
 # ============================================================================
 # Subscription Tier Management Endpoints
 # ============================================================================
-
-@router.post(
-    "/{trading_account_id}/detect-tier",
-    response_model=schemas.DetectSubscriptionTierResponse,
-    summary="Detect subscription tier for trading account",
-    tags=["Trading Accounts", "Subscription Tier"]
-)
-async def detect_subscription_tier(
-    trading_account_id: int,
-    force_refresh: bool = False,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
-):
-    """
-    Detect KiteConnect subscription tier (Personal vs Connect).
-
-    Detection is cached for 24 hours unless force_refresh=true.
-
-    **Subscription Tiers:**
-    - **Personal API (Free)**: Trading only, no market data access
-    - **Kite Connect (Rs. 500/month)**: Trading + real-time market data
-    - **Startup Program (Free)**: Full features for eligible startups
-
-    **Detection Method:**
-    - Attempts to call market data API (quote)
-    - Permission error → Personal tier
-    - Success → Connect/Startup tier
-
-    **Parameters:**
-    - **trading_account_id**: Trading account to detect
-    - **force_refresh**: Force re-detection even if recently checked (default: false)
-
-    **Returns:**
-    - Subscription tier (unknown/personal/connect/startup)
-    - Market data availability (true/false)
-    - Last checked timestamp
-    - Detection method used
-    """
-    service = TradingAccountService(db, redis)
-
-    # Verify user has access to this account
-    account = db.query(TradingAccount).filter(
-        TradingAccount.trading_account_id == trading_account_id
-    ).first()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Trading account {trading_account_id} not found"
-        )
-
-    # Check if user is owner or has membership
-    is_owner = account.user_id == current_user.user_id
-    has_membership = db.query(TradingAccountMembership).filter(
-        TradingAccountMembership.trading_account_id == trading_account_id,
-        TradingAccountMembership.member_user_id == current_user.user_id,
-        TradingAccountMembership.revoked_at.is_(None)
-    ).first() is not None
-
-    if not is_owner and not has_membership:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this trading account"
-        )
-
-    try:
-        result = await service.detect_subscription_tier(trading_account_id, force_refresh)
-        return schemas.DetectSubscriptionTierResponse(**result)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to detect subscription tier: {str(e)}"
-        )
-
+# Subscription Tier Management
+# Note: Subscription tier detection removed as it required direct KiteConnect
+# access which violates service architecture. Tier should be set manually via
+# PUT /subscription-tier endpoint or delegated to ticker_service if needed.
+# ============================================================================
 
 @router.put(
     "/{trading_account_id}/subscription-tier",
@@ -853,70 +778,4 @@ async def update_subscription_tier(
         )
 
 
-@router.get(
-    "/{trading_account_id}/subscription-tier",
-    response_model=schemas.DetectSubscriptionTierResponse,
-    summary="Get current subscription tier",
-    tags=["Trading Accounts", "Subscription Tier"]
-)
-async def get_subscription_tier(
-    trading_account_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
-):
-    """
-    Get current cached subscription tier without re-detection.
-
-    Returns cached tier information. Use POST /detect-tier with force_refresh=true
-    to force re-detection.
-
-    **Parameters:**
-    - **trading_account_id**: Trading account to query
-
-    **Returns:**
-    - Current subscription tier
-    - Market data availability
-    - Last checked timestamp
-    - Detection method ("cached" if from database)
-    """
-    service = TradingAccountService(db, redis)
-
-    # Verify user has access
-    account = db.query(TradingAccount).filter(
-        TradingAccount.trading_account_id == trading_account_id
-    ).first()
-
-    if not account:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Trading account {trading_account_id} not found"
-        )
-
-    # Check if user is owner or has membership
-    is_owner = account.user_id == current_user.user_id
-    has_membership = db.query(TradingAccountMembership).filter(
-        TradingAccountMembership.trading_account_id == trading_account_id,
-        TradingAccountMembership.member_user_id == current_user.user_id,
-        TradingAccountMembership.revoked_at.is_(None)
-    ).first() is not None
-
-    if not is_owner and not has_membership:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this trading account"
-        )
-
-    try:
-        result = await service.detect_subscription_tier(trading_account_id, force_refresh=False)
-        return schemas.DetectSubscriptionTierResponse(**result)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get subscription tier: {str(e)}"
-        )
+# GET /subscription-tier endpoint removed - tier is now manually set only

@@ -19,7 +19,6 @@ from app.core.redis_client import RedisClient
 from app.models import User, TradingAccount, TradingAccountMembership, TradingAccountStatus
 from app.models.trading_account import SubscriptionTier as SubscriptionTierEnum
 from app.services.event_service import EventService
-from app.services.subscription_tier_detector import SubscriptionTierDetector
 
 
 class TradingAccountService:
@@ -634,84 +633,6 @@ class TradingAccountService:
             return ""
         import base64
         return base64.b64decode(encrypted.encode()).decode()
-
-    async def detect_subscription_tier(
-        self,
-        trading_account_id: int,
-        force_refresh: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Detect subscription tier for trading account.
-
-        Args:
-            trading_account_id: Trading account ID
-            force_refresh: Force re-detection even if recently checked
-
-        Returns:
-            Dict with tier info
-        """
-        # Get trading account
-        account = self.db.query(TradingAccount).filter(
-            TradingAccount.trading_account_id == trading_account_id
-        ).first()
-
-        if not account:
-            raise ValueError(f"Trading account {trading_account_id} not found")
-
-        # Check if we need to refresh
-        if not force_refresh:
-            if not SubscriptionTierDetector.should_refresh_tier(
-                account.subscription_tier_last_checked
-            ):
-                # Return cached tier
-                return {
-                    "trading_account_id": trading_account_id,
-                    "subscription_tier": account.subscription_tier.value,
-                    "market_data_available": account.market_data_available,
-                    "last_checked": (
-                        account.subscription_tier_last_checked.isoformat()
-                        if account.subscription_tier_last_checked
-                        else None
-                    ),
-                    "detection_method": "cached",
-                    "message": "Using cached subscription tier"
-                }
-
-        # Decrypt credentials
-        api_key = self._decrypt_credential(account.api_key_encrypted)
-        access_token = self._decrypt_credential(account.access_token_encrypted)
-
-        if not api_key or not access_token:
-            raise ValueError(
-                f"Trading account {trading_account_id} has incomplete credentials "
-                "(api_key or access_token missing)"
-            )
-
-        # Detect tier
-        tier_str, market_data_available, detection_method = await SubscriptionTierDetector.detect_tier(
-            api_key=api_key,
-            access_token=access_token
-        )
-
-        # Convert string to enum
-        tier_enum = SubscriptionTierEnum(tier_str)
-
-        # Update database
-        account.subscription_tier = tier_enum
-        account.market_data_available = market_data_available
-        account.subscription_tier_last_checked = datetime.utcnow()
-
-        self.db.commit()
-        self.db.refresh(account)
-
-        return {
-            "trading_account_id": trading_account_id,
-            "subscription_tier": tier_str,
-            "market_data_available": market_data_available,
-            "last_checked": account.subscription_tier_last_checked.isoformat(),
-            "detection_method": detection_method,
-            "message": f"Detected tier: {SubscriptionTierDetector.tier_to_string_description(tier_str)}"
-        }
 
     async def update_subscription_tier(
         self,
