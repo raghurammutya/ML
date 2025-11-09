@@ -9,6 +9,7 @@ from .cache import SimpleCache
 from .instrument import Instrument
 from .account import Account
 from .accounts_collection import AccountsCollection
+from .organization import OrganizationsCollection
 from .filter import InstrumentFilter
 from .strategy import Strategy
 from .services import AlertService, MessagingService, CalendarService, NewsService
@@ -127,6 +128,9 @@ class TradingClient:
 
         # Initialize accounts collection for multi-account support
         self._accounts_collection = AccountsCollection(self._api)
+
+        # Initialize organizations collection for team collaboration
+        self._organizations_collection = OrganizationsCollection(self._api)
 
     @classmethod
     def from_credentials(
@@ -451,6 +455,38 @@ class TradingClient:
             >>> primary.buy("NIFTY50", 50)
         """
         return self._accounts_collection
+
+    @property
+    def Organizations(self) -> OrganizationsCollection:
+        """
+        Access organizations collection for team collaboration.
+
+        Returns:
+            OrganizationsCollection instance
+
+        Example:
+            >>> # Create organization
+            >>> org = client.Organizations.create(
+            ...     name="My Trading Firm",
+            ...     slug="my-trading-firm",
+            ...     description="Quantitative trading firm"
+            ... )
+            >>>
+            >>> # List organizations
+            >>> for org in client.Organizations.list():
+            ...     print(f"{org.name}: {len(org.members())} members")
+            >>>
+            >>> # Access specific organization
+            >>> org = client.Organizations[123]
+            >>> print(f"Organization: {org.name}")
+            >>>
+            >>> # Invite member
+            >>> invitation = org.invite("colleague@example.com", role="MEMBER")
+            >>>
+            >>> # Accept invitation
+            >>> member = client.Organizations.accept_invitation(invitation_token)
+        """
+        return self._organizations_collection
 
     @property
     def indicators(self) -> IndicatorRegistry:

@@ -26,6 +26,12 @@ from .client import TradingClient
 from .instrument import Instrument
 from .account import Account, Position, Order, Funds
 from .accounts_collection import AccountsCollection, AccountProxy
+from .organization import (
+    Organization,
+    OrganizationMember,
+    OrganizationInvitation,
+    OrganizationsCollection
+)
 from .filter import InstrumentFilter
 from .strategy import Strategy, StrategyMetrics
 
@@ -95,6 +101,12 @@ __all__ = [
     "Funds",
     "AccountsCollection",
     "AccountProxy",
+
+    # Organization classes
+    "Organization",
+    "OrganizationMember",
+    "OrganizationInvitation",
+    "OrganizationsCollection",
 
     # Filtering
     "InstrumentFilter",
