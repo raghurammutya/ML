@@ -1,39 +1,58 @@
 """
 Margin Calculator
 
-Calculates margin requirements for F&O trades with dynamic adjustments for:
+Fetches real-time margin requirements from Kite API and applies dynamic multipliers for:
 - VIX (India VIX volatility index) - 1.0x to 2.0x multiplier
 - Expiry day proximity - 1.0x to 3.5x multiplier
 - Price movement of underlying - 1.0x to 1.6x multiplier
-- NSE regulatory changes - periodic margin file updates
+- NSE regulatory changes - from Kite API
 
-Supports Zerodha margin structure:
-- SPAN margin (risk-based, calculated by NSE)
-- Exposure margin (3% fixed by SEBI)
-- Premium margin (100% for option selling)
-- Additional margin (regulatory/ad-hoc)
+This service INTEGRATES with KiteConnect API via ticker_service:
+- Uses kite.order_margins() for single instrument margins
+- Uses kite.basket_order_margins() for multi-leg strategies
+- Applies dynamic multipliers on top of Kite's base margins
+
+Why use Kite API:
+- Each instrument has different margins (updated by NSE daily)
+- Margins vary by expiry, volatility, regulatory changes
+- Kite API provides real-time, accurate margins
+- No need to re-engineer NSE margin calculation logic
 
 Usage:
-    calculator = MarginCalculator()
+    # Initialize with ticker_service URL
+    calculator = MarginCalculator(ticker_service_url="http://localhost:8080")
+
+    # Fetch real-time margin from Kite API (via ticker_service)
+    kite_margin = await calculator.fetch_margin_from_ticker_service(
+        tradingsymbol="NIFTY24NOV24000CE",
+        exchange="NFO",
+        transaction_type="BUY",
+        quantity=50,
+        price=150.0,
+        product="MIS",
+        account_id="primary"
+    )
+
+    # Apply dynamic multipliers and get enhanced margin
     margin = calculator.calculate_margin(
         instrument_token=256265,
         quantity=50,
         side='BUY',
         segment='NFO-OPT',
-        strike_price=24000,
-        option_type='CE',
         underlying_price=23950,
-        vix=15.5
+        vix=15.5  # For multiplier calculation
     )
 
-    print(f"Total margin: ₹{margin.total_margin}")
+    print(f"Kite margin: ₹{kite_margin['total']}")
+    print(f"Enhanced margin with multipliers: ₹{margin.total_margin}")
     print(f"VIX multiplier: {margin.vix_multiplier}x")
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+import httpx
+from typing import Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from enum import Enum
@@ -154,10 +173,161 @@ class MarginCalculator:
         "FINNIFTY": 40,
     }
 
-    def __init__(self):
-        """Initialize margin calculator."""
+    def __init__(self, ticker_service_url: str = "http://localhost:8080"):
+        """
+        Initialize margin calculator.
+
+        Args:
+            ticker_service_url: Base URL for ticker service (default: http://localhost:8080)
+        """
+        self.ticker_service_url = ticker_service_url
         self.nse_margin_cache = {}  # Cache for NSE margin files
         self.last_margin_update = None
+
+    async def fetch_margin_from_ticker_service(
+        self,
+        tradingsymbol: str,
+        exchange: str,
+        transaction_type: str,  # 'BUY' or 'SELL'
+        quantity: int,
+        price: float,
+        order_type: str = "MARKET",
+        product: str = "MIS",
+        variety: str = "regular",
+        account_id: str = "primary",
+        trigger_price: Optional[float] = None
+    ) -> Optional[Dict]:
+        """
+        Fetch real-time margin from ticker_service (which calls Kite API).
+
+        This is the PREFERRED method - always use ticker_service when available.
+
+        Args:
+            tradingsymbol: Trading symbol (e.g., "NIFTY24NOV24000CE")
+            exchange: Exchange (NFO, NSE, BSE)
+            transaction_type: 'BUY' or 'SELL'
+            quantity: Order quantity
+            price: Order price
+            order_type: Order type (MARKET, LIMIT)
+            product: Product type (MIS, NRML, CNC)
+            variety: Order variety (regular, amo, iceberg)
+            account_id: Trading account ID
+            trigger_price: Trigger price for SL orders
+
+        Returns:
+            Dict with margin details from Kite API via ticker_service, or None if unavailable
+
+        API Response from ticker_service:
+            [
+                {
+                    "type": "equity",
+                    "tradingsymbol": "NIFTY24NOV24000CE",
+                    "exchange": "NFO",
+                    "span": 12345.0,        # SPAN margin
+                    "exposure": 1234.0,     # Exposure margin
+                    "option_premium": 0.0,  # Premium margin (for selling)
+                    "additional": 0.0,      # Additional margin
+                    "total": 13579.0,       # Total margin required
+                    "leverage": 1.0,
+                    "pnl": {...}
+                }
+            ]
+        """
+        try:
+            # Build request payload matching ticker_service's BasketOrderMarginRequest model
+            payload = {
+                "account_id": account_id,
+                "consider_positions": True,
+                "orders": [
+                    {
+                        "exchange": exchange,
+                        "tradingsymbol": tradingsymbol,
+                        "transaction_type": transaction_type,
+                        "variety": variety,
+                        "product": product,
+                        "order_type": order_type,
+                        "quantity": quantity,
+                        "price": price,
+                        "trigger_price": trigger_price
+                    }
+                ]
+            }
+
+            # Call ticker_service /orders/margins endpoint
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.ticker_service_url}/orders/margins",
+                    json=payload
+                )
+                response.raise_for_status()
+
+                margin_response = response.json()
+                # Returns list of margins, we want the first one
+                return margin_response[0] if margin_response else None
+
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error fetching margins from ticker_service: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching margins from ticker_service: {e}")
+            return None
+
+    async def fetch_basket_margin_from_ticker_service(
+        self,
+        orders: List[Dict],
+        account_id: str = "primary",
+        consider_positions: bool = True
+    ) -> Optional[Dict]:
+        """
+        Fetch consolidated margin for a basket of orders from ticker_service.
+
+        Args:
+            orders: List of order dicts with keys: exchange, tradingsymbol,
+                   transaction_type, variety, product, order_type, quantity, price
+            account_id: Trading account ID
+            consider_positions: Whether to consider existing positions
+
+        Returns:
+            Dict with consolidated margin for the entire basket
+
+        API Response from ticker_service:
+            {
+                "initial": {
+                    "type": "equity",
+                    "total": 50000.0,
+                    "span": 45000.0,
+                    "exposure": 5000.0,
+                    ...
+                },
+                "final": {
+                    "type": "equity",
+                    "total": 30000.0,
+                    ...
+                },
+                "orders": [...]  # Individual order margins
+            }
+        """
+        try:
+            payload = {
+                "account_id": account_id,
+                "consider_positions": consider_positions,
+                "orders": orders
+            }
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.ticker_service_url}/orders/margins/basket",
+                    json=payload
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error fetching basket margins from ticker_service: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching basket margins from ticker_service: {e}")
+            return None
 
     def calculate_margin(
         self,
