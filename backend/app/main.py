@@ -31,7 +31,7 @@ from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
 from app.services.session_subscription_manager import SessionSubscriptionManager, init_subscription_manager
 from app.dependencies import set_cache_manager
-from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies
+from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies, smart_orders
 from app.workers.strategy_m2m_worker import strategy_m2m_task
 from app.routes import calendar_simple as calendar
 from app.routes import admin_calendar
@@ -242,6 +242,7 @@ async def lifespan(app: FastAPI):
         instruments.set_data_manager(data_manager)  # Set data manager for instruments
         app.include_router(instruments.router)  # Instruments: list and filter tradeable symbols
         app.include_router(strategies.router)  # Strategies: manage trading strategies and instruments
+        app.include_router(smart_orders.router)  # Smart orders: order validation, margin/cost calculation, smart placement
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:
