@@ -84,17 +84,17 @@ async def test_get_all_tasks_returns_list():
     await executor.submit_task(
         operation="place_order",
         account_id="primary",
-        params={"symbol": "STOCK0", "qty": 10}
+        params={"tradingsymbol": "STOCK0", "quantity": 10}
     )
     await executor.submit_task(
         operation="place_order",
         account_id="primary",
-        params={"symbol": "STOCK1", "qty": 20}
+        params={"tradingsymbol": "STOCK1", "quantity": 20}
     )
     await executor.submit_task(
         operation="place_order",
         account_id="primary",
-        params={"symbol": "STOCK2", "qty": 30}
+        params={"tradingsymbol": "STOCK2", "quantity": 30}
     )
 
     all_tasks = executor.get_all_tasks()
@@ -110,16 +110,17 @@ async def test_get_all_tasks_with_status_filter():
     executor = OrderExecutor(max_tasks=100)
 
     # Submit tasks with different params
+    # Fixed: Use tradingsymbol and quantity for idempotency
     task1 = await executor.submit_task(
         operation="place_order",
         account_id="primary",
-        params={"symbol": "A", "qty": 1}
+        params={"tradingsymbol": "A", "quantity": 1}
     )
 
     task2 = await executor.submit_task(
         operation="place_order",
         account_id="primary",
-        params={"symbol": "B", "qty": 2}
+        params={"tradingsymbol": "B", "quantity": 2}
     )
 
     # Manually set one to COMPLETED
@@ -214,9 +215,12 @@ async def test_generate_idempotency_key_deterministic():
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_generate_idempotency_key_different_for_different_symbols():
-    """Verify different symbols generate different idempotency keys"""
-    params1 = {"symbol": "INFY", "qty": 100, "price": 1500}
-    params2 = {"symbol": "RELIANCE", "qty": 100, "price": 1500}
+    """Verify different symbols generate different idempotency keys
+
+    Fixed: Use 'tradingsymbol' instead of 'symbol' for idempotency key generation
+    """
+    params1 = {"tradingsymbol": "INFY", "quantity": 100, "price": 1500}
+    params2 = {"tradingsymbol": "RELIANCE", "quantity": 100, "price": 1500}
 
     key1 = OrderExecutor.generate_idempotency_key("place_order", params1, "primary")
     key2 = OrderExecutor.generate_idempotency_key("place_order", params2, "primary")

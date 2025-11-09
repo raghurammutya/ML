@@ -25,27 +25,37 @@ from app.order_executor import OrderExecutor, OrderTask, TaskStatus, CircuitStat
 
 @pytest.fixture
 def executor():
-    """Fixture providing OrderExecutor instance"""
+    """Fixture providing OrderExecutor instance
+
+    Fixed: Changed from incorrect parameters (max_workers, circuit_failure_threshold,
+    recovery_timeout_seconds) to actual OrderExecutor parameters (max_tasks,
+    worker_poll_interval, worker_error_backoff)
+    """
     return OrderExecutor(
-        max_workers=5, 
-        circuit_failure_threshold=3,
-        recovery_timeout_seconds=5.0
+        max_tasks=100,
+        worker_poll_interval=0.1,  # Faster polling for tests
+        worker_error_backoff=1.0    # Shorter backoff for tests
     )
 
 
 @pytest.fixture
 def mock_kite_client():
-    """Mock KiteConnect client for testing"""
+    """Mock KiteConnect client for testing
+
+    Fixed: OrderExecutor calls client._kite.place_order(), not client.place_order()
+    The client is a KiteClient wrapper, so we need to mock the internal _kite object.
+    """
     client = MagicMock()
-    
-    # Setup default successful responses
-    client.place_order = AsyncMock(return_value={"order_id": "123456"})
-    client.modify_order = AsyncMock(return_value={"order_id": "123456"})
-    client.cancel_order = AsyncMock(return_value={"order_id": "123456"})
-    client.order_history = AsyncMock(return_value=[
-        {"order_id": "123456", "status": "COMPLETE"}
+
+    # Mock the internal _kite object (KiteConnect instance)
+    client._kite = MagicMock()
+    client._kite.place_order = MagicMock(return_value="ORDER_123456")
+    client._kite.modify_order = MagicMock(return_value="ORDER_123456")
+    client._kite.cancel_order = MagicMock(return_value="ORDER_123456")
+    client._kite.order_history = MagicMock(return_value=[
+        {"order_id": "ORDER_123456", "status": "COMPLETE"}
     ])
-    
+
     return client
 
 
@@ -69,7 +79,11 @@ def sample_order_params():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_place_order_success(executor, mock_kite_client, sample_order_params):
-    """Test successful order placement"""
+    """Test successful order placement
+
+    Fixed: execute_task returns bool, modifies task in-place.
+    Check task.status after execution, not return value.
+    """
     # Arrange
     task = OrderTask(
         task_id="task-1",
@@ -78,21 +92,32 @@ async def test_place_order_success(executor, mock_kite_client, sample_order_para
         params=sample_order_params,
         account_id="primary"
     )
-    
+
+    # Mock get_client as a function that returns a context manager
+    # NOTE: get_client is NOT async, it returns a context manager
+    def mock_get_client(account_id):
+        class ClientContext:
+            async def __aenter__(self):
+                return mock_kite_client
+            async def __aexit__(self, *args):
+                pass
+        return ClientContext()
+
     # Act
-    result = await executor.execute_task(task, mock_kite_client)
-    
+    success = await executor.execute_task(task, mock_get_client)
+
     # Assert
-    assert result.status == TaskStatus.COMPLETED, \
-        f"Expected COMPLETED, got {result.status}"
-    assert result.result["order_id"] == "123456", \
-        "Order ID not returned"
-    assert result.attempts == 1, \
-        f"Expected 1 attempt, got {result.attempts}"
-    
-    # Verify Kite API was called correctly
-    mock_kite_client.place_order.assert_called_once()
-    call_args = mock_kite_client.place_order.call_args[1]
+    assert success is True, "execute_task should return True on success"
+    assert task.status == TaskStatus.COMPLETED, \
+        f"Expected COMPLETED, got {task.status}"
+    assert task.result["order_id"] == "ORDER_123456", \
+        f"Order ID not returned correctly: {task.result}"
+    assert task.attempts == 1, \
+        f"Expected 1 attempt, got {task.attempts}"
+
+    # Verify Kite API was called correctly (via client._kite)
+    mock_kite_client._kite.place_order.assert_called_once()
+    call_args = mock_kite_client._kite.place_order.call_args[1]
     assert call_args["tradingsymbol"] == "NIFTY25NOVFUT"
 
 
@@ -101,20 +126,22 @@ async def test_place_order_success(executor, mock_kite_client, sample_order_para
 async def test_place_order_network_error_retry(executor, mock_kite_client, sample_order_params):
     """
     Test retry on network error
-    
+
     Scenario: First 2 attempts fail with network error, 3rd succeeds
     Expected: Task completes with 3 attempts
+
+    Fixed: Use client._kite.place_order and mock get_client context manager
     """
     # Arrange
     from requests.exceptions import ConnectionError
-    
+
     # Simulate: Fail → Fail → Success
-    mock_kite_client.place_order.side_effect = [
+    mock_kite_client._kite.place_order.side_effect = [
         ConnectionError("Network error 1"),
         ConnectionError("Network error 2"),
-        {"order_id": "123456"}  # Success on 3rd attempt
+        "ORDER_123456"  # Success on 3rd attempt
     ]
-    
+
     task = OrderTask(
         task_id="task-2",
         idempotency_key="idem-2",
@@ -123,16 +150,29 @@ async def test_place_order_network_error_retry(executor, mock_kite_client, sampl
         account_id="primary",
         max_attempts=5
     )
-    
-    # Act
-    result = await executor.execute_task(task, mock_kite_client)
-    
+
+    # Mock get_client as a function that returns a context manager
+    # NOTE: get_client is NOT async, it returns a context manager
+    def mock_get_client(account_id):
+        class ClientContext:
+            async def __aenter__(self):
+                return mock_kite_client
+            async def __aexit__(self, *args):
+                pass
+        return ClientContext()
+
+    # Act - Need to retry manually since execute_task only does one attempt
+    for _ in range(3):
+        success = await executor.execute_task(task, mock_get_client)
+        if success:
+            break
+
     # Assert
-    assert result.status == TaskStatus.COMPLETED, \
+    assert task.status == TaskStatus.COMPLETED, \
         "Should succeed after retries"
-    assert result.attempts == 3, \
-        f"Expected 3 attempts, got {result.attempts}"
-    assert mock_kite_client.place_order.call_count == 3, \
+    assert task.attempts == 3, \
+        f"Expected 3 attempts, got {task.attempts}"
+    assert mock_kite_client._kite.place_order.call_count == 3, \
         "Should have called Kite API 3 times"
 
 
@@ -190,15 +230,28 @@ async def test_cancel_order_success(executor, mock_kite_client):
 async def test_circuit_breaker_opens_after_failures(executor, mock_kite_client, sample_order_params):
     """
     Test circuit breaker opens after threshold failures
-    
-    Scenario: Execute 3 failing tasks (threshold=3)
+
+    Scenario: Execute 5 failing tasks (default threshold=5)
     Expected: Circuit state becomes OPEN
+
+    Fixed: Use client._kite.place_order, correct threshold, mock get_client
+    Use generic Exception instead of kiteconnect.exceptions (not installed in test env)
     """
     # Arrange
-    from kiteconnect.exceptions import NetworkException
-    mock_kite_client.place_order.side_effect = NetworkException("Service unavailable")
-    
-    # Create 3 tasks to trigger circuit breaker
+    # Use generic Exception since kiteconnect may not be installed in test environment
+    mock_kite_client._kite.place_order.side_effect = Exception("Service unavailable")
+
+    # Mock get_client as a function that returns a context manager
+    # NOTE: get_client is NOT async, it returns a context manager
+    def mock_get_client(account_id):
+        class ClientContext:
+            async def __aenter__(self):
+                return mock_kite_client
+            async def __aexit__(self, *args):
+                pass
+        return ClientContext()
+
+    # Create 5 tasks to trigger circuit breaker (default threshold)
     tasks = [
         OrderTask(
             task_id=f"task-circuit-{i}",
@@ -207,16 +260,16 @@ async def test_circuit_breaker_opens_after_failures(executor, mock_kite_client, 
             params=sample_order_params,
             account_id="primary",
             max_attempts=1  # Fail immediately
-        ) for i in range(3)
+        ) for i in range(5)
     ]
-    
+
     # Act
     for task in tasks:
-        await executor.execute_task(task, mock_kite_client)
-    
+        await executor.execute_task(task, mock_get_client)
+
     # Assert
-    assert executor.get_circuit_state() == CircuitState.OPEN, \
-        "Circuit should be OPEN after 3 failures"
+    assert executor._circuit_breaker.state == CircuitState.OPEN, \
+        f"Circuit should be OPEN after 5 failures, got {executor._circuit_breaker.state}"
 
 
 @pytest.mark.unit
