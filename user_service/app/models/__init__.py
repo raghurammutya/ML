@@ -11,6 +11,14 @@ from app.models.policy import Policy, PolicyEffect
 from app.models.oauth import OAuthClient, JwtSigningKey, AuthProvider
 from app.models.auth_event import AuthEvent
 from app.models.api_key import ApiKey, ApiKeyUsageLog, RateLimitTier
+from app.models.organization import (
+    Organization,
+    OrganizationStatus,
+    OrganizationMember,
+    OrganizationMemberRole,
+    OrganizationTradingAccount,
+    OrganizationInvitation
+)
 
 __all__ = [
     "User",
@@ -31,4 +39,10 @@ __all__ = [
     "ApiKey",
     "ApiKeyUsageLog",
     "RateLimitTier",
+    "Organization",
+    "OrganizationStatus",
+    "OrganizationMember",
+    "OrganizationMemberRole",
+    "OrganizationTradingAccount",
+    "OrganizationInvitation",
 ]

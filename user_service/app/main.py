@@ -11,7 +11,7 @@ from app.core.database import init_db, dispose_db
 from app.core.redis_client import redis_client
 
 # Import routers
-from app.api.v1.endpoints import auth, authz, users, mfa, trading_accounts, audit, api_keys
+from app.api.v1.endpoints import auth, authz, users, mfa, trading_accounts, audit, api_keys, organizations
 # from app.api.v1.endpoints import admin
 
 
@@ -98,4 +98,5 @@ app.include_router(mfa.router, prefix=f"{settings.API_V1_PREFIX}/mfa", tags=["mf
 app.include_router(trading_accounts.router, prefix=f"{settings.API_V1_PREFIX}/trading-accounts", tags=["trading_accounts"])
 app.include_router(audit.router, prefix=f"{settings.API_V1_PREFIX}/audit", tags=["audit"])
 app.include_router(api_keys.router, prefix=f"{settings.API_V1_PREFIX}/api-keys", tags=["api_keys"])
+app.include_router(organizations.router, prefix=f"{settings.API_V1_PREFIX}", tags=["organizations"])
 # app.include_router(admin.router, prefix=f"{settings.API_V1_PREFIX}/admin", tags=["admin"])
