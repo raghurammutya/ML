@@ -23,6 +23,8 @@ class RedisPublisher:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._client: Optional[redis.Redis] = None
+        # ARCH-P0-002 FIX: Add connection pool for better performance under load
+        self._pool: Optional[redis.ConnectionPool] = None
         self._lock = asyncio.Lock()
 
         # Circuit breaker for fault tolerance
@@ -39,22 +41,52 @@ class RedisPublisher:
         async with self._lock:
             if self._client:
                 return
-            client = redis.from_url(self._settings.redis_url, decode_responses=True)
+
+            # ARCH-P0-002 FIX: Create connection pool instead of single connection
+            # Pool configuration optimized for high-throughput publish workload
+            # - max_connections: 50 (allows concurrent publishes without blocking)
+            # - socket_timeout: 5s (prevents hanging on slow network)
+            # - socket_keepalive: True (prevents idle connection drops)
+            self._pool = redis.ConnectionPool.from_url(
+                self._settings.redis_url,
+                decode_responses=True,
+                max_connections=50,  # Support up to 50 concurrent operations
+                socket_timeout=5.0,  # 5 second timeout for socket operations
+                socket_keepalive=True,  # Keep connections alive
+                socket_keepalive_options={},  # Use OS defaults
+                retry_on_timeout=True,  # Retry on timeout
+            )
+
+            # Create client from pool
+            client = redis.Redis(connection_pool=self._pool)
+
             try:
                 await client.ping()
             except Exception as exc:  # pragma: no cover - depends on runtime redis state
                 await client.close()
+                if self._pool:
+                    await self._pool.disconnect()
+                    self._pool = None
                 logger.error("Redis ping failed during connect: %s", exc)
                 raise
             self._client = client
-            logger.info(f"Connected to Redis at {self._settings.redis_url}")
+            logger.info(
+                f"Connected to Redis at {self._settings.redis_url} "
+                f"(pool: max_connections=50, timeout=5s)"
+            )
 
     async def close(self) -> None:
         async with self._lock:
             if self._client:
                 await self._client.close()
                 self._client = None
-                logger.info("Redis connection closed")
+
+            # ARCH-P0-002 FIX: Also close connection pool
+            if self._pool:
+                await self._pool.disconnect()
+                self._pool = None
+
+            logger.info("Redis connection and pool closed")
 
     async def publish(self, channel: str, message: str) -> None:
         redis_publish_total.inc()
@@ -115,6 +147,15 @@ class RedisPublisher:
                 except Exception:  # pragma: no cover - defensive
                     logger.exception("Failed to close Redis client during reset")
             self._client = None
+
+            # ARCH-P0-002 FIX: Also reset connection pool
+            if self._pool:
+                try:
+                    await self._pool.disconnect()
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("Failed to disconnect Redis pool during reset")
+            self._pool = None
+
         await self.connect()
 
 

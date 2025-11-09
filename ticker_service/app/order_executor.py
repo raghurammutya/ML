@@ -16,7 +16,7 @@ import hashlib
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta  # ARCH-P0-004: Added timedelta for age-based cleanup
 from enum import Enum
 from typing import Any, Dict, Optional, Set, TYPE_CHECKING
 from uuid import uuid4
@@ -230,42 +230,89 @@ class OrderExecutor:
             return task
 
     async def _cleanup_old_tasks_if_needed(self) -> None:
-        """Remove old completed/dead_letter tasks if limit exceeded (memory leak fix)"""
-        if len(self._tasks) <= self._max_tasks:
-            return
+        """
+        Remove old completed/dead_letter tasks to prevent memory leak (ARCH-P0-004 fix).
 
-        # Check if cleanup was run recently (avoid running on every submit)
+        Proactive cleanup strategy:
+        1. Age-based: Remove tasks older than 24 hours (configurable)
+        2. Hard limit: Enforce max_tasks limit by removing oldest 20%
+        3. Periodic: Run every 60 seconds minimum
+
+        Memory impact: Each task ~1KB, 10K tasks = ~10MB
+        At 151MB/week leak rate, this prevents unbounded growth
+        """
         now = datetime.now(timezone.utc)
+
+        # ARCH-P0-004 FIX: Rate limit cleanup to avoid excessive overhead
+        # But ensure it runs even if under limit (proactive cleanup)
         if (now - self._last_cleanup).total_seconds() < 60:  # Min 1 minute between cleanups
             return
 
         self._last_cleanup = now
 
-        # Find removable tasks (completed or dead_letter, not currently executing)
+        # ARCH-P0-004 FIX: Age-based cleanup (remove tasks older than 24 hours)
+        # This prevents indefinite accumulation regardless of count
+        max_age_hours = 24
+        age_cutoff = now - timedelta(hours=max_age_hours)
+
         removable_statuses = {TaskStatus.COMPLETED, TaskStatus.DEAD_LETTER}
-        old_tasks = [
+
+        # Phase 1: Remove tasks older than age cutoff
+        aged_tasks = [
             (task_id, task) for task_id, task in self._tasks.items()
-            if task.status in removable_statuses and task_id not in self._executing_tasks
+            if (task.status in removable_statuses
+                and task_id not in self._executing_tasks
+                and task.updated_at < age_cutoff)
         ]
 
-        if not old_tasks:
-            logger.warning(f"Task limit exceeded ({len(self._tasks)}) but no removable tasks found")
-            return
-
-        # Sort by updated_at, remove oldest 20%
-        old_tasks.sort(key=lambda x: x[1].updated_at)
-        remove_count = min(len(old_tasks), max(1, self._max_tasks // 5))
-
-        for task_id, task in old_tasks[:remove_count]:
+        aged_count = 0
+        for task_id, task in aged_tasks:
             del self._tasks[task_id]
-            # Also cleanup idempotency map
             if task.idempotency_key in self._idempotency_map:
                 del self._idempotency_map[task.idempotency_key]
+            aged_count += 1
 
-        logger.info(
-            f"Cleaned up {remove_count} old tasks | current_count={len(self._tasks)} | "
-            f"completed={len([t for t in self._tasks.values() if t.status == TaskStatus.COMPLETED])} | "
-            f"dead_letter={len([t for t in self._tasks.values() if t.status == TaskStatus.DEAD_LETTER])}"
+        if aged_count > 0:
+            logger.info(
+                f"ARCH-P0-004: Removed {aged_count} tasks older than {max_age_hours}h "
+                f"(age-based cleanup)"
+            )
+
+        # Phase 2: Hard limit enforcement (remove oldest 20% if over limit)
+        if len(self._tasks) > self._max_tasks:
+            # Find all removable tasks (not currently executing)
+            old_tasks = [
+                (task_id, task) for task_id, task in self._tasks.items()
+                if task.status in removable_statuses and task_id not in self._executing_tasks
+            ]
+
+            if not old_tasks:
+                logger.error(
+                    f"ARCH-P0-004: Task limit exceeded ({len(self._tasks)}/{self._max_tasks}) "
+                    f"but no removable tasks found! This should not happen."
+                )
+                return
+
+            # ARCH-P0-004 FIX: Aggressive cleanup - remove oldest 20% to stay under limit
+            old_tasks.sort(key=lambda x: x[1].updated_at)
+            remove_count = min(len(old_tasks), max(1, self._max_tasks // 5))
+
+            for task_id, task in old_tasks[:remove_count]:
+                del self._tasks[task_id]
+                if task.idempotency_key in self._idempotency_map:
+                    del self._idempotency_map[task.idempotency_key]
+
+            logger.warning(
+                f"ARCH-P0-004: Hard limit cleanup - removed {remove_count} oldest tasks | "
+                f"current={len(self._tasks)}/{self._max_tasks} | "
+                f"completed={len([t for t in self._tasks.values() if t.status == TaskStatus.COMPLETED])} | "
+                f"dead_letter={len([t for t in self._tasks.values() if t.status == TaskStatus.DEAD_LETTER])}"
+            )
+
+        # Phase 3: Log current memory usage estimate
+        memory_mb = (len(self._tasks) * 1.0) / 1024  # Assuming ~1KB per task
+        logger.debug(
+            f"ARCH-P0-004: Task memory estimate: {len(self._tasks)} tasks ≈ {memory_mb:.2f} MB"
         )
 
     async def execute_task(self, task: OrderTask, get_client) -> bool:

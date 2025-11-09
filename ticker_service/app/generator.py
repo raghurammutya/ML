@@ -170,32 +170,31 @@ class MultiAccountTickerLoop:
         self._running = True
         self._started_at = time.time()
 
-        # NEW: Create underlying task with monitoring
-        if self._task_monitor:
-            self._underlying_task = self._task_monitor.create_monitored_task(
-                self._stream_underlying(),
-                task_name="stream_underlying",
-                on_error=self._on_underlying_stream_error,
+        # ARCH-P0-003 FIX: Make TaskMonitor mandatory to prevent silent failures
+        # Background tasks MUST be monitored to catch and log exceptions
+        if not self._task_monitor:
+            raise RuntimeError(
+                "TaskMonitor is required for MultiAccountTickerLoop. "
+                "Background tasks cannot run unmonitored as failures would be silent. "
+                "Initialize with task_monitor=TaskMonitor() to enable exception tracking."
             )
-        else:
-            # Fallback if no task monitor provided
-            self._underlying_task = asyncio.create_task(self._stream_underlying())
-            logger.warning("Task monitor not available - using unmonitored underlying task")
+
+        # Create underlying task with monitoring
+        self._underlying_task = self._task_monitor.create_monitored_task(
+            self._stream_underlying(),
+            task_name="stream_underlying",
+            on_error=self._on_underlying_stream_error,
+        )
 
         self._historical_bootstrap_done = {}
 
         for account_id, acc_instruments in assignments.items():
-            # NEW: Create account tasks with monitoring
-            if self._task_monitor:
-                task = self._task_monitor.create_monitored_task(
-                    self._stream_account(account_id, acc_instruments),
-                    task_name=f"stream_account_{account_id}",
-                    on_error=lambda exc, aid=account_id: self._on_account_stream_error(aid, exc),
-                )
-            else:
-                task = asyncio.create_task(self._stream_account(account_id, acc_instruments))
-                logger.warning(f"Creating unmonitored task for account {account_id}")
-
+            # ARCH-P0-003 FIX: All background tasks must be monitored (no fallback)
+            task = self._task_monitor.create_monitored_task(
+                self._stream_account(account_id, acc_instruments),
+                task_name=f"stream_account_{account_id}",
+                on_error=lambda exc, aid=account_id: self._on_account_stream_error(aid, exc),
+            )
             logger.debug("Streaming task created for %s instruments=%d", account_id, len(acc_instruments))
             self._account_tasks[account_id] = task
 
@@ -210,16 +209,12 @@ class MultiAccountTickerLoop:
         await self._tick_batcher.start()
         logger.info("Tick batcher started")
 
-        # NEW: Start mock state cleanup task
-        if self._task_monitor:
-            self._cleanup_task = self._task_monitor.create_monitored_task(
-                self._mock_state_cleanup_loop(),
-                task_name="mock_state_cleanup"
-            )
-            logger.info("Mock state cleanup task started")
-        else:
-            self._cleanup_task = asyncio.create_task(self._mock_state_cleanup_loop())
-            logger.warning("Mock cleanup task created without monitoring")
+        # ARCH-P0-003 FIX: All background tasks must be monitored (no fallback)
+        self._cleanup_task = self._task_monitor.create_monitored_task(
+            self._mock_state_cleanup_loop(),
+            task_name="mock_state_cleanup"
+        )
+        logger.info("Mock state cleanup task started with monitoring")
 
         logger.info(
             "Ticker loop live | accounts=%s",
@@ -442,12 +437,20 @@ class MultiAccountTickerLoop:
             logger.warning(f"Failed to reset mock state: {exc}")
 
     async def _mock_state_cleanup_loop(self) -> None:
-        """Background task: Cleanup expired mock state every 5 minutes"""
-        logger.info("Mock state cleanup loop started")
+        """
+        Background task: Cleanup expired mock state aggressively.
+
+        ARCH-P0-005 FIX: Changed from 5 minutes to 1 minute intervals
+        This prevents accumulation of expired options (500 KB stale data issue).
+        More frequent cleanup keeps memory usage stable during extended mock mode operation.
+        """
+        logger.info("Mock state cleanup loop started (1-minute intervals)")
 
         while self._running:
             try:
-                await asyncio.sleep(300)  # 5 minutes
+                # ARCH-P0-005 FIX: Aggressive 1-minute cleanup interval (was 5 minutes)
+                # This prevents stale data buildup during extended mock mode
+                await asyncio.sleep(60)  # 1 minute
 
                 if not self._running:
                     break

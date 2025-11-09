@@ -105,7 +105,9 @@ class KiteWebSocketPool:
 
         self._connections: List[WebSocketConnection] = []
         self._next_connection_id = 0
-        self._pool_lock = threading.RLock()  # Use RLock for reentrant locking (same thread can acquire multiple times)
+        # ARCH-P0-001 FIX: Replace threading.RLock with asyncio.Lock to prevent deadlock in async context
+        # Threading locks can cause deadlock when used with asyncio event loops
+        self._pool_lock = asyncio.Lock()  # Async lock for thread-safe state mutations
 
         # Track which token is on which connection
         self._token_to_connection: Dict[int, int] = {}  # token -> connection_id
@@ -182,8 +184,16 @@ class KiteWebSocketPool:
 
         # Set up callbacks
         def _on_connect(ws, response=None):
-            # Thread-safe state update
-            with self._pool_lock:
+            # ARCH-P0-001 FIX: Use asyncio-safe state update from thread context
+            # Schedule coroutine in event loop to acquire async lock safely
+            async def _set_connected():
+                async with self._pool_lock:
+                    connection.connected = True
+
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(_set_connected(), self._loop)
+            else:
+                # Fallback: direct update if loop unavailable (startup phase)
                 connection.connected = True
 
             logger.info(
@@ -195,8 +205,16 @@ class KiteWebSocketPool:
             self._sync_connection_subscriptions(connection)
 
         def _on_close(ws, code, reason):
-            # Thread-safe state update
-            with self._pool_lock:
+            # ARCH-P0-001 FIX: Use asyncio-safe state update from thread context
+            # Schedule coroutine in event loop to acquire async lock safely
+            async def _set_disconnected():
+                async with self._pool_lock:
+                    connection.connected = False
+
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(_set_disconnected(), self._loop)
+            else:
+                # Fallback: direct update if loop unavailable
                 connection.connected = False
 
             logger.warning(
@@ -338,10 +356,11 @@ class KiteWebSocketPool:
 
         return connection
 
-    def _get_or_create_connection_for_tokens(self, token_count: int) -> WebSocketConnection:
-        """Get an existing connection with capacity or create a new one"""
+    async def _get_or_create_connection_for_tokens(self, token_count: int) -> WebSocketConnection:
+        """Get an existing connection with capacity or create a new one (async lock-safe)"""
         logger.info("DEBUG: _get_or_create_connection_for_tokens() called, token_count=%d, existing_connections=%d", token_count, len(self._connections))
-        with self._pool_lock:
+        # ARCH-P0-001 FIX: Use async lock for asyncio compatibility
+        async with self._pool_lock:
             logger.info("DEBUG: Lock acquired in _get_or_create_connection_for_tokens()")
             # Try to find existing connection with enough capacity
             for connection in self._connections:
@@ -515,7 +534,8 @@ class KiteWebSocketPool:
         # Hold lock for entire state mutation to prevent race conditions
         pending_subscriptions = []  # List of (token, connection_id, connection)
 
-        with self._pool_lock:
+        # ARCH-P0-001 FIX: Use async lock for asyncio compatibility
+        async with self._pool_lock:
             self._target_tokens.update(tokens)
 
             # Determine which tokens need subscription (while holding lock)
@@ -559,7 +579,8 @@ class KiteWebSocketPool:
 
             # Distribute tokens across connections (while holding lock)
             for token in tokens_to_subscribe:
-                connection = self._get_or_create_connection_for_tokens(1)
+                # ARCH-P0-001 FIX: await async method
+                connection = await self._get_or_create_connection_for_tokens(1)
 
                 # Add token to connection metadata
                 connection.subscribed_tokens.add(token)
@@ -587,7 +608,8 @@ class KiteWebSocketPool:
             )
 
             if success:
-                with self._pool_lock:
+                # ARCH-P0-001 FIX: Use async lock
+                async with self._pool_lock:
                     self.total_subscriptions += 1
             else:
                 # Remove from tracking on failure
@@ -596,7 +618,8 @@ class KiteWebSocketPool:
                     token,
                     conn_id,
                 )
-                with self._pool_lock:
+                # ARCH-P0-001 FIX: Use async lock
+                async with self._pool_lock:
                     connection.subscribed_tokens.discard(token)
                     if token in self._token_to_connection:
                         del self._token_to_connection[token]
@@ -647,12 +670,13 @@ class KiteWebSocketPool:
                 len(pending_subscriptions)
             )
 
-    def unsubscribe_tokens(self, tokens: List[int]) -> None:
-        """Unsubscribe from tokens (only removes from tracking on success)"""
+    async def unsubscribe_tokens(self, tokens: List[int]) -> None:
+        """Unsubscribe from tokens (only removes from tracking on success) - async for lock safety"""
         if not tokens:
             return
 
-        with self._pool_lock:
+        # ARCH-P0-001 FIX: Use async lock
+        async with self._pool_lock:
             for token in tokens:
                 self._target_tokens.discard(token)
 
@@ -668,7 +692,8 @@ class KiteWebSocketPool:
             )
             if not connection:
                 # Connection no longer exists, safe to remove from tracking
-                with self._pool_lock:
+                # ARCH-P0-001 FIX: Use async lock
+                async with self._pool_lock:
                     if token in self._token_to_connection:
                         del self._token_to_connection[token]
                 continue
@@ -692,7 +717,8 @@ class KiteWebSocketPool:
 
             # Only remove from tracking if unsubscribe succeeded
             if success:
-                with self._pool_lock:
+                # ARCH-P0-001 FIX: Use async lock
+                async with self._pool_lock:
                     connection.subscribed_tokens.discard(token)
                     if token in self._token_to_connection:
                         del self._token_to_connection[token]
@@ -713,7 +739,8 @@ class KiteWebSocketPool:
                 await asyncio.sleep(30)  # Check every 30 seconds
 
                 now = time.time()
-                with self._pool_lock:
+                # ARCH-P0-001 FIX: Use async lock
+                async with self._pool_lock:
                     connections_to_check = list(self._connections)
 
                 for connection in connections_to_check:
@@ -755,64 +782,78 @@ class KiteWebSocketPool:
         self._subscribe_executor.shutdown(wait=True, cancel_futures=True)
         logger.debug("Subscribe executor shutdown complete")
 
-        with self._pool_lock:
-            self._target_tokens.clear()
-            self._token_to_connection.clear()
+        # ARCH-P0-001 FIX: Can't use async lock in sync method - use asyncio.run
+        # This is called during shutdown, so we create a temporary event loop if needed
+        async def _cleanup_async():
+            async with self._pool_lock:
+                self._target_tokens.clear()
+                self._token_to_connection.clear()
 
-            for connection in self._connections:
-                conn_id = connection.connection_id
+                for connection in self._connections:
+                    conn_id = connection.connection_id
 
-                try:
-                    # Step 1: Try graceful close
-                    logger.debug("Closing connection #%d gracefully", conn_id)
-                    connection.ticker.close()
-
-                    # Step 2: Wait for thread termination (with timeout)
-                    if hasattr(connection.ticker, '_thread') and connection.ticker._thread:
-                        logger.debug("Waiting for connection #%d thread to terminate", conn_id)
-                        connection.ticker._thread.join(timeout=5.0)
-
-                        if connection.ticker._thread.is_alive():
-                            logger.warning(
-                                "Connection #%d thread did not terminate within timeout",
-                                conn_id
-                            )
-
-                except Exception as e:
-                    logger.error(
-                        "Failed to close connection #%d gracefully: %s. Forcing cleanup.",
-                        conn_id,
-                        str(e)
-                    )
-
-                    # Step 3: Force cleanup on failure
                     try:
-                        # Force close underlying WebSocket if accessible
-                        if hasattr(connection.ticker, 'ws') and connection.ticker.ws:
-                            logger.debug("Force closing WebSocket for connection #%d", conn_id)
-                            connection.ticker.ws.close()
+                        # Step 1: Try graceful close
+                        logger.debug("Closing connection #%d gracefully", conn_id)
+                        connection.ticker.close()
 
-                        # Force stop the thread if accessible
+                        # Step 2: Wait for thread termination (with timeout)
                         if hasattr(connection.ticker, '_thread') and connection.ticker._thread:
-                            # Note: Can't force kill threads in Python, but we tried graceful shutdown
-                            logger.warning(
-                                "Connection #%d thread may still be running after forced close",
-                                conn_id
-                            )
-                    except Exception as force_error:
-                        logger.exception(
-                            "Failed to force close connection #%d: %s",
+                            logger.debug("Waiting for connection #%d thread to terminate", conn_id)
+                            connection.ticker._thread.join(timeout=5.0)
+
+                            if connection.ticker._thread.is_alive():
+                                logger.warning(
+                                    "Connection #%d thread did not terminate within timeout",
+                                    conn_id
+                                )
+
+                    except Exception as e:
+                        logger.error(
+                            "Failed to close connection #%d gracefully: %s. Forcing cleanup.",
                             conn_id,
-                            str(force_error)
+                            str(e)
                         )
 
-                finally:
-                    # Step 4: Always clean up connection state regardless of errors
-                    connection.connected = False
-                    connection.subscribed_tokens.clear()
-                    logger.debug("Connection #%d state cleaned up", conn_id)
+                        # Step 3: Force cleanup on failure
+                        try:
+                            # Force close underlying WebSocket if accessible
+                            if hasattr(connection.ticker, 'ws') and connection.ticker.ws:
+                                logger.debug("Force closing WebSocket for connection #%d", conn_id)
+                                connection.ticker.ws.close()
 
-            self._connections.clear()
+                            # Force stop the thread if accessible
+                            if hasattr(connection.ticker, '_thread') and connection.ticker._thread:
+                                # Note: Can't force kill threads in Python, but we tried graceful shutdown
+                                logger.warning(
+                                    "Connection #%d thread may still be running after forced close",
+                                    conn_id
+                                )
+                        except Exception as force_error:
+                            logger.exception(
+                                "Failed to force close connection #%d: %s",
+                                conn_id,
+                                str(force_error)
+                            )
+
+                    finally:
+                        # Step 4: Always clean up connection state regardless of errors
+                        connection.connected = False
+                        connection.subscribed_tokens.clear()
+                        logger.debug("Connection #%d state cleaned up", conn_id)
+
+                self._connections.clear()
+
+        # Run async cleanup in event loop if available, otherwise use asyncio.run
+        try:
+            if self._loop and not self._loop.is_closed():
+                # Schedule in existing event loop
+                asyncio.run_coroutine_threadsafe(_cleanup_async(), self._loop).result(timeout=30.0)
+            else:
+                # Create new event loop for cleanup
+                asyncio.run(_cleanup_async())
+        except Exception as e:
+            logger.error("Error during async cleanup in stop_all: %s", e)
 
         logger.info("All WebSocket connections stopped for account %s", self.account_id)
 
@@ -820,45 +861,56 @@ class KiteWebSocketPool:
         self._update_metrics()
 
     def _update_metrics(self) -> None:
-        """Update Prometheus metrics based on current pool state"""
+        """Update Prometheus metrics based on current pool state (sync wrapper for async lock)"""
         if not METRICS_AVAILABLE:
             return
 
-        with self._pool_lock:
-            # Update connection count
-            websocket_pool_connections.labels(account_id=self.account_id).set(
-                len(self._connections)
-            )
-
-            # Update token counts
-            total_subscribed = sum(len(c.subscribed_tokens) for c in self._connections)
-            websocket_pool_subscribed_tokens.labels(account_id=self.account_id).set(
-                total_subscribed
-            )
-            websocket_pool_target_tokens.labels(account_id=self.account_id).set(
-                len(self._target_tokens)
-            )
-
-            # Update capacity utilization
-            total_capacity = len(self._connections) * self.max_instruments_per_connection
-            if total_capacity > 0:
-                utilization = (total_subscribed / total_capacity) * 100
-                websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(
-                    round(utilization, 2)
+        # ARCH-P0-001 FIX: Sync method needs to handle async lock
+        # For metrics updates (non-critical), schedule async update if event loop available
+        async def _update_async():
+            async with self._pool_lock:
+                # Update connection count
+                websocket_pool_connections.labels(account_id=self.account_id).set(
+                    len(self._connections)
                 )
-            else:
-                websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(0)
 
-            # Update per-connection status
-            for connection in self._connections:
-                websocket_pool_connected_status.labels(
-                    account_id=self.account_id,
-                    connection_id=str(connection.connection_id)
-                ).set(1 if connection.connected else 0)
+                # Update token counts
+                total_subscribed = sum(len(c.subscribed_tokens) for c in self._connections)
+                websocket_pool_subscribed_tokens.labels(account_id=self.account_id).set(
+                    total_subscribed
+                )
+                websocket_pool_target_tokens.labels(account_id=self.account_id).set(
+                    len(self._target_tokens)
+                )
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about the connection pool"""
-        with self._pool_lock:
+                # Update capacity utilization
+                total_capacity = len(self._connections) * self.max_instruments_per_connection
+                if total_capacity > 0:
+                    utilization = (total_subscribed / total_capacity) * 100
+                    websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(
+                        round(utilization, 2)
+                    )
+                else:
+                    websocket_pool_capacity_utilization.labels(account_id=self.account_id).set(0)
+
+                # Update per-connection status
+                for connection in self._connections:
+                    websocket_pool_connected_status.labels(
+                        account_id=self.account_id,
+                        connection_id=str(connection.connection_id)
+                    ).set(1 if connection.connected else 0)
+
+        # Try to schedule in event loop, silently skip if not available (non-critical)
+        try:
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(_update_async(), self._loop)
+        except Exception:
+            pass  # Metrics update is best-effort
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the connection pool (async for lock safety)"""
+        # ARCH-P0-001 FIX: Use async lock
+        async with self._pool_lock:
             connection_stats = []
             for connection in self._connections:
                 connection_stats.append({

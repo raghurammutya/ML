@@ -558,7 +558,8 @@ class MockDataGenerator:
         """
         Remove expired mock state entries (internal, assumes lock held).
 
-        This is called during ensure_options_seeded with lock already held.
+        ARCH-P0-005 FIX: Aggressive cleanup of expired options.
+        Called every 1 minute to prevent accumulation of stale data (500 KB issue).
         """
         today = self._now_market().date()
 
@@ -578,10 +579,19 @@ class MockDataGenerator:
             self._option_snapshots.pop(token, None)
             self._option_builders.pop(token, None)
 
+        # ARCH-P0-005 FIX: Enhanced logging to track cleanup effectiveness
         if expired_tokens:
+            # Estimate memory saved (assuming ~1KB per mock state)
+            memory_kb = len(expired_tokens)
             logger.info(
-                f"Cleaned up {len(expired_tokens)} expired mock states, "
-                f"remaining: {len(self._option_snapshots)}"
+                f"ARCH-P0-005: Cleaned up {len(expired_tokens)} expired mock states "
+                f"(~{memory_kb} KB freed) | remaining: {len(self._option_snapshots)}"
+            )
+        elif len(self._option_snapshots) > 0:
+            # Log even when no cleanup needed (for monitoring)
+            logger.debug(
+                f"ARCH-P0-005: Mock state cleanup check complete | "
+                f"active: {len(self._option_snapshots)} states | no expired items found"
             )
 
     # Alias for internal use

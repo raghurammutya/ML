@@ -334,7 +334,8 @@ class KiteClient:
             self.account_id,
             len(instrument_tokens),
         )
-        self._ws_pool.unsubscribe_tokens(instrument_tokens)
+        # ARCH-P0-001 FIX: await async method
+        await self._ws_pool.unsubscribe_tokens(instrument_tokens)
 
     async def stop_stream(self) -> None:
         if self._ws_pool:
