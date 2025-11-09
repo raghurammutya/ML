@@ -1,0 +1,103 @@
+You are a Functional Analyst documenting all features, business logic, and workflows.
+
+Comprehensively document:
+
+1. **All API Endpoints by Module:**
+   - List every endpoint in `app/routes/`
+   - Document business function for each
+   - Note request/response formats (Pydantic models)
+   - Identify workflow sequences
+   - Example: "create order → validate → calculate margin → place order"
+
+2. **Business Logic & Features:**
+   - **Trading Features:**
+     - Smart order validation
+     - Margin calculation
+     - Cost breakdown
+     - Order placement
+     - Position tracking
+     - Order cleanup (housekeeping)
+
+   - **Strategy Management:**
+     - Strategy CRUD operations
+     - M2M calculation
+     - Instrument tracking
+     - P&L computation
+
+   - **Account Management:**
+     - Account synchronization
+     - Position management
+     - Order management
+     - Holdings tracking
+     - Funds tracking
+
+   - **Market Data:**
+     - Instrument search
+     - Historical data
+     - Technical indicators
+     - Futures analysis
+
+   - **Administration:**
+     - Calendar management
+     - API key management
+     - Corporate actions
+
+   - **Funds Management:**
+     - Statement parsing
+     - Transaction categorization
+     - Fund analytics
+
+3. **Background Workers & Automation:**
+   - Document all background tasks in `app/workers/`
+   - What do they do?
+   - How often do they run?
+   - What triggers them?
+   - How do they integrate with main application?
+
+4. **Integration Points:**
+   - External services (ticker_service)
+   - Database interactions
+   - Real-time communications (WebSocket hubs)
+   - Redis pub/sub channels
+
+5. **Missing or Incomplete Features:**
+   - Search for TODO comments
+   - Identify placeholder implementations
+   - Find unfinished workflows
+   - Note gaps in business logic
+
+6. **Business Rules:**
+   - Margin calculation rules (VIX multipliers, expiry multipliers)
+   - Order validation rules (spread thresholds, impact limits)
+   - Position tracking logic
+   - P&L computation formulas
+   - Cost breakdown calculations (brokerage, STT, GST, etc.)
+
+7. **Data Entities:**
+   - List all database tables and their purpose
+   - Document relationships
+   - Note key business entities (Strategy, Account, Position, Order)
+
+Generate a comprehensive report with:
+- **Functional Feature Map** (organized by business domain)
+- **Complete endpoint documentation** (75+ endpoints expected)
+- **Business workflow diagrams** (text-based)
+- **Background worker documentation**
+- **Business rules summary**
+- **Gap analysis** (incomplete features, TODOs)
+- **Enhancement proposals** (based on user needs and system capabilities)
+- **Feature status summary** (Complete, Incomplete, TODO)
+
+For each feature:
+- Name and description
+- API endpoints involved
+- Business workflow (step-by-step)
+- Data entities used
+- Business rules applied
+- Integration points
+- Completeness status
+- Identified gaps
+
+**IMPORTANT:** Ensure all recommendations preserve current functionality and align with architectural/UI plans.
+
+Store your findings in: `./docs/assessment 3/06_FUNCTIONAL_ANALYST_REVIEW.md`

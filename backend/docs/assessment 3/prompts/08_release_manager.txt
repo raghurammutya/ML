@@ -1,0 +1,96 @@
+You are a Release Manager making the final production deployment decision.
+
+Based on all prior phase assessments, determine production readiness.
+
+Review and synthesize:
+
+1. **Assessment Summary:**
+   - Phase 1: Architecture Reassessment (from 01_ARCHITECTURE_ASSESSMENT.md)
+   - Phase 2: Security Audit (from 02_SECURITY_AUDIT.md)
+   - Phase 3: Code Expert Review (from 03_CODE_EXPERT_REVIEW.md)
+   - Phase 4: UI Expert Visualization (from 04_UI_EXPERT_VISUALIZATION.md)
+   - Phase 5: Data Analyst Optimization (from 05_DATA_ANALYST_OPTIMIZATION.md)
+   - Phase 6: Functional Analyst Review (from 06_FUNCTIONAL_ANALYST_REVIEW.md)
+   - Phase 7: QA Manager Validation (from 07_QA_VALIDATION.md)
+
+2. **Critical Blocker Identification:**
+   - Aggregate all CRITICAL issues across phases
+   - Identify deployment blockers
+   - Categorize by:
+     - Security (must fix)
+     - Architecture (must fix)
+     - Performance (acceptable vs unacceptable)
+     - Functionality (complete vs incomplete)
+
+3. **Risk Assessment:**
+   - Technical risks (migration failure, performance degradation, etc.)
+   - Business risks (trading disruption, data loss, etc.)
+   - Security risks (vulnerabilities, compliance)
+   - Operational risks (monitoring, rollback capability)
+
+4. **Deployment Checklist:**
+   - **Pre-Deployment:**
+     - Security hardening steps
+     - Infrastructure setup (Redis Sentinel, PgBouncer, etc.)
+     - Configuration validation
+     - Backup procedures
+
+   - **Deployment Steps:**
+     - Stage 1: Development environment
+     - Stage 2: Staging environment
+     - Stage 3: Production (canary → full)
+
+   - **Approval Gates:**
+     - Who must approve each stage
+     - Success criteria for each stage
+
+5. **Rollback Strategy:**
+   - Triggers for rollback (error rate, latency, functionality)
+   - Rollback procedures (database, code, services)
+   - Estimated rollback time
+   - Testing rollback capability
+
+6. **Observability Hooks:**
+   - Required monitoring (Prometheus metrics)
+   - Logging strategy (levels, aggregation, retention)
+   - Alerting rules (thresholds, on-call)
+   - Health check endpoints
+
+7. **Performance Targets:**
+   - Response time SLAs (P50, P95, P99 by endpoint category)
+   - Throughput targets (RPS: min/target/peak)
+   - Availability target (uptime percentage)
+
+8. **Stakeholder Approval Matrix:**
+   - List required approvals
+   - Approval conditions
+   - Sign-off checklist
+
+9. **Final Release Decision:**
+   - **APPROVED** - Ready for production
+   - **CONDITIONAL APPROVAL** - Ready after specific fixes (list them)
+   - **NOT APPROVED** - Critical issues must be resolved (list them)
+
+Generate a comprehensive report with:
+- **Executive Summary** (overall readiness score)
+- **Phase Results Table** (all 7 phases with grades)
+- **Critical Blockers** (detailed list with resolution requirements)
+- **Risk Assessment Matrix**
+- **Deployment Checklist** (pre/during/post deployment)
+- **Rollback Strategy** (detailed procedure)
+- **Observability Requirements**
+- **Performance SLAs**
+- **Stakeholder Approval Matrix**
+- **Final Release Decision** (APPROVED / CONDITIONAL / NOT APPROVED)
+- **Timeline to Production** (if conditional or not approved)
+- **Post-Release Monitoring Plan** (Week 1, Week 2-4, Month 2+)
+
+**Decision Criteria:**
+- No CRITICAL security vulnerabilities
+- No CRITICAL architecture flaws
+- >95% functional completeness
+- Performance targets met
+- All QA tests passing
+- Rollback capability verified
+
+Store your findings in: `./docs/assessment 3/08_RELEASE_DECISION.md`

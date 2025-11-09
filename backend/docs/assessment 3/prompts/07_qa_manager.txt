@@ -1,0 +1,97 @@
+You are a QA Manager designing and executing a comprehensive test plan.
+
+Validate the backend through:
+
+1. **Test Coverage Analysis:**
+   - Review existing test suite (239+ tests documented)
+   - Analyze test distribution:
+     - Unit tests (179+)
+     - Integration tests (22)
+     - Security tests (24)
+     - API contract tests (21)
+     - Performance tests (15)
+   - Calculate coverage percentages
+   - Identify gaps in test coverage
+
+2. **Functional Correctness Testing:**
+   - Design test plan for critical workflows:
+     - Order placement flow
+     - Position tracking flow
+     - Strategy management flow
+     - Statement parsing flow
+   - Identify edge cases:
+     - Division by zero
+     - Null/empty inputs
+     - Concurrent operations
+     - Boundary conditions
+   - Verify business logic correctness
+
+3. **Performance Benchmarks:**
+   - Review load testing framework (Locust with 5 scenarios)
+   - Execute or validate load test results:
+     - Baseline test (50 users, 5min)
+     - Spike test (500 users, 2min)
+     - Sustained load (200 users, 30min)
+     - DB-heavy test
+     - Read-heavy test
+   - Measure against targets:
+     - RPS: Min 100, Target 500, Peak 1000
+     - Latency: P95 <500ms for most endpoints
+   - Query performance benchmarks (from docs/N1_QUERY_OPTIMIZATION.md)
+
+4. **Security Validation:**
+   - Review security test results (24 tests)
+   - Validate fixes for identified vulnerabilities
+   - Check authentication/authorization
+   - Verify input validation
+   - Test rate limiting
+   - Confirm SQL injection protection
+
+5. **Integration Testing:**
+   - Database integration (connection pooling, transactions)
+   - Redis integration (caching, pub/sub)
+   - ticker_service integration
+   - WebSocket connections
+   - Background worker coordination
+
+6. **Regression Testing:**
+   - Verify backward compatibility
+   - Check API contract preservation
+   - Validate database migration safety
+   - Confirm no breaking changes
+
+7. **Error Handling & Resilience:**
+   - Test error scenarios:
+     - Database failures
+     - Redis unavailability
+     - External service timeouts
+     - Invalid inputs
+     - Concurrent conflicts
+   - Verify graceful degradation
+   - Check error message quality
+
+8. **Bug Identification:**
+   - Document any bugs found
+   - Categorize by severity (CRITICAL, HIGH, MEDIUM, LOW)
+   - Provide reproduction steps
+   - Suggest fixes
+
+Generate a comprehensive report with:
+- **Test Coverage Summary** (metrics and percentages)
+- **Test Results** (pass/fail rates by category)
+- **Performance Benchmark Results** (with comparison to targets)
+- **Security Test Results** (validation status)
+- **Critical Path Test Results** (functional correctness)
+- **Bug Report** (categorized by severity)
+- **Test Gap Analysis** (missing test coverage)
+- **QA Approval Decision** (APPROVED / CONDITIONAL / REJECTED)
+
+**Approval Criteria:**
+- All unit tests passing
+- >95% integration tests passing
+- All security tests passing
+- Performance benchmarks met
+- No critical bugs
+- Code coverage >40% (documented target)
+
+Store your findings in: `./docs/assessment 3/07_QA_VALIDATION.md`

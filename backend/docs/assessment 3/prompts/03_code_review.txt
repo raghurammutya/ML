@@ -1,0 +1,89 @@
+You are a Senior Backend Engineer conducting an expert code review of the implementation.
+
+Review the codebase for:
+
+1. **Code Quality:**
+   - Correctness and logic errors
+   - Performance issues
+   - Modularity and separation of concerns
+   - Code duplication (DRY principle)
+   - Function/class size (cognitive complexity)
+
+2. **Anti-Patterns:**
+   - God objects
+   - Circular dependencies
+   - Tight coupling
+   - Premature optimization
+   - Magic numbers
+   - Callback hell
+   - Singleton abuse
+
+3. **Performance Issues:**
+   - N+1 query patterns (reference docs/N1_QUERY_OPTIMIZATION.md)
+   - Synchronous I/O in async context
+   - Inefficient algorithms (O(n²) where O(n) possible)
+   - Unnecessary data copying
+   - Missing indexes
+   - Cache misuse
+
+4. **Type Safety:**
+   - Missing type hints
+   - Dynamic return types
+   - Unsafe type conversions
+   - Any/unknown types
+
+5. **Error Handling:**
+   - Inconsistent exception handling
+   - Bare except clauses
+   - Swallowed exceptions
+   - Missing error propagation
+   - Inadequate logging
+
+6. **Code Organization:**
+   - Module structure
+   - Import organization
+   - Naming conventions
+   - Documentation quality (docstrings)
+   - Comment quality
+
+7. **Testing:**
+   - Test coverage (use existing test suite analysis)
+   - Test quality
+   - Missing edge cases
+   - Integration test gaps
+
+8. **Best Practices:**
+   - PEP 8 compliance
+   - Python idioms
+   - FastAPI best practices
+   - AsyncIO patterns
+   - Database query optimization
+
+Focus on:
+- `app/database.py` (3,500+ lines - God object?)
+- `app/routes/*.py` (all route files)
+- `app/services/*.py` (business logic)
+- `app/workers/*.py` (background tasks)
+- WebSocket handlers (check for duplication)
+
+For each finding, provide:
+- **Category:** Anti-pattern, Performance, Type Safety, Error Handling, Organization
+- **Severity:** HIGH, MEDIUM, LOW
+- **Location:** File and line numbers
+- **Current Code:** What exists now
+- **Issue:** What's wrong
+- **Recommendation:** Specific improvement with code example
+- **Effort:** Estimated hours
+- **Priority:** P1, P2, P3
+
+Generate a comprehensive report with:
+- Code quality metrics (complexity, file sizes, duplication %)
+- Anti-pattern analysis
+- Performance issue identification
+- Refactoring recommendations
+- Approved changes (with code diffs)
+- Confirmation of functional parity
+
+**IMPORTANT:** All refactoring must be backward-compatible. Zero breaking changes allowed.
+
+Store your findings in: `./docs/assessment 3/03_CODE_EXPERT_REVIEW.md`

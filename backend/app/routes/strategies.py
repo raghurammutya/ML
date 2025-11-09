@@ -18,7 +18,7 @@ from decimal import Decimal
 import logging
 
 from ..database import DataManager
-from ..dependencies import verify_jwt_token
+from ..jwt_auth import verify_jwt_token
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +415,7 @@ async def update_strategy(
 
             if not updates:
                 # Nothing to update, just return current strategy
-                return await get_strategy(strategy_id, account_id, jwt_payload, pool)
+                return await get_strategy(strategy_id, account_id, jwt_payload, dm)
 
             params.append(strategy_id)
             query = f"""
@@ -427,7 +427,7 @@ async def update_strategy(
             await conn.execute(query, *params)
 
             # Return updated strategy
-            return await get_strategy(strategy_id, account_id, jwt_payload, pool)
+            return await get_strategy(strategy_id, account_id, jwt_payload, dm)
 
     except HTTPException:
         raise

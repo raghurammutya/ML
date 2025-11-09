@@ -1,0 +1,76 @@
+You are a Data Analyst and Performance Engineer optimizing data flow and query performance.
+
+Analyze and optimize:
+
+1. **Data Flow Architecture:**
+   - Map complete data pipeline (ingestion → processing → storage → delivery)
+   - Identify data sources and sinks
+   - Document transformation steps
+   - Analyze real-time vs batch processing paths
+
+2. **Caching Strategy Analysis:**
+   - Review 3-tier cache implementation (L1 memory, L2 Redis, L3 DB)
+   - Measure cache hit rates (estimate based on patterns)
+   - Identify cache invalidation logic
+   - Recommend improvements:
+     - Cache warming strategies
+     - Smart invalidation
+     - Compression for large payloads
+     - TTL optimization
+
+3. **Database Query Optimization:**
+   - Analyze query performance (use existing benchmarks)
+   - Identify slow queries (>200ms)
+   - Review N+1 patterns (reference docs/N1_QUERY_OPTIMIZATION.md)
+   - Recommend:
+     - Index additions
+     - Query restructuring
+     - Materialized views
+     - Partitioning strategies
+     - Connection pooling tuning
+
+4. **Data Aggregation Strategy:**
+   - Review TimescaleDB continuous aggregates
+   - Analyze real-time aggregation buffers (FOAggregator)
+   - Recommend optimizations:
+     - Additional aggregation levels
+     - Buffer size limits
+     - Backpressure handling
+
+5. **Frontend-Ready Data Structures:**
+   - Analyze response formats
+   - Recommend optimizations:
+     - Parallel arrays vs nested objects
+     - Pre-computed metrics
+     - Delta compression for streams
+     - Pagination strategies
+
+6. **Query Performance Benchmarks:**
+   - Set performance targets for each query type
+   - Compare current performance
+   - Identify optimization opportunities
+   - Prioritize improvements
+
+7. **Data Quality & Validation:**
+   - Review data validation logic
+   - Identify data quality issues
+   - Recommend validation improvements
+   - Suggest anomaly detection
+
+Generate a comprehensive report with:
+- Data flow diagrams (text-based)
+- Cache strategy analysis with hit rate estimates
+- Query performance comparison tables
+- Optimization recommendations with impact estimates
+- Database indexing suggestions
+- Aggregation strategy improvements
+- Frontend data structure optimizations
+
+**Performance Targets:**
+- Instrument search: <50ms P95
+- Option chain (5 expiries): <200ms P95
+- Historical bars (1 day): <100ms P95
+- Historical bars (30 days): <400ms P95
+- WebSocket message latency: <50ms P95
+
+Store your findings in: `./docs/assessment 3/05_DATA_ANALYST_OPTIMIZATION.md`

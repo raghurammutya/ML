@@ -34,8 +34,21 @@ except ImportError:
 
 router = APIRouter(prefix="/admin/calendar", tags=["admin"])
 
-# API Key for authentication (should be in environment)
-API_KEY = os.getenv("CALENDAR_ADMIN_API_KEY", "change-me-in-production")
+# API Key for authentication - MUST be set in environment
+API_KEY = os.getenv("CALENDAR_ADMIN_API_KEY")
+
+# Validate API key is properly configured
+if not API_KEY:
+    raise RuntimeError(
+        "CALENDAR_ADMIN_API_KEY environment variable must be set. "
+        "Application cannot start without a strong admin API key."
+    )
+
+if API_KEY == "change-me-in-production" or len(API_KEY) < 32:
+    raise RuntimeError(
+        "CALENDAR_ADMIN_API_KEY must be at least 32 characters and cannot use default value. "
+        f"Current length: {len(API_KEY)}"
+    )
 
 # Global data manager
 _data_manager: Optional[DataManager] = None

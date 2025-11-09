@@ -334,9 +334,13 @@ async def create_pool(
         dsn=dsn,
         min_size=min_size,
         max_size=max_size,
-        command_timeout=settings.db_pool_timeout
+        timeout=5.0,  # Acquire timeout: max 5 seconds to get connection from pool
+        command_timeout=settings.db_pool_timeout  # Query execution timeout
     )
-    logger.info("Database pool created: min=%s, max=%s, timeout=%s", min_size, max_size, settings.db_pool_timeout)
+    logger.info(
+        "Database pool created: min=%s, max=%s, acquire_timeout=5.0s, command_timeout=%s",
+        min_size, max_size, settings.db_pool_timeout
+    )
     return pool
 
 

@@ -167,6 +167,38 @@ pytest tests/security/ -v
 
 ## Security
 
+### Recent Security Fixes (Assessment 3 - 2025-11-09)
+
+The following **CRITICAL (P0)** security fixes were implemented:
+
+1. **Hardcoded API Key Removal** (`app/routes/admin_calendar.py:14-32`)
+   - Removed hardcoded default API key `"change-me-in-production"`
+   - Added runtime validation requiring 32+ character keys
+   - Application now refuses to start with weak/missing API keys
+
+2. **Vulnerable Dependencies Updated** (`requirements.txt`)
+   - `fastapi`: 0.104.1 → 0.115.0+ (CVE-2024-24762)
+   - `cryptography`: 41.0.7 → 43.0.0+ (CVE-2024-26130)
+   - `PyJWT`: 2.8.0 → 2.9.0+ (security patches)
+   - `asyncpg`: 0.29.0 → 0.30.0+ (stability improvements)
+   - `redis`: 5.0.1 → 5.2.0+ (security patches)
+
+3. **Circuit Breaker Pattern** (`app/ticker_client.py:28-64`)
+   - Added `aiobreaker` library for external service protection
+   - Prevents cascading failures from ticker service downtime
+   - Configuration: `fail_max=5`, `timeout_duration=60s`
+
+4. **Database Pool Acquire Timeout** (`app/database.py:299-320`)
+   - Added 5-second timeout for acquiring connections from pool
+   - Prevents indefinite hangs when pool is exhausted
+   - Separate timeouts for acquire (5s) vs. query execution (30s)
+
+5. **Bug Fixes** (`app/routes/strategies.py:418,430`)
+   - Fixed undefined variable `pool` → `dm` in strategy update endpoints
+   - Fixed import path for `verify_jwt_token` (jwt_auth module)
+
+**Test Status**: ✅ All 179 unit tests passing
+
 ### Authentication
 
 - **JWT tokens**: Required for protected endpoints
@@ -184,9 +216,14 @@ All user-controlled parameters use:
 
 **NEVER commit `.env` to git**. All secrets are loaded from environment variables.
 
+**IMPORTANT**: All API keys must be at least 32 characters long. The application will refuse to start with weaker keys.
+
 ```bash
-# Generate secure JWT secret
+# Generate secure JWT secret (32+ chars)
 openssl rand -hex 32
+
+# Generate secure admin API key (32+ chars)
+openssl rand -base64 32
 ```
 
 ## Configuration
@@ -201,8 +238,9 @@ openssl rand -hex 32
 | `DB_NAME` | Database name | stocksblitz_unified | ❌ |
 | `DB_USER` | Database user | stocksblitz | ❌ |
 | `REDIS_URL` | Redis connection URL | redis://localhost:6379 | ❌ |
-| `JWT_SECRET_KEY` | JWT signing secret | - | ✅ |
+| `JWT_SECRET_KEY` | JWT signing secret (min 32 chars) | - | ✅ |
 | `JWT_ALGORITHM` | JWT algorithm | HS256 | ❌ |
+| `CALENDAR_ADMIN_API_KEY` | Admin API key (min 32 chars) | - | ✅ |
 | `TICKER_SERVICE_URL` | Ticker service URL | http://localhost:8080 | ❌ |
 | `ENVIRONMENT` | Deployment environment | development | ❌ |
 

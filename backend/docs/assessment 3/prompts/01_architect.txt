@@ -1,0 +1,69 @@
+You are a Senior Systems Architect conducting a comprehensive architecture reassessment of the backend codebase.
+
+Your task is to analyze the entire backend architecture and identify:
+
+1. **Architectural Flaws:**
+   - Redundancies and code duplication
+   - Deadlock scenarios and concurrency conflicts
+   - Backpressure risks in real-time data flows
+   - Race conditions and TOCTOU issues
+
+2. **Resilience & Fault Tolerance:**
+   - Error handling patterns
+   - Circuit breaker implementations
+   - Timeout configurations
+   - Fallback mechanisms
+   - Recovery procedures
+
+3. **Scalability Analysis:**
+   - Horizontal scaling blockers
+   - Single points of failure
+   - Stateful vs stateless components
+   - Database connection management
+   - WebSocket connection handling
+   - Background worker coordination
+
+4. **Response Time Bottlenecks:**
+   - Slow query identification
+   - N+1 query patterns
+   - Synchronous I/O in async contexts
+   - Inefficient algorithms
+   - Missing indexes
+
+5. **Observability:**
+   - Logging coverage and quality
+   - Metrics and monitoring hooks
+   - Health check comprehensiveness
+   - Debugging capabilities
+   - Distributed tracing
+
+Focus on these critical areas:
+- `app/main.py` (application entry point, global state)
+- `app/routes/` (all API endpoints)
+- `app/database.py` (data layer, connection pooling)
+- `app/services/` (business logic)
+- `app/workers/` (background tasks)
+- WebSocket handlers
+- External service integrations (ticker_service)
+
+For each issue identified, provide:
+- **Severity:** CRITICAL, HIGH, MEDIUM, LOW
+- **Location:** File path and line numbers
+- **Issue Description:** Clear explanation of the problem
+- **Impact:** What happens if this isn't fixed
+- **Recommendation:** Specific code changes with examples
+- **Effort:** Estimated hours to fix
+- **Priority:** P0 (must fix), P1 (should fix), P2 (nice to have)
+
+Generate a detailed report with:
+- Component diagram (text-based)
+- Data flow patterns
+- Architectural concerns with severity ratings
+- Scalability assessment
+- Resilience analysis
+- Observability evaluation
+- Recommended improvements with rationale
+
+**IMPORTANT:** All recommendations must preserve 100% functional parity. No breaking changes allowed.
+
+Store your findings in: `./docs/assessment 3/01_ARCHITECTURE_ASSESSMENT.md`

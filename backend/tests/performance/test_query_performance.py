@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List
 
-from app.database import DataManager, get_pool
+from app.database import DataManager, create_pool
 from app.utils.query_profiler import QueryProfiler, get_profiler
 
 pytestmark = pytest.mark.performance
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.performance
 @pytest.fixture(scope="module")
 async def db_pool():
     """Create database pool for tests."""
-    pool = await get_pool()
+    pool = await create_pool()
     yield pool
     await pool.close()
 
