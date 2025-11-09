@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import redis.asyncio as redis
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from .config import get_settings
 from .database import DataManager, data_refresh_task, create_pool
@@ -40,6 +43,12 @@ logging.basicConfig(
     format='{"time": "%(asctime)s", "level": "%(levelname)s", "logger": "%(name)s", "message": "%(message)s"}'
 )
 logger = logging.getLogger(__name__)
+
+# -------- rate limiting --------
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100/minute"]  # Global default: 100 requests/minute
+)
 
 # -------- globals --------
 settings = get_settings()
@@ -345,6 +354,10 @@ app = FastAPI(
     version=settings.api_version,
     lifespan=lifespan,
 )
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS - Configure allowed origins for security
 # In production, ensure cors_origins in config.py contains only trusted domains

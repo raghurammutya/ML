@@ -1,14 +1,15 @@
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Literal
 
 class Settings(BaseSettings):
     # Database
-    db_host: str = "localhost"
-    db_port: int = 5432
-    db_name: str = "stocksblitz_unified"
-    db_user: str = "stocksblitz"
-    db_password: str = "stocksblitz123"
+    db_host: str = Field(default="localhost", description="Database host")
+    db_port: int = Field(default=5432, description="Database port")
+    db_name: str = Field(default="stocksblitz_unified", description="Database name")
+    db_user: str = Field(default="stocksblitz", description="Database user")
+    db_password: str = Field(..., description="Database password")
     db_pool_min: int = 10
     db_pool_max: int = 20
     db_pool_timeout: int = 60
@@ -86,7 +87,22 @@ class Settings(BaseSettings):
     cors_credentials: bool = True
     cors_methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
     cors_headers: list[str] = ["Content-Type", "Authorization", "X-Requested-With", "Accept", "X-Account-ID", "X-Correlation-ID"]
-    
+
+    # Security (JWT)
+    jwt_secret_key: str = Field(..., description="JWT secret key for token signing")
+    jwt_algorithm: str = Field(default="HS256", description="JWT signing algorithm")
+
+    # Environment
+    environment: Literal["development", "staging", "production"] = Field(
+        default="development",
+        description="Deployment environment"
+    )
+
+    @property
+    def database_url_computed(self) -> str:
+        """Construct database URL from components."""
+        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

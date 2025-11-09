@@ -10,11 +10,54 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 
 import asyncpg
+from fastapi import HTTPException
 
 from .config import get_settings
 from .utils import normalize_symbol, get_symbol_variants, normalize_timeframe
 
 logger = logging.getLogger("app.database")
+
+# SQL Injection Protection - Whitelisted Columns for Sorting
+ALLOWED_STRATEGY_SORT_COLUMNS = {
+    "created_at", "updated_at", "name", "status", "total_m2m"
+}
+
+ALLOWED_SORT_ORDER = {"ASC", "DESC"}
+
+
+def validate_sort_params(
+    sort_by: str,
+    order: str,
+    allowed_columns: set[str]
+) -> tuple[str, str]:
+    """
+    Validate and sanitize sort parameters to prevent SQL injection.
+
+    Args:
+        sort_by: Column name to sort by
+        order: Sort order (ASC or DESC)
+        allowed_columns: Set of allowed column names
+
+    Returns:
+        tuple: (validated_column, validated_order)
+
+    Raises:
+        HTTPException: If parameters are invalid
+    """
+    if sort_by not in allowed_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sort_by parameter. Allowed: {', '.join(allowed_columns)}"
+        )
+
+    order_upper = order.upper()
+    if order_upper not in ALLOWED_SORT_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid order parameter. Allowed: ASC, DESC"
+        )
+
+    return sort_by, order_upper
 
 # IST timezone offset (UTC+5:30)
 IST_OFFSET = timedelta(hours=5, minutes=30)
