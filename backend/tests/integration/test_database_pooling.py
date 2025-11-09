@@ -237,43 +237,59 @@ class TestDataManagerIntegration:
     """Test DataManager with connection pool."""
 
     @pytest.mark.asyncio
-    async def test_datamanager_creation(self):
-        """Test DataManager can be created."""
-        dm = DataManager()
-        await dm.connect()
+    async def test_datamanager_creation(self, db_pool):
+        """Test DataManager can be created with pool."""
+        dm = DataManager(pool=db_pool)
 
         assert dm.pool is not None
         assert isinstance(dm.pool, asyncpg.Pool)
-
-        await dm.disconnect()
+        assert dm.pool == db_pool
 
     @pytest.mark.asyncio
-    async def test_datamanager_query_execution(self):
-        """Test DataManager can execute queries."""
-        dm = DataManager()
-        await dm.connect()
+    async def test_datamanager_query_execution(self, db_pool):
+        """Test DataManager can execute queries through its pool."""
+        dm = DataManager(pool=db_pool)
 
         async with dm.pool.acquire() as conn:
             result = await conn.fetchval("SELECT version()")
             assert "PostgreSQL" in result
 
-        await dm.disconnect()
+    @pytest.mark.asyncio
+    async def test_datamanager_token_tracking(self, db_pool):
+        """Test DataManager tracks unsupported tokens."""
+        dm = DataManager(pool=db_pool)
+
+        # Initially all tokens are supported
+        assert dm.is_token_supported(123456)
+        assert dm.is_token_supported(789012)
+
+        # Mark a token as unsupported
+        dm.mark_token_no_history(123456, "Test reason", "TEST_SYMBOL")
+
+        # Check token is now unsupported
+        assert not dm.is_token_supported(123456)
+        assert dm.is_token_supported(789012)  # Other tokens still supported
 
     @pytest.mark.asyncio
-    async def test_datamanager_pool_stats(self):
-        """Test DataManager reports pool statistics."""
-        dm = DataManager()
-        await dm.connect()
+    async def test_datamanager_filter_supported_tokens(self, db_pool):
+        """Test DataManager can filter supported tokens."""
+        dm = DataManager(pool=db_pool)
 
-        stats = await dm.get_pool_stats()
+        # Mark some tokens as unsupported
+        dm.mark_token_no_history(111, "No data")
+        dm.mark_token_no_history(333, "Not found")
 
-        assert "size" in stats
-        assert "free_connections" in stats
-        assert "used_connections" in stats
-        assert stats["min_size"] == settings.db_pool_min
-        assert stats["max_size"] == settings.db_pool_max
+        # Filter tokens
+        tokens = [111, 222, 333, 444, None, "invalid"]
+        supported, dropped = dm.filter_supported_tokens(tokens)
 
-        await dm.disconnect()
+        # Check results
+        assert 222 in supported
+        assert 444 in supported
+        assert 111 not in supported
+        assert 333 not in supported
+        assert len(supported) == 2
+        assert len(dropped) == 2
 
 
 class TestRealDatabaseTables:
