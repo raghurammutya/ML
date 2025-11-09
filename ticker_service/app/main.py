@@ -175,6 +175,19 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to start strike rebalancer: {exc}")
         # Non-critical, continue startup
 
+    # Start token refresher for automatic daily token refresh
+    try:
+        from .services.token_refresher import token_refresher
+        # Get account configurations from orchestrator
+        if ticker_loop._orchestrator and ticker_loop._orchestrator._accounts:
+            await token_refresher.start(ticker_loop._orchestrator._accounts)
+            logger.info("Token refresher started for automatic daily token refresh")
+        else:
+            logger.warning("Token refresher not started: no accounts available")
+    except Exception as exc:
+        logger.warning(f"Failed to start token refresher: {exc}")
+        # Non-critical, continue startup
+
     # Initialize OrderExecutor with config values
     init_executor(
         max_tasks=settings.order_executor_max_tasks,
@@ -374,6 +387,14 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.error(f"Error stopping strike rebalancer: {exc}")
 
+        # Stop token refresher
+        try:
+            from .services.token_refresher import token_refresher
+            await token_refresher.stop()
+            logger.info("Token refresher stopped")
+        except Exception as exc:
+            logger.warning(f"Error stopping token refresher: {exc}")
+
         await ticker_loop.stop()
         await redis_publisher.close()
         await instrument_registry.close()
@@ -568,6 +589,15 @@ async def health(request: Request) -> dict[str, object]:
         logger.error(f"Database health check failed: {exc}")
         health_status["dependencies"]["database"] = f"error: {str(exc)}"
         health_status["status"] = "degraded"
+
+    # Check token refresher status
+    try:
+        from .services.token_refresher import token_refresher
+        token_status = token_refresher.get_status()
+        health_status["dependencies"]["token_refresher"] = token_status
+    except Exception as exc:
+        logger.error(f"Token refresher health check failed: {exc}")
+        health_status["dependencies"]["token_refresher"] = f"error: {str(exc)}"
 
     # Check instrument registry
     try:
