@@ -298,9 +298,24 @@ def _fo_expiry_table(timeframe: str) -> str:
 # -----------------------------
 async def create_pool(
     dsn: Optional[str] = None,
-    min_size: int = 10,
-    max_size: int = 20,
+    min_size: Optional[int] = None,
+    max_size: Optional[int] = None,
 ) -> asyncpg.Pool:
+    """
+    Create database connection pool with production-grade settings.
+
+    Defaults to settings from config.py:
+    - min_size: 10 connections
+    - max_size: 100 connections (increased from 20 for production scalability)
+    """
+    settings = get_settings()
+
+    # Use settings defaults if not provided
+    if min_size is None:
+        min_size = settings.db_pool_min
+    if max_size is None:
+        max_size = settings.db_pool_max
+
     dsn = (
         dsn
         or os.getenv("DATABASE_URL")
@@ -308,15 +323,20 @@ async def create_pool(
         or os.getenv("POSTGRES_URL")
     )
     if not dsn:
-        settings = get_settings()
         dsn = (
             f"postgresql://{settings.db_user}:{settings.db_password}"
             f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
         )
     if not dsn:
         raise RuntimeError("No database DSN found in env (DATABASE_URL / TIMESCALE_DATABASE_URL / POSTGRES_URL)")
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=min_size, max_size=max_size)
-    logger.info("Database pool created: min=%s, max=%s", min_size, max_size)
+
+    pool = await asyncpg.create_pool(
+        dsn=dsn,
+        min_size=min_size,
+        max_size=max_size,
+        command_timeout=settings.db_pool_timeout
+    )
+    logger.info("Database pool created: min=%s, max=%s, timeout=%s", min_size, max_size, settings.db_pool_timeout)
     return pool
 
 

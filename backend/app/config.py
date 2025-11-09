@@ -10,9 +10,9 @@ class Settings(BaseSettings):
     db_name: str = Field(default="stocksblitz_unified", description="Database name")
     db_user: str = Field(default="stocksblitz", description="Database user")
     db_password: str = Field(..., description="Database password")
-    db_pool_min: int = 10
-    db_pool_max: int = 20
-    db_pool_timeout: int = 60
+    db_pool_min: int = Field(default=10, description="Minimum database connection pool size")
+    db_pool_max: int = Field(default=100, description="Maximum database connection pool size (increased for production)")
+    db_pool_timeout: int = Field(default=60, description="Connection pool timeout in seconds")
     db_query_timeout: int = 30  # Individual query timeout
     database_url: Optional[str] = None
     timescale_database_url: Optional[str] = None

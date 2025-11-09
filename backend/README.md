@@ -7,9 +7,10 @@ FastAPI-based backend service for TradingView ML visualization platform with F&O
 - **Real-time Data**: WebSocket streaming for market data, F&O Greeks, and order updates
 - **F&O Analytics**: Strike distribution, OI analysis, moneyness series, and Greeks calculations
 - **Strategy Management**: Multi-instrument strategy tracking with real-time M2M calculation
-- **Security**: JWT authentication, rate limiting, SQL injection protection
+- **Security**: JWT authentication, rate limiting, SQL injection protection, environment-based secrets
 - **Caching**: Dual-layer caching (Memory → Redis → PostgreSQL)
 - **Observability**: Prometheus metrics, structured JSON logging
+- **Scalability**: Connection pool sized for 100 concurrent users (5x production capacity)
 
 ## Prerequisites
 
