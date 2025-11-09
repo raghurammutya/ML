@@ -663,3 +663,115 @@ async def revoke_role_from_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+
+
+@router.get("/me/accounts")
+async def list_accessible_accounts(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List all trading accounts accessible to the current user
+
+    Returns both owned accounts and accounts shared via memberships.
+    This endpoint is optimized for SDK consumption.
+
+    **Returns:**
+    - user_id: Current user's ID
+    - accounts: List of accessible trading accounts
+    - primary_account_id: ID of primary account (if set)
+    - total_count: Total number of accessible accounts
+
+    **Authentication:**
+    - Requires valid access token or API key
+
+    **Example Response:**
+    ```json
+    {
+      "user_id": 123,
+      "accounts": [
+        {
+          "account_id": "XJ4540",
+          "trading_account_id": 1,
+          "broker": "kite",
+          "nickname": "My Personal Account",
+          "is_primary": true,
+          "is_owner": true,
+          "permissions": ["view", "trade", "manage"],
+          "membership_type": "owner",
+          "status": "active",
+          "subscription_tier": "connect",
+          "market_data_available": true
+        }
+      ],
+      "primary_account_id": "XJ4540",
+      "total_count": 1
+    }
+    ```
+    """
+    from app.models import TradingAccount, TradingAccountMembership
+    from app.schemas.trading_account import ListAccessibleAccountsResponse, AccessibleAccountInfo
+
+    accounts_list = []
+    primary_account_id = None
+
+    # Get owned accounts
+    owned_accounts = db.query(TradingAccount).filter(
+        TradingAccount.owner_id == current_user.user_id
+    ).all()
+
+    for account in owned_accounts:
+        account_info = AccessibleAccountInfo(
+            account_id=account.broker_user_id,
+            trading_account_id=account.trading_account_id,
+            broker=account.broker.value,
+            nickname=account.account_name or account.nickname,
+            is_primary=(account.is_primary if hasattr(account, 'is_primary') else False),
+            is_owner=True,
+            permissions=["view", "trade", "manage"],
+            membership_type="owner",
+            status=account.status.value,
+            subscription_tier=account.subscription_tier.value if account.subscription_tier else "unknown",
+            market_data_available=account.market_data_available or False
+        )
+        accounts_list.append(account_info)
+
+        if account_info.is_primary:
+            primary_account_id = account_info.account_id
+
+    # Get shared accounts
+    memberships = db.query(TradingAccountMembership).filter(
+        TradingAccountMembership.user_id == current_user.user_id,
+        TradingAccountMembership.status == "active"
+    ).all()
+
+    for membership in memberships:
+        account = membership.trading_account
+        account_info = AccessibleAccountInfo(
+            account_id=account.broker_user_id,
+            trading_account_id=account.trading_account_id,
+            broker=account.broker.value,
+            nickname=account.account_name or account.nickname,
+            is_primary=False,
+            is_owner=False,
+            permissions=membership.permissions or [],
+            membership_type="member",
+            status=account.status.value,
+            subscription_tier=account.subscription_tier.value if account.subscription_tier else "unknown",
+            market_data_available=account.market_data_available or False
+        )
+        accounts_list.append(account_info)
+
+    # Default to first owned account if no primary set
+    if not primary_account_id and accounts_list:
+        for acc in accounts_list:
+            if acc.is_owner:
+                primary_account_id = acc.account_id
+                break
+
+    return ListAccessibleAccountsResponse(
+        user_id=current_user.user_id,
+        accounts=accounts_list,
+        primary_account_id=primary_account_id,
+        total_count=len(accounts_list)
+    )

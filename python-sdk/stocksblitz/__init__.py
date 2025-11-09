@@ -25,6 +25,7 @@ __author__ = "StocksBlitz"
 from .client import TradingClient
 from .instrument import Instrument
 from .account import Account, Position, Order, Funds
+from .accounts_collection import AccountsCollection, AccountProxy
 from .filter import InstrumentFilter
 from .strategy import Strategy, StrategyMetrics
 
@@ -92,6 +93,8 @@ __all__ = [
     "Position",
     "Order",
     "Funds",
+    "AccountsCollection",
+    "AccountProxy",
 
     # Filtering
     "InstrumentFilter",

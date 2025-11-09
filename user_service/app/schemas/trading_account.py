@@ -348,3 +348,70 @@ class UpdateSubscriptionTierResponse(BaseModel):
     subscription_tier: str
     market_data_available: bool
     message: str = "Subscription tier updated successfully"
+
+
+# SDK-friendly schemas for /users/me/accounts endpoint
+
+class AccessibleAccountInfo(BaseModel):
+    """Single accessible trading account info for SDK"""
+    account_id: str = Field(
+        ...,
+        description="Trading account ID (broker_user_id)"
+    )
+    trading_account_id: int = Field(
+        ...,
+        description="Internal database ID"
+    )
+    broker: str = Field(
+        ...,
+        description="Broker type (kite, upstox, etc.)"
+    )
+    nickname: Optional[str] = Field(
+        None,
+        description="User-friendly account name"
+    )
+    is_primary: bool = Field(
+        False,
+        description="Whether this is the user's primary account"
+    )
+    is_owner: bool = Field(
+        ...,
+        description="Whether user owns this account"
+    )
+    permissions: List[str] = Field(
+        ...,
+        description="Permissions user has on this account (view, trade, manage)"
+    )
+    membership_type: str = Field(
+        ...,
+        description="owner, member, or shared"
+    )
+    status: str = Field(
+        ...,
+        description="Account status (active, suspended, expired, error)"
+    )
+    subscription_tier: str = Field(
+        ...,
+        description="Subscription tier (unknown, personal, connect, startup)"
+    )
+    market_data_available: bool = Field(
+        ...,
+        description="Whether market data is available"
+    )
+
+
+class ListAccessibleAccountsResponse(BaseModel):
+    """Response for GET /users/me/accounts endpoint (SDK-friendly)"""
+    user_id: int
+    accounts: List[AccessibleAccountInfo] = Field(
+        default_factory=list,
+        description="All trading accounts accessible to this user"
+    )
+    primary_account_id: Optional[str] = Field(
+        None,
+        description="Account ID of primary account (if any)"
+    )
+    total_count: int = Field(
+        ...,
+        description="Total number of accessible accounts"
+    )

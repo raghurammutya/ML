@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        extra="allow"  # Allow extra environment variables
     )
     """Application settings loaded from environment variables"""
 
@@ -24,6 +25,8 @@ class Settings(BaseSettings):
 
     # API
     API_V1_PREFIX: str = "/v1"
+    USER_SERVICE_PORT: int = Field(default=8011, env="USER_SERVICE_PORT")
+    USER_SERVICE_HOST: str = Field(default="0.0.0.0", env="USER_SERVICE_HOST")
 
     # Database
     DATABASE_URL: PostgresDsn = Field(..., env="DATABASE_URL")
@@ -118,6 +121,7 @@ class Settings(BaseSettings):
     TICKER_SERVICE_URL: str = Field(default="http://ticker_service:8002", env="TICKER_SERVICE_URL")
     ALERT_SERVICE_URL: str = Field(default="http://alert_service:8003", env="ALERT_SERVICE_URL")
     BACKEND_SERVICE_URL: str = Field(default="http://backend:8000", env="BACKEND_SERVICE_URL")
+    CALENDAR_SERVICE_URL: str = Field(default="http://calendar_service:8013", env="CALENDAR_SERVICE_URL")
 
     @field_validator("SESSION_COOKIE_SAMESITE")
     @classmethod

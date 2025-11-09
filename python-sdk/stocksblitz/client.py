@@ -8,6 +8,7 @@ from .api import APIClient
 from .cache import SimpleCache
 from .instrument import Instrument
 from .account import Account
+from .accounts_collection import AccountsCollection
 from .filter import InstrumentFilter
 from .strategy import Strategy
 from .services import AlertService, MessagingService, CalendarService, NewsService
@@ -24,7 +25,12 @@ class TradingClient:
     1. API Key (for server-to-server, bots, scripts)
     2. JWT (for user applications with username/password)
 
-    Example (API Key):
+    Multi-Account Support:
+    - Simple: client.Account() - Uses primary account automatically
+    - Explicit: client.Accounts["XJ4540"] - Access specific account by ID
+    - Discovery: client.Accounts.list() - List all accessible accounts
+
+    Example (API Key with single account):
         >>> from stocksblitz import TradingClient
         >>> client = TradingClient(
         ...     api_url="http://localhost:8081",
@@ -34,15 +40,22 @@ class TradingClient:
         >>> if inst['5m'].rsi[14] > 70:
         ...     client.Account().sell(inst, quantity=50)
 
-    Example (JWT):
+    Example (JWT with multi-account):
         >>> client = TradingClient.from_credentials(
         ...     api_url="http://localhost:8081",
         ...     user_service_url="http://localhost:8001",
         ...     username="trader@example.com",
         ...     password="my_password"
         ... )
-        >>> inst = client.Instrument("NIFTY50")
-        >>> inst['5m'].close
+        >>> # List accessible accounts
+        >>> for account in client.Accounts.list():
+        ...     print(f"{account['account_id']}: {account['broker']}")
+        >>>
+        >>> # Trade on specific account
+        >>> client.Accounts["XJ4540"].buy("NIFTY50", quantity=50)
+        >>>
+        >>> # Or use primary account implicitly
+        >>> client.Account().buy("NIFTY50", quantity=50)
     """
 
     def __init__(
@@ -111,6 +124,9 @@ class TradingClient:
             cache_dir=cache_dir,
             cache_ttl=cache_ttl
         )
+
+        # Initialize accounts collection for multi-account support
+        self._accounts_collection = AccountsCollection(self._api)
 
     @classmethod
     def from_credentials(
@@ -224,20 +240,34 @@ class TradingClient:
         inst = Instrument(spec, api_client=self._api)
         return inst
 
-    def Account(self, account_id: str = "primary") -> Account:
+    def Account(self, account_id: Optional[str] = None) -> Account:
         """
         Create Account instance.
 
+        For backward compatibility. Defaults to primary account.
+        For multi-account access, use client.Accounts["account_id"] instead.
+
         Args:
-            account_id: Account identifier
+            account_id: Account identifier (defaults to primary account if None)
 
         Returns:
             Account object
 
         Examples:
+            >>> # Simple usage - uses primary account
             >>> account = client.Account()
-            >>> account = client.Account("secondary")
+            >>> account.buy("NIFTY50", 50)
+            >>>
+            >>> # Explicit account ID (legacy)
+            >>> account = client.Account("XJ4540")
+            >>>
+            >>> # Recommended multi-account approach
+            >>> client.Accounts["XJ4540"].buy("NIFTY50", 50)
         """
+        # If no account_id provided, use primary account from collection
+        if account_id is None:
+            account_id = self._accounts_collection.primary_id or "primary"
+
         account = Account(account_id, api_client=self._api)
         return account
 
@@ -398,6 +428,29 @@ class TradingClient:
             ... )
         """
         return self._news
+
+    @property
+    def Accounts(self) -> AccountsCollection:
+        """
+        Access accounts collection for multi-account support.
+
+        Returns:
+            AccountsCollection instance
+
+        Example:
+            >>> # Access specific account
+            >>> client.Accounts["XJ4540"].positions
+            >>> client.Accounts["XJ4540"].buy("NIFTY50", 50)
+            >>>
+            >>> # List all accounts
+            >>> for account_id in client.Accounts:
+            ...     print(account_id)
+            >>>
+            >>> # Get primary account
+            >>> primary = client.Accounts.primary()
+            >>> primary.buy("NIFTY50", 50)
+        """
+        return self._accounts_collection
 
     @property
     def indicators(self) -> IndicatorRegistry:

@@ -11,14 +11,14 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '005'
-down_revision = '004'
+down_revision = '20251108_0004'
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    # Create rate_limit_tier enum
-    op.execute("CREATE TYPE ratelimittier AS ENUM ('free', 'standard', 'premium', 'unlimited')")
+    # Note: We don't manually create the enum here because SQLAlchemy will create it
+    # when create_table is called with the Enum column
 
     # Create api_keys table
     op.create_table(
@@ -31,7 +31,7 @@ def upgrade() -> None:
         sa.Column('description', sa.Text(), nullable=True),
         sa.Column('scopes', postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default='["read"]'),
         sa.Column('ip_whitelist', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column('rate_limit_tier', sa.Enum('free', 'standard', 'premium', 'unlimited', name='ratelimittier'), nullable=False, server_default='standard'),
+        sa.Column('rate_limit_tier', sa.Enum('free', 'standard', 'premium', 'unlimited', name='ratelimittier'), nullable=False, server_default=sa.text("'standard'::ratelimittier")),
         sa.Column('last_used_at', sa.DateTime(), nullable=True),
         sa.Column('last_used_ip', sa.String(length=45), nullable=True),
         sa.Column('usage_count', sa.BigInteger(), nullable=False, server_default='0'),
@@ -87,12 +87,9 @@ def upgrade() -> None:
     op.create_index('idx_api_key_usage_timestamp', 'api_key_usage_logs', ['timestamp'], unique=False)
 
     # Convert api_key_usage_logs to TimescaleDB hypertable (if TimescaleDB is available)
-    # This is optional and will only work if TimescaleDB extension is installed
-    try:
-        op.execute("SELECT create_hypertable('api_key_usage_logs', 'timestamp', if_not_exists => TRUE)")
-    except Exception:
-        # TimescaleDB not available, skip hypertable creation
-        pass
+    # Note: Commented out because TimescaleDB is not currently installed
+    # To enable, install TimescaleDB extension and uncomment:
+    # op.execute("SELECT create_hypertable('api_key_usage_logs', 'timestamp', if_not_exists => TRUE)")
 
 
 def downgrade() -> None:
