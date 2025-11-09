@@ -26,6 +26,14 @@ from loguru import logger
 if TYPE_CHECKING:
     from .kite.client import KiteClient
 
+# QUICK-WIN-003: Import dead letter queue metrics
+try:
+    from .metrics import order_dead_letter_queue_depth, order_dead_letter_total
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    logger.warning("Metrics not available for order executor")
+
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
@@ -315,6 +323,11 @@ class OrderExecutor:
             f"ARCH-P0-004: Task memory estimate: {len(self._tasks)} tasks ≈ {memory_mb:.2f} MB"
         )
 
+        # QUICK-WIN-003 FIX: Update dead letter queue metric
+        if METRICS_AVAILABLE:
+            dead_letter_count = len([t for t in self._tasks.values() if t.status == TaskStatus.DEAD_LETTER])
+            order_dead_letter_queue_depth.set(dead_letter_count)
+
     async def execute_task(self, task: OrderTask, get_client) -> bool:
         """
         Execute a single task with retry logic (thread-safe)
@@ -365,6 +378,14 @@ class OrderExecutor:
 
             if task.attempts >= task.max_attempts:
                 task.status = TaskStatus.DEAD_LETTER
+
+                # QUICK-WIN-003 FIX: Update dead letter queue metrics
+                if METRICS_AVAILABLE:
+                    order_dead_letter_total.labels(
+                        operation=task.operation,
+                        account_id=task.account_id
+                    ).inc()
+
                 logger.error(
                     f"Task {task.task_id} moved to dead letter queue after {task.attempts} attempts: {exc}"
                 )

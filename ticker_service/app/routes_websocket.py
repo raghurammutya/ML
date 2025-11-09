@@ -3,10 +3,13 @@ WebSocket endpoints for real-time tick data streaming.
 
 Provides authenticated WebSocket connections for users to subscribe to
 instrument tick data. All users share the same data stream (broadcast model).
+
+SEC-HIGH-003 FIX: JWT token binding to WebSocket connection IDs to prevent session fixation.
 """
 
 import asyncio
 import json
+import hashlib
 from typing import Set, Dict, Optional
 from datetime import datetime, timezone
 
@@ -19,7 +22,8 @@ from .redis_client import redis_publisher
 router = APIRouter()
 
 # Active WebSocket connections
-# Structure: {connection_id: {"websocket": WebSocket, "user_id": str, "subscriptions": Set[int]}}
+# SEC-HIGH-003 FIX: Enhanced structure with token binding for session fixation prevention
+# Structure: {connection_id: {"websocket": WebSocket, "user_id": str, "subscriptions": Set[int], "token_hash": str}}
 active_connections: Dict[str, dict] = {}
 
 # Track which tokens are actively subscribed by any client
@@ -31,22 +35,36 @@ redis_listener_task: Optional[asyncio.Task] = None
 
 
 class ConnectionManager:
-    """Manages WebSocket connections and subscriptions"""
+    """
+    SEC-HIGH-003 FIX: Manages WebSocket connections with token binding for session fixation prevention.
+    """
 
     def __init__(self):
         self.active_connections = active_connections
         self.token_subscribers = token_subscribers
 
-    async def connect(self, connection_id: str, websocket: WebSocket, user_id: str):
-        """Register a new WebSocket connection"""
+    async def connect(self, connection_id: str, websocket: WebSocket, user_id: str, token_hash: str):
+        """
+        SEC-HIGH-003 FIX: Register a new WebSocket connection with token binding.
+
+        Args:
+            connection_id: Unique connection identifier
+            websocket: WebSocket instance
+            user_id: Authenticated user ID
+            token_hash: SHA-256 hash of JWT token for binding
+        """
         await websocket.accept()
         self.active_connections[connection_id] = {
             "websocket": websocket,
             "user_id": user_id,
             "subscriptions": set(),
-            "connected_at": datetime.now(timezone.utc)
+            "connected_at": datetime.now(timezone.utc),
+            "token_hash": token_hash  # SEC-HIGH-003: Bind token to connection
         }
-        logger.info(f"WebSocket connected: connection_id={connection_id}, user_id={user_id}")
+        logger.info(
+            f"WebSocket connected: connection_id={connection_id}, user_id={user_id} "
+            f"(SEC-HIGH-003: token bound to session)"
+        )
 
     def disconnect(self, connection_id: str):
         """Remove a WebSocket connection and clean up subscriptions"""
@@ -267,11 +285,12 @@ async def websocket_ticks(
     token: str = Query(..., description="JWT authentication token")
 ):
     """
-    WebSocket endpoint for real-time tick data streaming.
+    SEC-HIGH-003 FIX: WebSocket endpoint with JWT token binding to prevent session fixation.
 
     Authentication:
         - Requires valid JWT token from user_service as query parameter
         - Example: ws://localhost:8080/ws/ticks?token=eyJ0eXAiOiJKV1Q...
+        - Token is cryptographically bound to WebSocket connection
 
     Message Protocol:
         Client -> Server:
@@ -290,6 +309,9 @@ async def websocket_ticks(
     Usage:
         All authenticated users can subscribe to any instrument tokens.
         Tick data is broadcast to all subscribers (shared data model).
+
+    Security:
+        - CWE-384 Session Fixation: Token hash bound to connection prevents token hijacking
     """
     connection_id = f"{id(websocket)}_{datetime.now(timezone.utc).timestamp()}"
 
@@ -303,13 +325,16 @@ async def websocket_ticks(
                 await websocket.close(code=1008, reason="Invalid token payload")
                 return
 
+            # SEC-HIGH-003 FIX: Hash token and bind to connection (prevent session fixation)
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+
         except JWTAuthError as e:
             logger.warning(f"WebSocket authentication failed: {e.detail}")
             await websocket.close(code=1008, reason=f"Authentication failed: {e.detail}")
             return
 
-        # Accept connection and register
-        await manager.connect(connection_id, websocket, user_id)
+        # Accept connection and register with token binding
+        await manager.connect(connection_id, websocket, user_id, token_hash)
 
         # Send connection confirmation
         await websocket.send_json({

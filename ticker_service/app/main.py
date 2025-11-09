@@ -15,7 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .config import get_settings
-from .middleware import RequestIDMiddleware
+from .middleware import RequestIDMiddleware, HTTPSRedirectMiddleware
 from .generator import ticker_loop
 from .instrument_registry import instrument_registry
 from .order_executor import get_executor, init_executor
@@ -36,7 +36,7 @@ from .routes_trading_accounts import router as trading_accounts_router
 from .routes_sync import router as sync_router
 from .subscription_store import SubscriptionRecord, subscription_store
 from .account_store import initialize_account_store, get_account_store
-from .jwt_auth import get_current_user, get_optional_user
+from .jwt_auth import get_current_user, get_optional_user, require_admin
 from .historical_greeks import HistoricalGreeksEnricher
 from .utils.symbol_utils import normalize_symbol
 
@@ -413,20 +413,39 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ticker Service", lifespan=lifespan)
 
 # Add CORS middleware
+# SEC-HIGH-006 FIX: Strict CORS configuration to prevent unauthorized access
 if settings.environment in ("production", "staging"):
-    # Production: Strict whitelist
+    # Production: Strict whitelist only
+    # CWE-942: Overly Permissive Cross-domain Whitelist
     allowed_origins = settings.cors_allowed_origins.split(",") if hasattr(settings, 'cors_allowed_origins') else []
+
+    # Validate origins are HTTPS only
+    validated_origins = []
+    for origin in allowed_origins:
+        origin = origin.strip()
+        if origin.startswith("https://"):
+            validated_origins.append(origin)
+        else:
+            logger.warning(f"SEC-HIGH-006: Rejected non-HTTPS CORS origin in production: {origin}")
+
+    if not validated_origins:
+        logger.error("SEC-HIGH-006: No valid CORS origins configured for production! Using restrictive default.")
+        validated_origins = ["https://yourdomain.com"]
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins if allowed_origins else ["https://yourdomain.com"],
+        allow_origins=validated_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        # SEC-HIGH-006 FIX: Explicit method whitelist (NO wildcards)
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        # SEC-HIGH-006 FIX: Explicit header whitelist (NO wildcards)
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
         max_age=3600,
     )
+    logger.info(f"SEC-HIGH-006: Production CORS enabled for origins: {validated_origins}")
 else:
-    # Development: Allow localhost
+    # Development: Allow localhost only
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"],
@@ -434,8 +453,11 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    logger.info("Development CORS enabled for localhost")
 
 # Add middlewares
+# SEC-HIGH-002: HTTPS enforcement (must be added before RequestIDMiddleware)
+app.add_middleware(HTTPSRedirectMiddleware, environment=settings.environment)
 app.add_middleware(RequestIDMiddleware)
 
 # Add rate limiter state and exception handler
@@ -447,16 +469,25 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """
-    Global exception handler that returns standardized error responses.
+    SEC-HIGH-008 FIX: Global exception handler with production-safe error sanitization.
+
+    Security Benefits:
+    - Prevents information disclosure through stack traces
+    - Hides internal file paths and system details
+    - Protects against CWE-209 (Information Exposure Through an Error Message)
 
     Response format:
     {
         "error": {
             "type": "ErrorClassName",
-            "message": "Error description",
+            "message": "Error description (sanitized in production)",
             "timestamp": "2025-10-31T07:30:00.000Z"
         }
     }
+
+    References:
+        - CWE-209: Generation of Error Message Containing Sensitive Information
+        - OWASP A04:2021 – Insecure Design
     """
     # Handle HTTPException separately to preserve status codes
     if isinstance(exc, HTTPException):
@@ -471,17 +502,31 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             },
         )
 
-    # Log unexpected errors
+    # Log unexpected errors with full details (server-side only)
     logger.exception(f"Unhandled exception in {request.method} {request.url.path}")
 
-    # Return generic 500 error
+    # SEC-HIGH-008 FIX: Sanitize error message in production
+    is_production = settings.environment in ("production", "staging")
+
+    if is_production:
+        # Production: Generic error message (no sensitive details)
+        error_message = "An internal server error occurred. Please contact support."
+        error_type = "InternalServerError"
+    else:
+        # Development: Detailed error for debugging
+        error_message = str(exc)
+        error_type = exc.__class__.__name__
+
+    # Return sanitized error
     return JSONResponse(
         status_code=500,
         content={
             "error": {
-                "type": exc.__class__.__name__,
-                "message": str(exc),
+                "type": error_type,
+                "message": error_message,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                # Add request ID for support correlation (safe to expose)
+                "request_id": getattr(request.state, "request_id", None)
             }
         },
     )
@@ -643,8 +688,16 @@ async def test_jwt_auth(current_user: dict = Depends(get_current_user)) -> dict[
 
 @app.post("/admin/instrument-refresh")
 @limiter.limit("5/hour")
-async def instrument_refresh(request: Request, force: bool = False) -> dict[str, object]:
+async def instrument_refresh(
+    request: Request,
+    force: bool = False,
+    admin_user: dict = Depends(require_admin)  # SEC-HIGH-004 FIX: Admin only
+) -> dict[str, object]:
+    """
+    SEC-HIGH-004 FIX: Admin-only endpoint for forcing instrument refresh.
+    """
     try:
+        logger.info(f"Admin {admin_user.get('user_id')} triggered instrument refresh (force={force})")
         result = await ticker_loop.refresh_instruments(force=force)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

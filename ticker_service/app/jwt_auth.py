@@ -2,6 +2,8 @@
 JWT Authentication for Ticker Service
 
 Validates JWT tokens from User Service for WebSocket and REST API authentication.
+
+SEC-HIGH-005 & SEC-HIGH-007 FIX: JWT token revocation with Redis-backed blacklist.
 """
 
 import httpx
@@ -9,7 +11,7 @@ import jwt
 import time
 import logging
 import ipaddress
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Set
 from functools import lru_cache
 from urllib.parse import urlparse
 from fastapi import HTTPException, Security, Depends, status, WebSocket
@@ -23,6 +25,91 @@ security = HTTPBearer()
 
 # User Service URL
 USER_SERVICE_URL = getattr(settings, 'user_service_url', 'http://localhost:8001')
+
+# SEC-HIGH-005 & SEC-HIGH-007 FIX: Token blacklist for revocation
+# In-memory blacklist for development (use Redis for production scaling)
+_token_blacklist: Set[str] = set()
+_redis_client = None
+
+
+def _get_redis_client():
+    """
+    Get Redis client for token blacklist (lazy initialization).
+
+    SEC-HIGH-007: Production environments should use Redis for distributed blacklist.
+    Development environments can use in-memory set for simplicity.
+    """
+    global _redis_client
+    if _redis_client is None:
+        try:
+            import redis.asyncio as aioredis
+            import os
+            redis_url = os.getenv("REDIS_URL", "redis://127.0.0.1:6381/0")
+            _redis_client = aioredis.from_url(redis_url, decode_responses=True)
+            logger.info("JWT blacklist using Redis backend")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis for JWT blacklist: {e}. Using in-memory fallback.")
+            _redis_client = None
+    return _redis_client
+
+
+async def revoke_token(token: str, ttl: int = 86400) -> None:
+    """
+    SEC-HIGH-005 & SEC-HIGH-007 FIX: Revoke a JWT token to prevent replay attacks.
+
+    Security Benefits:
+    - Prevents token replay after logout
+    - Mitigates stolen token abuse
+    - Enables emergency token revocation
+    - Compliance with CWE-294 (Authentication Bypass by Capture-replay)
+
+    Args:
+        token: JWT token to revoke
+        ttl: Time-to-live in seconds (default: 24 hours for max token lifetime)
+
+    References:
+        - CWE-294: Capture-replay
+        - CWE-613: Insufficient Session Expiration
+    """
+    redis_client = _get_redis_client()
+
+    if redis_client:
+        try:
+            # Store revoked token in Redis with TTL
+            await redis_client.setex(f"revoked_token:{token}", ttl, "1")
+            logger.info(f"Token revoked in Redis (TTL: {ttl}s)")
+        except Exception as e:
+            logger.error(f"Failed to revoke token in Redis: {e}")
+            # Fallback to in-memory
+            _token_blacklist.add(token)
+    else:
+        # In-memory blacklist (development only)
+        _token_blacklist.add(token)
+        logger.warning("Token revoked in-memory (not recommended for production)")
+
+
+async def is_token_revoked(token: str) -> bool:
+    """
+    Check if a JWT token has been revoked.
+
+    Args:
+        token: JWT token to check
+
+    Returns:
+        True if token is revoked, False otherwise
+    """
+    redis_client = _get_redis_client()
+
+    if redis_client:
+        try:
+            result = await redis_client.exists(f"revoked_token:{token}")
+            return result > 0
+        except Exception as e:
+            logger.error(f"Failed to check token revocation in Redis: {e}")
+            # Fallback to in-memory
+            return token in _token_blacklist
+    else:
+        return token in _token_blacklist
 
 
 class JWTAuthError(Exception):
@@ -279,7 +366,7 @@ async def verify_jwt_token(
     credentials: HTTPAuthorizationCredentials = Security(security)
 ) -> Dict[str, Any]:
     """
-    Verify JWT token from User Service (async)
+    SEC-HIGH-005 & SEC-HIGH-007 FIX: Verify JWT token with revocation check.
 
     Args:
         credentials: HTTP Bearer credentials
@@ -288,7 +375,7 @@ async def verify_jwt_token(
         Token payload
 
     Raises:
-        HTTPException: 401 if token is invalid
+        HTTPException: 401 if token is invalid or revoked
     """
     if not credentials:
         raise HTTPException(
@@ -297,8 +384,19 @@ async def verify_jwt_token(
             headers={"WWW-Authenticate": "Bearer"}
         )
 
+    token = credentials.credentials
+
+    # SEC-HIGH-005 & SEC-HIGH-007 FIX: Check token revocation
+    if await is_token_revoked(token):
+        logger.warning(f"Rejected revoked token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
     try:
-        return verify_jwt_token_sync(credentials.credentials)
+        return verify_jwt_token_sync(token)
     except JWTAuthError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -329,9 +427,87 @@ async def get_current_user(
     }
 
 
+async def require_admin(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    SEC-HIGH-004 FIX: Require admin role for sensitive endpoints.
+
+    Security Benefits:
+    - Prevents privilege escalation
+    - Enforces role-based access control (RBAC)
+    - Protects admin-only operations
+    - Compliance with CWE-862 (Missing Authorization)
+
+    Args:
+        current_user: Current authenticated user
+
+    Returns:
+        User dictionary if admin
+
+    Raises:
+        HTTPException: 403 if user is not an admin
+
+    References:
+        - CWE-862: Missing Authorization
+        - OWASP A01:2021 – Broken Access Control
+    """
+    roles = current_user.get("roles", [])
+
+    if "admin" not in roles and "super_admin" not in roles:
+        logger.warning(
+            f"SEC-HIGH-004: Unauthorized admin access attempt by user {current_user.get('user_id')} "
+            f"with roles: {roles}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required for this operation"
+        )
+
+    return current_user
+
+
+async def require_permission(permission: str):
+    """
+    SEC-HIGH-004 FIX: Require specific permission for fine-grained access control.
+
+    Args:
+        permission: Required permission (e.g., "orders:write", "accounts:admin")
+
+    Returns:
+        Dependency function that checks permission
+
+    References:
+        - CWE-862: Missing Authorization
+    """
+    async def check_permission(
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ) -> Dict[str, Any]:
+        permissions = current_user.get("permissions", [])
+        roles = current_user.get("roles", [])
+
+        # Admins have all permissions
+        if "admin" in roles or "super_admin" in roles:
+            return current_user
+
+        if permission not in permissions:
+            logger.warning(
+                f"SEC-HIGH-004: Unauthorized access attempt - user {current_user.get('user_id')} "
+                f"lacks permission: {permission}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission '{permission}' required for this operation"
+            )
+
+        return current_user
+
+    return check_permission
+
+
 async def verify_ws_token(token: str) -> Dict[str, Any]:
     """
-    Verify JWT token for WebSocket connection
+    SEC-HIGH-005 & SEC-HIGH-007 FIX: Verify JWT token for WebSocket with revocation check.
 
     WebSockets can't use HTTPBearer, so we extract token from query params.
 
@@ -349,8 +525,13 @@ async def verify_ws_token(token: str) -> Dict[str, Any]:
         Token payload with user info
 
     Raises:
-        JWTAuthError: If token is invalid
+        JWTAuthError: If token is invalid or revoked
     """
+    # SEC-HIGH-005 & SEC-HIGH-007 FIX: Check token revocation
+    if await is_token_revoked(token):
+        logger.warning(f"Rejected revoked WebSocket token")
+        raise JWTAuthError("Token has been revoked")
+
     try:
         return verify_jwt_token_sync(token)
     except JWTAuthError as e:

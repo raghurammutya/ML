@@ -78,6 +78,18 @@ task_queue_depth_total = Gauge(
     'Total tasks in executor'
 )
 
+# QUICK-WIN-003 FIX: Dead letter queue monitoring for observability
+order_dead_letter_queue_depth = Gauge(
+    'order_dead_letter_queue_depth',
+    'Number of permanently failed orders in dead letter queue (requires manual intervention)'
+)
+
+order_dead_letter_total = Counter(
+    'order_dead_letter_total',
+    'Total orders moved to dead letter queue',
+    ['operation', 'account_id']
+)
+
 # Subscription metrics
 active_subscriptions = Gauge(
     'active_subscriptions_total',
