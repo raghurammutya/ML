@@ -1,0 +1,425 @@
+{
+  "title": "Backend API - Performance & Health",
+  "description": "Comprehensive monitoring for backend API performance, latency, and health metrics",
+  "tags": [
+    "backend",
+    "api",
+    "performance",
+    "health"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "📊 Overview",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "Request Rate (req/s)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 1, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m]))",
+          "legendFormat": "Total Requests"
+        },
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"2..\"}[1m]))",
+          "legendFormat": "2xx Success"
+        },
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"4..\"}[1m]))",
+          "legendFormat": "4xx Client Errors"
+        },
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m]))",
+          "legendFormat": "5xx Server Errors"
+        }
+      ],
+      "yaxes": [
+        {"format": "reqps", "label": "Requests/sec"},
+        {"format": "short"}
+      ],
+      "fill": 1,
+      "linewidth": 2
+    },
+    {
+      "id": 3,
+      "title": "Active Requests",
+      "type": "singlestat",
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "sum(http_active_requests)"}
+      ],
+      "format": "none",
+      "valueName": "current",
+      "gaugeShow": true,
+      "gaugeMaxValue": 100,
+      "thresholds": "50,80"
+    },
+    {
+      "id": 4,
+      "title": "Error Rate %",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "100 * sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))"
+        }
+      ],
+      "format": "percent",
+      "valueName": "current",
+      "sparkline": {"show": true, "lineColor": "rgb(31, 120, 193)"},
+      "thresholds": "1,5",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 5,
+      "title": "Active WebSocket Connections",
+      "type": "singlestat",
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "sum(websocket_connections_active)"}
+      ],
+      "format": "none",
+      "valueName": "current",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 6,
+      "title": "Active Users (15m)",
+      "type": "singlestat",
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "active_users{time_window=\"15m\"}"}
+      ],
+      "format": "none",
+      "valueName": "current",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 7,
+      "title": "Request Duration P95 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 8, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000"
+        }
+      ],
+      "format": "ms",
+      "valueName": "current",
+      "thresholds": "100,500",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 8,
+      "title": "Request Duration P99 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000"
+        }
+      ],
+      "format": "ms",
+      "valueName": "current",
+      "thresholds": "200,1000",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 9,
+      "title": "Database Pool Status",
+      "type": "singlestat",
+      "gridPos": {"x": 16, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "database_pool_connections{state=\"active\"}"}
+      ],
+      "format": "none",
+      "valueName": "current",
+      "postfix": " / 20",
+      "gaugeShow": true,
+      "gaugeMaxValue": 20,
+      "thresholds": "15,18"
+    },
+    {
+      "id": 10,
+      "title": "Circuit Breaker State",
+      "type": "singlestat",
+      "gridPos": {"x": 20, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "ticker_service_circuit_breaker_state"}
+      ],
+      "format": "none",
+      "valueName": "current",
+      "valueMaps": [
+        {"value": "0", "text": "CLOSED ✓"},
+        {"value": "1", "text": "OPEN ✗"},
+        {"value": "2", "text": "HALF OPEN"}
+      ],
+      "thresholds": "0.5,1.5",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 11,
+      "title": "🎯 API Latency",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 9, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 12,
+      "title": "Request Duration by Endpoint (P95)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (endpoint, le)) * 1000",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "ms", "label": "Latency (ms)"},
+        {"format": "short"}
+      ],
+      "fill": 0,
+      "linewidth": 2
+    },
+    {
+      "id": 13,
+      "title": "Request Duration Heatmap",
+      "type": "heatmap",
+      "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(http_request_duration_seconds_bucket[1m])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "dataFormat": "tsbuckets",
+      "yAxis": {"format": "s", "decimals": 0}
+    },
+    {
+      "id": 14,
+      "title": "🔧 HTTP Details",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 18, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 15,
+      "title": "Requests by Endpoint (Top 10)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 19, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "topk(10, sum(rate(http_requests_total[5m])) by (endpoint))",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "reqps", "label": "Requests/sec"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 16,
+      "title": "HTTP Status Codes Distribution",
+      "type": "piechart",
+      "gridPos": {"x": 12, "y": 19, "w": 6, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[5m])) by (status)",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "pieType": "donut",
+      "legend": {"show": true, "values": true}
+    },
+    {
+      "id": 17,
+      "title": "Requests by Method",
+      "type": "bargauge",
+      "gridPos": {"x": 18, "y": 19, "w": 6, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[5m])) by (method)",
+          "legendFormat": "{{method}}"
+        }
+      ],
+      "orientation": "horizontal"
+    },
+    {
+      "id": 18,
+      "title": "🔌 WebSocket Metrics",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 27, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 19,
+      "title": "WebSocket Connections by Endpoint",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "websocket_connections_active",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "short", "label": "Connections"},
+        {"format": "short"}
+      ],
+      "fill": 1,
+      "stack": true
+    },
+    {
+      "id": 20,
+      "title": "WebSocket Message Rate",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(websocket_messages_sent_total[1m])) by (endpoint)",
+          "legendFormat": "Sent - {{endpoint}}"
+        },
+        {
+          "expr": "sum(rate(websocket_messages_received_total[1m])) by (endpoint)",
+          "legendFormat": "Received - {{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "msg/s", "label": "Messages/sec"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 21,
+      "title": "WebSocket Connection Duration",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 36, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(websocket_connection_duration_seconds_bucket[5m])) by (endpoint, le)) / 60",
+          "legendFormat": "P95 - {{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "m", "label": "Duration (minutes)"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 22,
+      "title": "WebSocket Errors",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 36, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(websocket_errors_total[1m])) by (error_type)",
+          "legendFormat": "{{error_type}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "errors/s", "label": "Errors/sec"},
+        {"format": "short"}
+      ],
+      "alert": {
+        "conditions": [
+          {
+            "evaluator": {"params": [5], "type": "gt"},
+            "query": {"params": ["A", "5m", "now"]},
+            "reducer": {"params": [], "type": "avg"},
+            "type": "query"
+          }
+        ],
+        "frequency": "60s",
+        "name": "High WebSocket error rate"
+      }
+    },
+    {
+      "id": 23,
+      "title": "🔐 Authentication & Security",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 44, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 24,
+      "title": "Authentication Attempts",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 45, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(auth_attempts_total{status=\"success\"}[1m]))",
+          "legendFormat": "Successful"
+        },
+        {
+          "expr": "sum(rate(auth_attempts_total{status=\"failed\"}[1m]))",
+          "legendFormat": "Failed"
+        }
+      ],
+      "yaxes": [
+        {"format": "ops", "label": "Attempts/sec"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 25,
+      "title": "JWT Validation Rate",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 45, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(jwt_validations_total[1m])) by (status)",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "ops", "label": "Validations/sec"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 26,
+      "title": "Active Sessions",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 53, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "active_sessions"}
+      ],
+      "yaxes": [
+        {"format": "short", "label": "Sessions"},
+        {"format": "short"}
+      ],
+      "fill": 1
+    },
+    {
+      "id": 27,
+      "title": "Rate Limit Violations",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 53, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(rate_limit_exceeded_total[1m])) by (endpoint)",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "yaxes": [
+        {"format": "ops", "label": "Violations/sec"},
+        {"format": "short"}
+      ]
+    }
+  ]
+}

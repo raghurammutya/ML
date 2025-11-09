@@ -1,0 +1,312 @@
+groups:
+  - name: backend_critical_alerts
+    interval: 30s
+    rules:
+      # ========== CRITICAL ALERTS (Immediate Action Required) ==========
+
+      - alert: BackendServiceDown
+        expr: up{job="backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: backend
+        annotations:
+          summary: "Backend service is down"
+          description: "Backend service has been unreachable for 1 minute. All API requests are failing."
+          runbook_url: "https://wiki.example.com/runbooks/backend-down"
+
+      - alert: HighAPIErrorRate
+        expr: |
+          100 * sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(http_requests_total[5m])) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: backend_api
+        annotations:
+          summary: "High API error rate (>5%)"
+          description: "API error rate is {{ $value | humanizePercentage }} over the last 5 minutes. Investigate server logs immediately."
+          runbook_url: "https://wiki.example.com/runbooks/high-error-rate"
+
+      - alert: DatabasePoolExhausted
+        expr: database_pool_connections{state="active"} >= 19
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "Database pool has {{ $value }} active connections out of 20. New requests will timeout."
+          runbook_url: "https://wiki.example.com/runbooks/db-pool-exhausted"
+
+      - alert: DatabaseAcquireTimeouts
+        expr: rate(database_pool_acquire_timeouts_total[5m]) > 1
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database pool acquire timeouts occurring"
+          description: "Connection pool timeouts at {{ $value | humanize }} per second. Database may be overloaded."
+          runbook_url: "https://wiki.example.com/runbooks/db-timeouts"
+
+      - alert: CriticalAPILatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: backend_api
+        annotations:
+          summary: "Critical API latency (P99 > 5s)"
+          description: "API P99 latency is {{ $value | humanizeDuration }}. Users experiencing severe slowness."
+          runbook_url: "https://wiki.example.com/runbooks/high-latency"
+
+      - alert: RedisConnectionFailure
+        expr: rate(redis_connection_errors_total[5m]) > 1
+        for: 2m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis connection failures"
+          description: "Redis connection errors at {{ $value | humanize }}/sec. Cache layer degraded."
+          runbook_url: "https://wiki.example.com/runbooks/redis-failure"
+
+      - alert: CircuitBreakerOpen
+        expr: ticker_service_circuit_breaker_state == 1
+        for: 2m
+        labels:
+          severity: critical
+          component: ticker_service
+        annotations:
+          summary: "Ticker service circuit breaker is OPEN"
+          description: "Circuit breaker protecting ticker service is open. All ticker requests are failing."
+          runbook_url: "https://wiki.example.com/runbooks/circuit-breaker-open"
+
+  - name: backend_warning_alerts
+    interval: 30s
+    rules:
+      # ========== WARNING ALERTS (Action Required Soon) ==========
+
+      - alert: HighAPILatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: backend_api
+        annotations:
+          summary: "High API latency (P95 > 1s)"
+          description: "API P95 latency is {{ $value | humanizeDuration }}. Performance degradation detected."
+          runbook_url: "https://wiki.example.com/runbooks/latency-warning"
+
+      - alert: ElevatedDatabaseLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(database_query_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Elevated database query latency (P95 > 500ms)"
+          description: "Database P95 latency is {{ $value | humanizeDuration }}. Queries running slow."
+          runbook_url: "https://wiki.example.com/runbooks/slow-queries"
+
+      - alert: HighDatabasePoolUtilization
+        expr: |
+          100 * database_pool_connections{state="active"}
+          / database_pool_connections{state="total"} > 75
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "High database pool utilization (>75%)"
+          description: "Database pool is {{ $value | humanizePercentage }} utilized. May exhaust soon."
+          runbook_url: "https://wiki.example.com/runbooks/high-pool-usage"
+
+      - alert: LowCacheHitRate
+        expr: cache_hit_rate{cache_layer="l2_redis"} < 70
+        for: 10m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Low Redis cache hit rate (<70%)"
+          description: "Redis cache hit rate is {{ $value | humanizePercentage }}. Cache effectiveness degraded."
+          runbook_url: "https://wiki.example.com/runbooks/low-cache-hit"
+
+      - alert: HighOrderRejectionRate
+        expr: |
+          100 * sum(rate(smart_order_validations_total{status="rejected"}[10m]))
+          / sum(rate(smart_order_validations_total[10m])) > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: smart_orders
+        annotations:
+          summary: "High smart order rejection rate (>20%)"
+          description: "Order rejection rate is {{ $value | humanizePercentage }}. Review validation logic."
+          runbook_url: "https://wiki.example.com/runbooks/high-rejections"
+
+      - alert: StrategyM2MCalculationErrors
+        expr: rate(strategy_m2m_calculations_total{status="error"}[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: strategies
+        annotations:
+          summary: "Strategy M2M calculation errors"
+          description: "M2M calculation errors at {{ $value | humanize }}/sec. Strategy P&L may be incorrect."
+          runbook_url: "https://wiki.example.com/runbooks/m2m-errors"
+
+      - alert: TickerServiceHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(ticker_service_request_duration_seconds_bucket[5m])) by (le)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: ticker_service
+        annotations:
+          summary: "Ticker service high latency (P95 > 2s)"
+          description: "Ticker service P95 latency is {{ $value | humanizeDuration }}."
+          runbook_url: "https://wiki.example.com/runbooks/ticker-latency"
+
+      - alert: HighAuthenticationFailureRate
+        expr: |
+          100 * sum(rate(auth_attempts_total{status="failed"}[5m]))
+          / sum(rate(auth_attempts_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: authentication
+        annotations:
+          summary: "High authentication failure rate (>10%)"
+          description: "Auth failure rate is {{ $value | humanizePercentage }}. Possible brute force attack."
+          runbook_url: "https://wiki.example.com/runbooks/auth-failures"
+
+      - alert: WebSocketConnectionsHigh
+        expr: sum(websocket_connections_active) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: websockets
+        annotations:
+          summary: "High number of WebSocket connections (>100)"
+          description: "{{ $value }} active WebSocket connections. May impact performance."
+          runbook_url: "https://wiki.example.com/runbooks/high-ws-connections"
+
+      - alert: BackgroundWorkerQueueBacklog
+        expr: worker_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: workers
+        annotations:
+          summary: "Background worker queue backlog"
+          description: "Worker {{$labels.worker_type}} has {{ $value }} tasks queued."
+          runbook_url: "https://wiki.example.com/runbooks/worker-backlog"
+
+      - alert: HighRateLimitViolations
+        expr: sum(rate(rate_limit_exceeded_total[5m])) by (endpoint) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: rate_limiting
+        annotations:
+          summary: "High rate limit violations on {{ $labels.endpoint }}"
+          description: "{{ $value | humanize }} rate limit violations/sec on {{ $labels.endpoint }}."
+          runbook_url: "https://wiki.example.com/runbooks/rate-limits"
+
+  - name: backend_info_alerts
+    interval: 60s
+    rules:
+      # ========== INFO ALERTS (Informational, No Immediate Action) ==========
+
+      - alert: NoActiveUsers
+        expr: active_users{time_window="15m"} == 0
+        for: 15m
+        labels:
+          severity: info
+          component: business
+        annotations:
+          summary: "No active users in last 15 minutes"
+          description: "No user activity detected. This may be normal during off-hours."
+
+      - alert: FOQueryLatencyIncreasing
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(fo_query_duration_seconds_bucket[10m])) by (le)
+          ) > 5
+        for: 10m
+        labels:
+          severity: info
+          component: fo_analytics
+        annotations:
+          summary: "F&O query latency increasing (P95 > 5s)"
+          description: "F&O analytics queries running slow at {{ $value | humanizeDuration }} P95."
+
+      - alert: StatementParsingErrors
+        expr: rate(statement_parsing_errors_total[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: info
+          component: statement_parser
+        annotations:
+          summary: "Statement parsing errors detected"
+          description: "Statement parsing errors at {{ $value | humanize }}/sec. Review uploaded files."
+
+      - alert: CacheMissRateHigh
+        expr: |
+          100 * sum(rate(cache_operations_total{operation="get",status="miss"}[10m]))
+          / sum(rate(cache_operations_total{operation="get"}[10m])) > 40
+        for: 10m
+        labels:
+          severity: info
+          component: cache
+        annotations:
+          summary: "Cache miss rate >40%"
+          description: "Cache miss rate is {{ $value | humanizePercentage }}. Consider cache warmup."
+
+  - name: backend_sla_alerts
+    interval: 60s
+    rules:
+      # ========== SLA ALERTS ==========
+
+      - alert: API_SLA_Breach_Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket[1h])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          component: sla
+          sla_metric: latency
+        annotations:
+          summary: "API SLA breach: P95 latency > 500ms"
+          description: "1-hour P95 latency is {{ $value | humanizeDuration }}. SLA target is 500ms."
+          runbook_url: "https://wiki.example.com/runbooks/sla-breach"
+
+      - alert: API_SLA_Breach_Availability
+        expr: |
+          100 * sum(rate(http_requests_total{status=~"2.."}[1h]))
+          / sum(rate(http_requests_total[1h])) < 99.9
+        for: 5m
+        labels:
+          severity: critical
+          component: sla
+          sla_metric: availability
+        annotations:
+          summary: "API SLA breach: Availability < 99.9%"
+          description: "1-hour API availability is {{ $value | humanizePercentage }}. SLA target is 99.9%."
+          runbook_url: "https://wiki.example.com/runbooks/sla-breach"

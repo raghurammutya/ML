@@ -1,0 +1,282 @@
+{
+  "title": "Backend - Database & Cache Operations",
+  "description": "Monitoring for database queries, connection pool, cache hit rates, and Redis operations",
+  "tags": ["backend", "database", "cache", "redis", "postgresql"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "time": {"from": "now-15m", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "📊 Database Overview",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}
+    },
+    {
+      "id": 2,
+      "title": "Query Rate (queries/s)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 1, "w": 8, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(database_queries_total{status=\"success\"}[1m]))", "legendFormat": "Successful"},
+        {"expr": "sum(rate(database_queries_total{status=\"error\"}[1m]))", "legendFormat": "Failed"}
+      ],
+      "yaxes": [{"format": "qps", "label": "Queries/sec"}, {"format": "short"}]
+    },
+    {
+      "id": 3,
+      "title": "Query Duration P95 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(database_query_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "format": "ms",
+      "thresholds": "50,200",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 4,
+      "title": "Query Duration P99 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum(rate(database_query_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "format": "ms",
+      "thresholds": "100,500",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 5,
+      "title": "Pool Active Connections",
+      "type": "singlestat",
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "database_pool_connections{state=\"active\"}"}],
+      "format": "none",
+      "postfix": " / 20",
+      "gaugeShow": true,
+      "gaugeMaxValue": 20,
+      "thresholds": "15,18"
+    },
+    {
+      "id": 6,
+      "title": "Pool Idle Connections",
+      "type": "singlestat",
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "database_pool_connections{state=\"idle\"}"}],
+      "format": "none",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 7,
+      "title": "Pool Acquire Timeouts",
+      "type": "singlestat",
+      "gridPos": {"x": 8, "y": 5, "w": 4, "h": 4},
+      "targets": [{"expr": "rate(database_pool_acquire_timeouts_total[5m])"}],
+      "format": "ops",
+      "sparkline": {"show": true},
+      "thresholds": "0.1,1",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 8,
+      "title": "Database Errors/sec",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 5, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(database_errors_total[5m]))"}],
+      "format": "errors/s",
+      "sparkline": {"show": true},
+      "thresholds": "1,5",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 9,
+      "title": "Transaction Duration P95 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 16, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(database_transaction_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "format": "ms",
+      "thresholds": "100,500"
+    },
+    {
+      "id": 10,
+      "title": "Pool Acquire Duration P95 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 20, "y": 5, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(database_pool_acquire_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "format": "ms",
+      "thresholds": "10,50"
+    },
+    {
+      "id": 11,
+      "title": "🔍 Query Analysis",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 9, "w": 24, "h": 1}
+    },
+    {
+      "id": 12,
+      "title": "Queries by Type",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(database_queries_total[1m])) by (query_type)", "legendFormat": "{{query_type}}"}
+      ],
+      "yaxes": [{"format": "qps"}, {"format": "short"}],
+      "stack": true
+    },
+    {
+      "id": 13,
+      "title": "Query Duration by Type (P95)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(database_query_duration_seconds_bucket[5m])) by (query_type, le)) * 1000",
+          "legendFormat": "{{query_type}}"
+        }
+      ],
+      "yaxes": [{"format": "ms", "label": "Latency (ms)"}, {"format": "short"}]
+    },
+    {
+      "id": 14,
+      "title": "Database Errors by Type",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 18, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(database_errors_total[1m])) by (error_type)", "legendFormat": "{{error_type}}"}
+      ],
+      "yaxes": [{"format": "errors/s"}, {"format": "short"}]
+    },
+    {
+      "id": 15,
+      "title": "Transaction Duration Distribution",
+      "type": "heatmap",
+      "gridPos": {"x": 12, "y": 18, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(database_transaction_duration_seconds_bucket[1m])) by (le)", "format": "heatmap"}
+      ],
+      "yAxis": {"format": "s"}
+    },
+    {
+      "id": 16,
+      "title": "💾 Cache Performance",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 26, "w": 24, "h": 1}
+    },
+    {
+      "id": 17,
+      "title": "Cache Hit Rate %",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "cache_hit_rate{cache_layer=\"l1_memory\"}", "legendFormat": "L1 Memory"},
+        {"expr": "cache_hit_rate{cache_layer=\"l2_redis\"}", "legendFormat": "L2 Redis"}
+      ],
+      "yaxes": [{"format": "percent", "min": 0, "max": 100}, {"format": "short"}],
+      "alert": {
+        "conditions": [
+          {"evaluator": {"params": [70], "type": "lt"}, "query": {"params": ["A", "5m", "now"]}}
+        ],
+        "name": "Low cache hit rate"
+      }
+    },
+    {
+      "id": 18,
+      "title": "Cache Operations/sec",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 27, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(cache_operations_total{operation=\"get\", status=\"hit\"}[1m]))", "legendFormat": "Hits"},
+        {"expr": "sum(rate(cache_operations_total{operation=\"get\", status=\"miss\"}[1m]))", "legendFormat": "Misses"},
+        {"expr": "sum(rate(cache_operations_total{operation=\"set\"}[1m]))", "legendFormat": "Sets"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}]
+    },
+    {
+      "id": 19,
+      "title": "Cache Entries by Layer",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 35, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "cache_entries_total", "legendFormat": "{{cache_layer}}"}
+      ],
+      "yaxes": [{"format": "short", "label": "Entries"}, {"format": "short"}]
+    },
+    {
+      "id": 20,
+      "title": "Cache Operation Duration (P95)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 35, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cache_operation_duration_seconds_bucket[5m])) by (operation, cache_layer, le)) * 1000",
+          "legendFormat": "{{operation}} - {{cache_layer}}"
+        }
+      ],
+      "yaxes": [{"format": "ms"}, {"format": "short"}]
+    },
+    {
+      "id": 21,
+      "title": "🔴 Redis Metrics",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 43, "w": 24, "h": 1}
+    },
+    {
+      "id": 22,
+      "title": "Redis Command Duration (P95)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(redis_command_duration_seconds_bucket[5m])) by (command, le)) * 1000",
+          "legendFormat": "{{command}}"
+        }
+      ],
+      "yaxes": [{"format": "ms", "label": "Latency (ms)"}, {"format": "short"}]
+    },
+    {
+      "id": 23,
+      "title": "Redis Connection Errors",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "rate(redis_connection_errors_total[1m])"}
+      ],
+      "yaxes": [{"format": "errors/s"}, {"format": "short"}],
+      "alert": {
+        "conditions": [
+          {"evaluator": {"params": [1], "type": "gt"}, "query": {"params": ["A", "5m", "now"]}}
+        ],
+        "name": "Redis connection errors"
+      }
+    },
+    {
+      "id": 24,
+      "title": "Memory Cache Usage (MB)",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 52, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "cache_memory_usage_bytes / 1024 / 1024"}
+      ],
+      "yaxes": [{"format": "MB"}, {"format": "short"}]
+    },
+    {
+      "id": 25,
+      "title": "Connection Pool Health",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 52, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "database_pool_connections{state=\"total\"}", "legendFormat": "Total"},
+        {"expr": "database_pool_connections{state=\"active\"}", "legendFormat": "Active"},
+        {"expr": "database_pool_connections{state=\"idle\"}", "legendFormat": "Idle"}
+      ],
+      "yaxes": [{"format": "short", "label": "Connections"}, {"format": "short"}]
+    }
+  ]
+}

@@ -4,11 +4,16 @@ Main FastAPI application for user_service
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from contextlib import asynccontextmanager
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.core.config import settings
 from app.core.database import init_db, dispose_db
 from app.core.redis_client import redis_client
+
+# Import metrics to register them
+from app import metrics as app_metrics
 
 # Import routers
 from app.api.v1.endpoints import auth, authz, users, mfa, trading_accounts, audit, api_keys, organizations
@@ -27,6 +32,13 @@ async def lifespan(app: FastAPI):
     # Initialize database (in production, use migrations instead)
     if settings.ENVIRONMENT == "development":
         init_db()
+
+    # Initialize metrics
+    app_metrics.app_info.info({
+        'version': settings.VERSION,
+        'environment': settings.ENVIRONMENT,
+        'app_name': settings.APP_NAME
+    })
 
     yield
 
@@ -76,6 +88,13 @@ async def health_check():
             "redis": redis_status,
         }
     }
+
+
+# Metrics endpoint
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    """Prometheus metrics endpoint"""
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # Root endpoint

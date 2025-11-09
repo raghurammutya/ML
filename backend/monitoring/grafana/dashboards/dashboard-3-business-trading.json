@@ -1,0 +1,346 @@
+{
+  "title": "Backend - Business & Trading Metrics",
+  "description": "Monitoring for smart orders, strategies, F&O analytics, and business KPIs",
+  "tags": ["backend", "business", "trading", "strategies", "smart-orders"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "📈 Smart Order Metrics",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}
+    },
+    {
+      "id": 2,
+      "title": "Order Validations/sec",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 1, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(smart_order_validations_total{status=\"passed\"}[1m]))", "legendFormat": "Passed"},
+        {"expr": "sum(rate(smart_order_validations_total{status=\"rejected\"}[1m]))", "legendFormat": "Rejected"}
+      ],
+      "yaxes": [{"format": "ops", "label": "Validations/sec"}, {"format": "short"}]
+    },
+    {
+      "id": 3,
+      "title": "Validation Success Rate %",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {"expr": "100 * sum(rate(smart_order_validations_total{status=\"passed\"}[5m])) / sum(rate(smart_order_validations_total[5m]))"}
+      ],
+      "format": "percent",
+      "thresholds": "80,90",
+      "colors": ["#d44a3a", "#e0b400", "#299c46"]
+    },
+    {
+      "id": 4,
+      "title": "Validation Duration P95 (ms)",
+      "type": "singlestat",
+      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(smart_order_validation_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "format": "ms",
+      "thresholds": "100,500"
+    },
+    {
+      "id": 5,
+      "title": "Orders Placed Today",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 5, "w": 6, "h": 4},
+      "targets": [{"expr": "total_orders_placed_today"}],
+      "format": "none",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 6,
+      "title": "Rejection Rate (1h)",
+      "type": "singlestat",
+      "gridPos": {"x": 18, "y": 5, "w": 6, "h": 4},
+      "targets": [
+        {"expr": "100 * sum(rate(smart_order_validations_total{status=\"rejected\"}[1h])) / sum(rate(smart_order_validations_total[1h]))"}
+      ],
+      "format": "percent",
+      "thresholds": "10,20",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 7,
+      "title": "Rejection Reasons",
+      "type": "piechart",
+      "gridPos": {"x": 0, "y": 9, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(smart_order_rejection_reasons_total[5m])) by (reason)", "legendFormat": "{{reason}}"}
+      ],
+      "pieType": "donut"
+    },
+    {
+      "id": 8,
+      "title": "Market Impact Assessments",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 9, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(market_impact_assessments_total[1m])) by (impact_level)", "legendFormat": "{{impact_level}}"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}],
+      "stack": true
+    },
+    {
+      "id": 9,
+      "title": "💰 Margin & Cost Calculations",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 17, "w": 24, "h": 1}
+    },
+    {
+      "id": 10,
+      "title": "Margin Calculations/sec",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 18, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(margin_calculations_total{status=\"success\"}[1m]))", "legendFormat": "Success"},
+        {"expr": "sum(rate(margin_calculations_total{status=\"error\"}[1m]))", "legendFormat": "Error"},
+        {"expr": "sum(rate(margin_calculations_total{status=\"fallback\"}[1m]))", "legendFormat": "Fallback"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}]
+    },
+    {
+      "id": 11,
+      "title": "Margin Calculation Duration by Method (P95)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 18, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(margin_calculation_duration_seconds_bucket[5m])) by (method, le)) * 1000",
+          "legendFormat": "{{method}}"
+        }
+      ],
+      "yaxes": [{"format": "ms", "label": "Duration (ms)"}, {"format": "short"}]
+    },
+    {
+      "id": 12,
+      "title": "Cost Breakdowns by Transaction Type",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 26, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(cost_breakdown_calculations_total[1m])) by (transaction_type)", "legendFormat": "{{transaction_type}}"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}],
+      "stack": true
+    },
+    {
+      "id": 13,
+      "title": "Ticker Service Success Rate %",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 26, "w": 6, "h": 4},
+      "targets": [
+        {"expr": "100 * sum(rate(ticker_service_requests_total{status=\"success\"}[5m])) / sum(rate(ticker_service_requests_total[5m]))"}
+      ],
+      "format": "percent",
+      "thresholds": "95,98",
+      "colors": ["#d44a3a", "#e0b400", "#299c46"]
+    },
+    {
+      "id": 14,
+      "title": "Circuit Breaker Failures",
+      "type": "singlestat",
+      "gridPos": {"x": 18, "y": 26, "w": 6, "h": 4},
+      "targets": [{"expr": "rate(ticker_service_circuit_breaker_failures_total[5m])"}],
+      "format": "ops",
+      "sparkline": {"show": true},
+      "thresholds": "1,5",
+      "colors": ["#299c46", "#e0b400", "#d44a3a"]
+    },
+    {
+      "id": 15,
+      "title": "Ticker Service Request Duration (P95)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 30, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ticker_service_request_duration_seconds_bucket[5m])) by (operation, le)) * 1000",
+          "legendFormat": "{{operation}}"
+        }
+      ],
+      "yaxes": [{"format": "ms"}, {"format": "short"}]
+    },
+    {
+      "id": 16,
+      "title": "🎯 Strategy Metrics",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 38, "w": 24, "h": 1}
+    },
+    {
+      "id": 17,
+      "title": "Active Strategies by Account",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 39, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "strategies_total", "legendFormat": "{{account_id}}"}
+      ],
+      "yaxes": [{"format": "short", "label": "Strategies"}, {"format": "short"}]
+    },
+    {
+      "id": 18,
+      "title": "Strategy Operations",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 39, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(strategy_operations_total{status=\"success\"}[1m])) by (operation)", "legendFormat": "{{operation}}"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}],
+      "stack": true
+    },
+    {
+      "id": 19,
+      "title": "M2M Calculations/sec",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 47, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(strategy_m2m_calculations_total{status=\"success\"}[1m]))", "legendFormat": "Success"},
+        {"expr": "sum(rate(strategy_m2m_calculations_total{status=\"error\"}[1m]))", "legendFormat": "Error"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}]
+    },
+    {
+      "id": 20,
+      "title": "M2M Calculation Duration P95 (ms)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 47, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(strategy_m2m_calculation_duration_seconds_bucket[5m])) by (le)) * 1000"}
+      ],
+      "yaxes": [{"format": "ms"}, {"format": "short"}]
+    },
+    {
+      "id": 21,
+      "title": "Total Strategy Instruments",
+      "type": "singlestat",
+      "gridPos": {"x": 0, "y": 55, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(strategy_instruments_total)"}],
+      "format": "none",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 22,
+      "title": "Strategies Created Today",
+      "type": "singlestat",
+      "gridPos": {"x": 6, "y": 55, "w": 6, "h": 4},
+      "targets": [{"expr": "total_strategies_created_today"}],
+      "format": "none"
+    },
+    {
+      "id": 23,
+      "title": "Total P&L (₹)",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 55, "w": 12, "h": 4},
+      "targets": [{"expr": "sum(strategy_pnl_total)"}],
+      "format": "currencyINR",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 24,
+      "title": "📊 F&O Analytics",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 59, "w": 24, "h": 1}
+    },
+    {
+      "id": 25,
+      "title": "F&O Query Rate",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 60, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(fo_queries_total{status=\"success\"}[1m])) by (query_type)", "legendFormat": "{{query_type}}"}
+      ],
+      "yaxes": [{"format": "qps"}, {"format": "short"}],
+      "stack": true
+    },
+    {
+      "id": 26,
+      "title": "F&O Query Duration by Type (P95)",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 60, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fo_query_duration_seconds_bucket[5m])) by (query_type, le)) * 1000",
+          "legendFormat": "{{query_type}}"
+        }
+      ],
+      "yaxes": [{"format": "ms"}, {"format": "short"}]
+    },
+    {
+      "id": 27,
+      "title": "F&O Instruments Cached",
+      "type": "singlestat",
+      "gridPos": {"x": 0, "y": 68, "w": 6, "h": 4},
+      "targets": [{"expr": "fo_instruments_cached"}],
+      "format": "none",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 28,
+      "title": "Greeks Calculations/sec",
+      "type": "singlestat",
+      "gridPos": {"x": 6, "y": 68, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(fo_greeks_calculations_total{status=\"success\"}[1m]))"}],
+      "format": "ops",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 29,
+      "title": "👥 User Activity",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 72, "w": 24, "h": 1}
+    },
+    {
+      "id": 30,
+      "title": "Active Users by Time Window",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 73, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "active_users{time_window=\"5m\"}", "legendFormat": "5 minutes"},
+        {"expr": "active_users{time_window=\"15m\"}", "legendFormat": "15 minutes"},
+        {"expr": "active_users{time_window=\"1h\"}", "legendFormat": "1 hour"}
+      ],
+      "yaxes": [{"format": "short", "label": "Users"}, {"format": "short"}]
+    },
+    {
+      "id": 31,
+      "title": "Daily Active Users",
+      "type": "singlestat",
+      "gridPos": {"x": 12, "y": 73, "w": 6, "h": 4},
+      "targets": [{"expr": "daily_active_users"}],
+      "format": "none",
+      "sparkline": {"show": true}
+    },
+    {
+      "id": 32,
+      "title": "Background Workers",
+      "type": "row",
+      "gridPos": {"x": 0, "y": 81, "w": 24, "h": 1}
+    },
+    {
+      "id": 33,
+      "title": "Worker Task Rate",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 82, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(worker_tasks_total{status=\"success\"}[1m])) by (worker_type)", "legendFormat": "{{worker_type}}"}
+      ],
+      "yaxes": [{"format": "ops"}, {"format": "short"}]
+    },
+    {
+      "id": 34,
+      "title": "Worker Queue Depth",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 82, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "worker_queue_depth", "legendFormat": "{{worker_type}}"}
+      ],
+      "yaxes": [{"format": "short", "label": "Tasks"}, {"format": "short"}]
+    }
+  ]
+}

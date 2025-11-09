@@ -39,6 +39,7 @@ from app.workers.strategy_m2m_worker import strategy_m2m_task
 from app.routes import calendar_simple as calendar
 from app.routes import admin_calendar
 from app.routes import corporate_calendar
+from app.metrics_middleware import MetricsMiddleware
 
 # -------- logging --------
 logging.basicConfig(
@@ -405,6 +406,9 @@ app.add_middleware(
     allow_headers=settings.cors_headers,
     max_age=600,  # Cache preflight requests for 10 minutes
 )
+
+# Add metrics collection middleware
+app.add_middleware(MetricsMiddleware)
 
 # Custom middleware for correlation ID tracking and request logging
 from .middleware import CorrelationIdMiddleware, RequestLoggingMiddleware, ErrorHandlingMiddleware
