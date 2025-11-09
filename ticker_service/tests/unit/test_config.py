@@ -15,7 +15,7 @@ def test_settings_defaults():
     assert settings.app_name == "ticker-service"
     assert settings.environment == "test"
     assert settings.redis_url.startswith("redis://")
-    assert settings.max_instruments_per_ws_connection == 1000
+    assert settings.max_instruments_per_ws_connection == 3000  # Updated from 1000 to 3000
 
 
 @pytest.mark.unit

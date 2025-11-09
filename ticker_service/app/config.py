@@ -30,8 +30,12 @@ class Settings(BaseSettings):
     publish_channel_prefix: str = Field(default="ticker:nifty")
     ticker_mode: str = Field(default="full", description="Ticker mode to request from KiteTicker (full|quote|ltp)")
     max_instruments_per_ws_connection: int = Field(
-        default=1000,
-        description="Maximum instruments per WebSocket connection. Pool will create additional connections when limit reached.",
+        default=3000,
+        description="Maximum instruments per WebSocket connection (KiteConnect limit: 3,000). Pool will create additional connections when limit reached.",
+    )
+    max_ws_connections_per_account: int = Field(
+        default=3,
+        description="Maximum WebSocket connections per API key (KiteConnect hard limit: 3)",
     )
     enabled_panels: List[str] = Field(
         default_factory=lambda: [
@@ -49,7 +53,7 @@ class Settings(BaseSettings):
     instrument_db_port: int = Field(default=5432, env="INSTRUMENT_DB_PORT")
     instrument_db_name: str = Field(default="stocksblitz_unified", env="INSTRUMENT_DB_NAME")
     instrument_db_user: str = Field(default="stocksblitz", env="INSTRUMENT_DB_USER")
-    instrument_db_password: str = Field(default="stocksblitz123", env="INSTRUMENT_DB_PASSWORD")
+    instrument_db_password: str = Field(default="", env="INSTRUMENT_DB_PASSWORD")  # MUST be set via environment
     instrument_refresh_hours: int = Field(default=1, description="Refresh cadence for instrument metadata (hours)")
     instrument_refresh_check_seconds: int = Field(
         default=1_800, description="Background poll interval for registry refresh checks (seconds)"
@@ -86,6 +90,34 @@ class Settings(BaseSettings):
     enable_mock_data: bool = Field(
         default=True,
         description="Enable mock data generation outside market hours. Set to False to disable all mock data.",
+    )
+    mock_state_max_size: int = Field(
+        default=5000,
+        description="Maximum number of instruments in mock state cache (LRU eviction prevents memory leak).",
+    )
+
+    # Tick batching configuration (Phase 4)
+    tick_batch_enabled: bool = Field(
+        default=True,
+        description="Enable tick batching for improved throughput (10x faster). Set to False for testing.",
+    )
+    tick_batch_window_ms: int = Field(
+        default=100,
+        description="Tick batch window in milliseconds before flushing to Redis.",
+    )
+    tick_batch_max_size: int = Field(
+        default=1000,
+        description="Maximum batch size before forced flush to Redis.",
+    )
+
+    # Tick validation configuration (Phase 4)
+    tick_validation_enabled: bool = Field(
+        default=True,
+        description="Enable tick validation with Pydantic schemas to catch malformed data early.",
+    )
+    tick_validation_strict: bool = Field(
+        default=False,
+        description="Strict validation mode - raise exceptions on validation errors instead of logging.",
     )
 
     # Option Greeks calculation configuration
@@ -130,6 +162,21 @@ class Settings(BaseSettings):
         default="",
         env="API_KEY",
         description="API key for authenticating requests. Required when api_key_enabled=True.",
+    )
+    user_service_base_url: str = Field(
+        default="",
+        env="USER_SERVICE_BASE_URL",
+        description="Base URL of the user service for centralized trading-account credentials.",
+    )
+    user_service_service_token: str = Field(
+        default="",
+        env="USER_SERVICE_SERVICE_TOKEN",
+        description="Service-to-service token for authenticating with the user service.",
+    )
+    use_user_service_accounts: bool = Field(
+        default=False,
+        env="USE_USER_SERVICE_ACCOUNTS",
+        description="Set to true to load Kite accounts from the user service instead of local YAML.",
     )
 
     # Validators
@@ -246,6 +293,14 @@ class Settings(BaseSettings):
         """Ensure max instruments is reasonable (1-3000)"""
         if not (1 <= v <= 3000):
             raise ValueError(f"max_instruments_per_ws_connection must be between 1 and 3000, got {v}")
+        return v
+
+    @field_validator("max_ws_connections_per_account")
+    @classmethod
+    def validate_max_connections(cls, v: int) -> int:
+        """Ensure max connections is reasonable (1-3)"""
+        if not (1 <= v <= 3):
+            raise ValueError(f"max_ws_connections_per_account must be between 1 and 3 (KiteConnect limit), got {v}")
         return v
 
     def model_post_init(self, __context) -> None:

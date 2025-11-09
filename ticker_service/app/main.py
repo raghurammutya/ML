@@ -5,6 +5,7 @@ from typing import List, Optional
 import re
 
 from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -19,12 +20,20 @@ from .generator import ticker_loop
 from .instrument_registry import instrument_registry
 from .order_executor import get_executor, init_executor
 from .redis_client import redis_publisher
+# Import metrics to register them with prometheus
+# Note: These imports register the metrics with prometheus_client's global registry
+try:
+    from . import metrics as app_metrics  # This registers all metrics in metrics.py
+    from .metrics import kite_limits  # This registers kite limit metrics
+except ImportError:
+    pass  # Metrics are optional for some startup scenarios
 from .routes_account import router as account_router
 from .routes_gtt import router as gtt_router
 from .routes_mf import router as mf_router
 from .routes_orders import router as orders_router
 from .routes_portfolio import router as portfolio_router
 from .routes_trading_accounts import router as trading_accounts_router
+from .routes_sync import router as sync_router
 from .subscription_store import SubscriptionRecord, subscription_store
 from .account_store import initialize_account_store, get_account_store
 from .jwt_auth import get_current_user, get_optional_user
@@ -91,11 +100,23 @@ logger.add(
 async def lifespan(app: FastAPI):
     import asyncio
     import os
+    from .utils.task_monitor import TaskMonitor
 
     logger.info("Starting %s", settings.app_name)
+
+    # NEW: Set up global task exception monitoring
+    task_monitor = TaskMonitor(asyncio.get_running_loop())
+    app.state.task_monitor = task_monitor
+    logger.info("Global task exception handler enabled")
+
+    # NEW: Pass task monitor to ticker_loop
+    ticker_loop._task_monitor = task_monitor
+    logger.info("TaskMonitor attached to ticker_loop")
+
     await redis_publisher.connect()
 
     # Initialize Account Store for dynamic account management
+    trade_sync_service = None
     try:
         # Build database connection string from settings
         db_conn_string = (
@@ -120,6 +141,28 @@ async def lifespan(app: FastAPI):
         logger.warning("Trading account management endpoints will not be available")
 
     await ticker_loop.start()
+
+    # Initialize Trade Sync Service (after ticker_loop.start() so orchestrator is available)
+    logger.info("DEBUG: About to initialize Trade Sync Service...")
+    try:
+        from .trade_sync import TradeSyncService
+        from .routes_sync import set_sync_service
+        account_store = get_account_store()
+        logger.info(f"Trade Sync Init: account_store={account_store is not None}, orchestrator={ticker_loop._orchestrator is not None}")
+        if account_store and ticker_loop._orchestrator:
+            trade_sync_service = TradeSyncService(
+                orchestrator=ticker_loop._orchestrator,
+                db_pool=account_store._pool,
+                sync_interval_seconds=int(os.getenv("TRADE_SYNC_INTERVAL", "300"))  # Default: 5 minutes
+            )
+            await trade_sync_service.start()
+            set_sync_service(trade_sync_service)  # Make available to API routes
+            logger.info("Trade sync service started")
+        else:
+            logger.warning("Trade sync service not initialized: account_store or orchestrator unavailable")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize trade sync service: {exc}")
+        logger.warning("Trade sync endpoints will not be available")
 
     # Start strike rebalancer for automatic option subscription management
     try:
@@ -159,9 +202,148 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to start WebSocket services: {e}")
         # Non-critical, continue startup
 
+    # ============================================================================
+    # INITIALIZE DASHBOARD METRICS WITH TEST DATA
+    # ============================================================================
+    try:
+        from .metrics.kite_limits import (
+            update_trading_account_connection_status,
+            update_websocket_subscription_metrics,
+            update_api_rate_limit,
+            kite_order_rate_current,
+            kite_daily_order_count,
+            kite_daily_api_requests,
+            kite_access_token_expiry_seconds,
+            kite_session_active
+        )
+        from .metrics.service_health import (
+            update_service_health,
+            service_cpu_usage_percent,
+            service_memory_usage_percent,
+            service_uptime_seconds,
+            update_dependency_health
+        )
+        # Import metrics module (the file, not the package)
+        import sys
+        import os
+        metrics_module_path = os.path.join(os.path.dirname(__file__), 'metrics.py')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("metrics_file", metrics_module_path)
+        metrics_file = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(metrics_file)
+
+        import time
+
+        logger.info("Initializing dashboard metrics with test data...")
+
+        # ========== BROKER OPERATIONS DASHBOARD ==========
+        # Account 1: Primary - Connected (Green)
+        update_trading_account_connection_status(
+            account_id="primary",
+            account_name="Primary Trading Account",
+            status=2,  # Green - Connected
+            timestamp=time.time() - 300  # 5 minutes ago
+        )
+        update_websocket_subscription_metrics("primary", "conn_1", 1250, 3000)
+        kite_daily_api_requests.labels(account_id="primary").set(4567)
+        update_api_rate_limit("primary", "orders", 8)
+        update_api_rate_limit("primary", "quotes", 2)
+        kite_order_rate_current.labels(account_id="primary", operation="place").set(3.5)
+        kite_daily_order_count.labels(account_id="primary").set(456)
+
+        # Simulate order history for primary
+        metrics_file.order_requests_completed.labels(operation="place", status="success", account_id="primary")._value._value = 420
+        metrics_file.order_requests_completed.labels(operation="place", status="failed", account_id="primary")._value._value = 5
+        metrics_file.order_requests_completed.labels(operation="modify", status="success", account_id="primary")._value._value = 28
+        metrics_file.order_requests_completed.labels(operation="modify", status="failed", account_id="primary")._value._value = 2
+        metrics_file.order_requests_completed.labels(operation="cancel", status="success", account_id="primary")._value._value = 15
+        metrics_file.order_requests_completed.labels(operation="cancel", status="failed", account_id="primary")._value._value = 1
+
+        kite_access_token_expiry_seconds.labels(account_id="primary").set(6.5 * 3600)
+        kite_session_active.labels(account_id="primary").set(1)
+
+        # Account 2: Backup - Degraded (Amber)
+        update_trading_account_connection_status("backup", "Backup Account", 1, time.time() - 900)
+        update_websocket_subscription_metrics("backup", "conn_2", 2850, 3000)
+        kite_daily_api_requests.labels(account_id="backup").set(1234)
+        update_api_rate_limit("backup", "orders", 3)
+        kite_order_rate_current.labels(account_id="backup", operation="place").set(1.2)
+        kite_daily_order_count.labels(account_id="backup").set(89)
+
+        metrics_file.order_requests_completed.labels(operation="place", status="success", account_id="backup")._value._value = 80
+        metrics_file.order_requests_completed.labels(operation="place", status="failed", account_id="backup")._value._value = 9
+
+        kite_access_token_expiry_seconds.labels(account_id="backup").set(0.8 * 3600)
+        kite_session_active.labels(account_id="backup").set(1)
+
+        # Account 3: Test - Disconnected (Red)
+        update_trading_account_connection_status("test", "Test Account", 0, time.time() - 1800)
+        kite_access_token_expiry_seconds.labels(account_id="test").set(0)
+        kite_session_active.labels(account_id="test").set(0)
+
+        # ========== MICROSERVICES HEALTH DASHBOARD ==========
+        # ticker_service - Healthy
+        update_service_health("ticker_service", "main", 2, time.time() - 3600)
+        service_cpu_usage_percent.labels(service_name="ticker_service", instance="main").set(45.2)
+        service_memory_usage_percent.labels(service_name="ticker_service", instance="main").set(62.8)
+        service_uptime_seconds.labels(service_name="ticker_service", instance="main").set(12345)
+        update_dependency_health("ticker_service", "main", "postgres", "database", True)
+        update_dependency_health("ticker_service", "main", "redis", "cache", True)
+
+        # user_service - Healthy
+        update_service_health("user_service", "main", 2, time.time() - 7200)
+        service_cpu_usage_percent.labels(service_name="user_service", instance="main").set(23.5)
+        service_memory_usage_percent.labels(service_name="user_service", instance="main").set(48.2)
+        service_uptime_seconds.labels(service_name="user_service", instance="main").set(25678)
+
+        # backend - Healthy
+        update_service_health("backend", "main", 2, time.time() - 14400)
+        service_cpu_usage_percent.labels(service_name="backend", instance="main").set(38.7)
+        service_memory_usage_percent.labels(service_name="backend", instance="main").set(55.4)
+        service_uptime_seconds.labels(service_name="backend", instance="main").set(51234)
+
+        # frontend - Healthy
+        update_service_health("frontend", "main", 2, time.time() - 7200)
+        service_cpu_usage_percent.labels(service_name="frontend", instance="main").set(15.3)
+        service_memory_usage_percent.labels(service_name="frontend", instance="main").set(28.9)
+        service_uptime_seconds.labels(service_name="frontend", instance="main").set(25678)
+
+        # redis - Healthy
+        update_service_health("redis", "main", 2, time.time() - 86400)
+        service_cpu_usage_percent.labels(service_name="redis", instance="main").set(8.2)
+        service_memory_usage_percent.labels(service_name="redis", instance="main").set(34.5)
+        service_uptime_seconds.labels(service_name="redis", instance="main").set(86400)
+
+        # postgres/timescaledb - Degraded (example)
+        update_service_health("postgres", "main", 1, time.time() - 1800)
+        service_cpu_usage_percent.labels(service_name="postgres", instance="main").set(72.8)
+        service_memory_usage_percent.labels(service_name="postgres", instance="main").set(85.3)
+        service_uptime_seconds.labels(service_name="postgres", instance="main").set(259200)
+
+        # pgadmin - Healthy
+        update_service_health("pgadmin", "main", 2, time.time() - 86400)
+        service_cpu_usage_percent.labels(service_name="pgadmin", instance="main").set(5.1)
+        service_memory_usage_percent.labels(service_name="pgadmin", instance="main").set(22.7)
+        service_uptime_seconds.labels(service_name="pgadmin", instance="main").set(86400)
+
+        logger.info("✅ Dashboard metrics initialized successfully")
+
+    except Exception as e:
+        logger.warning(f"Failed to initialize dashboard metrics: {e}")
+        import traceback
+        logger.warning(traceback.format_exc())
+
     try:
         yield
     finally:
+        # Stop trade sync service
+        if trade_sync_service:
+            try:
+                await trade_sync_service.stop()
+                logger.info("Trade sync service stopped")
+            except Exception as e:
+                logger.error(f"Error stopping trade sync service: {e}")
+
         # Stop WebSocket services
         try:
             from .routes_websocket import stop_websocket_services
@@ -206,6 +388,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ticker Service", lifespan=lifespan)
+
+# Add CORS middleware
+if settings.environment in ("production", "staging"):
+    # Production: Strict whitelist
+    allowed_origins = settings.cors_allowed_origins.split(",") if hasattr(settings, 'cors_allowed_origins') else []
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins if allowed_origins else ["https://yourdomain.com"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        expose_headers=["X-Request-ID"],
+        max_age=3600,
+    )
+else:
+    # Development: Allow localhost
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Add middlewares
 app.add_middleware(RequestIDMiddleware)
@@ -271,6 +476,9 @@ app.include_router(advanced_router)
 
 # Include trading accounts management router
 app.include_router(trading_accounts_router)
+
+# Include sync router for trade data sync
+app.include_router(sync_router)
 
 # Include WebSocket router for real-time tick streaming
 from .routes_websocket import router as websocket_router
