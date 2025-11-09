@@ -34,7 +34,7 @@ from .services.position_tracker import PositionTracker
 from .workers.order_cleanup_worker import OrderCleanupWorker
 from app.services.session_subscription_manager import SessionSubscriptionManager, init_subscription_manager
 from app.dependencies import set_cache_manager
-from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies, smart_orders
+from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies, smart_orders, funds
 from app.workers.strategy_m2m_worker import strategy_m2m_task
 from app.routes import calendar_simple as calendar
 from app.routes import admin_calendar
@@ -252,6 +252,7 @@ async def lifespan(app: FastAPI):
         app.include_router(instruments.router)  # Instruments: list and filter tradeable symbols
         app.include_router(strategies.router)  # Strategies: manage trading strategies and instruments
         app.include_router(smart_orders.router)  # Smart orders: order validation, margin/cost calculation, smart placement
+        app.include_router(funds.router)  # Funds: statement parsing, categorization, margin analysis
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:

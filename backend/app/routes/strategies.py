@@ -17,12 +17,28 @@ from datetime import datetime, date, timedelta
 from decimal import Decimal
 import logging
 
-from ..database import get_db_pool
+from ..database import DataManager
 from ..dependencies import verify_jwt_token
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+# Module-level data manager instance
+_data_manager: Optional[DataManager] = None
+
+
+def set_data_manager(dm: DataManager):
+    """Set the data manager instance."""
+    global _data_manager
+    _data_manager = dm
+
+
+async def get_data_manager() -> DataManager:
+    """Dependency to get data manager."""
+    if _data_manager is None:
+        raise HTTPException(status_code=500, detail="Data manager not initialized")
+    return _data_manager
 
 
 # =============================================================================
@@ -128,9 +144,9 @@ async def get_trading_account_id(jwt_payload: Dict[str, Any], account_id_header:
     return account_ids[0]  # Use first account
 
 
-async def verify_strategy_access(pool, strategy_id: int, trading_account_id: str):
+async def verify_strategy_access(dm: DataManager, strategy_id: int, trading_account_id: str):
     """Verify user has access to the strategy."""
-    async with pool.acquire() as conn:
+    async with dm.pool.acquire() as conn:
         result = await conn.fetchrow("""
             SELECT strategy_id FROM strategy
             WHERE strategy_id = $1 AND trading_account_id = $2
@@ -149,7 +165,7 @@ async def create_strategy(
     request: CreateStrategyRequest,
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """
     Create a new strategy.
@@ -159,7 +175,7 @@ async def create_strategy(
     user_id = jwt_payload.get('sub', 'unknown')
 
     try:
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             # Check if strategy name already exists for this account
             existing = await conn.fetchrow("""
                 SELECT strategy_id FROM strategy
@@ -225,7 +241,7 @@ async def list_strategies(
     account_id: str = Query(..., description="Trading account ID"),
     status: Optional[str] = Query(None, description="Filter by status"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """
     List all strategies for a trading account.
@@ -233,7 +249,7 @@ async def list_strategies(
     Default strategy is always included and appears first in the list.
     """
     try:
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             query = """
                 SELECT
                     s.strategy_id,
@@ -297,13 +313,13 @@ async def get_strategy(
     strategy_id: int = Path(..., description="Strategy ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """Get details of a specific strategy."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT
                     s.strategy_id,
@@ -359,13 +375,13 @@ async def update_strategy(
     strategy_id: int = Path(..., description="Strategy ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """Update strategy metadata (name, description, tags)."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             # Check if it's a default strategy (cannot rename)
             is_default = await conn.fetchval("""
                 SELECT is_default FROM strategy WHERE strategy_id = $1
@@ -425,7 +441,7 @@ async def archive_strategy(
     strategy_id: int = Path(..., description="Strategy ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """
     Archive a strategy.
@@ -434,9 +450,9 @@ async def archive_strategy(
     Archived strategies remain in database for historical tracking.
     """
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             # Check if it's a default strategy
             is_default = await conn.fetchval("""
                 SELECT is_default FROM strategy WHERE strategy_id = $1
@@ -480,13 +496,13 @@ async def add_instrument(
     strategy_id: int = Path(..., description="Strategy ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """Add an instrument to a strategy manually."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             result = await conn.fetchrow("""
                 INSERT INTO strategy_instruments (
                     strategy_id, tradingsymbol, exchange, direction,
@@ -512,13 +528,13 @@ async def list_instruments(
     strategy_id: int = Path(..., description="Strategy ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """List all instruments in a strategy."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT id, strategy_id, tradingsymbol, exchange, direction,
                        quantity, entry_price, current_price, current_pnl,
@@ -541,13 +557,13 @@ async def remove_instrument(
     instrument_id: int = Path(..., description="Instrument ID"),
     account_id: str = Query(..., description="Trading account ID"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """Remove an instrument from a strategy."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             result = await conn.execute("""
                 DELETE FROM strategy_instruments
                 WHERE id = $1 AND strategy_id = $2
@@ -576,13 +592,13 @@ async def get_m2m_history(
     from_time: datetime = Query(..., description="Start time"),
     to_time: datetime = Query(..., description="End time"),
     jwt_payload: Dict[str, Any] = Depends(verify_jwt_token),
-    pool=Depends(get_db_pool)
+    dm: DataManager = Depends(get_data_manager)
 ):
     """Get minute-wise M2M history for a strategy."""
     try:
-        await verify_strategy_access(pool, strategy_id, account_id)
+        await verify_strategy_access(dm, strategy_id, account_id)
 
-        async with pool.acquire() as conn:
+        async with dm.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT timestamp, open, high, low, close
                 FROM strategy_m2m_candles
