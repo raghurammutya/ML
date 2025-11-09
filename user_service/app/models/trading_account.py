@@ -57,7 +57,7 @@ class TradingAccount(Base):
     last_synced_at = Column(DateTime, nullable=True)
 
     # Subscription tier tracking (KiteConnect API tiers)
-    subscription_tier = Column(Enum(SubscriptionTier), default=SubscriptionTier.UNKNOWN, nullable=False)
+    subscription_tier = Column(Enum(SubscriptionTier, name='subscriptiontier', create_constraint=False, values_callable=lambda x: [e.value for e in x]), default=SubscriptionTier.UNKNOWN, nullable=False)
     subscription_tier_last_checked = Column(DateTime, nullable=True)
     market_data_available = Column(Boolean, default=False, nullable=False)
 
