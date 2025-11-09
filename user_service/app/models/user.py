@@ -47,6 +47,7 @@ class User(Base):
     account_memberships = relationship("TradingAccountMembership", foreign_keys="TradingAccountMembership.member_user_id", back_populates="member", cascade="all, delete-orphan")
     mfa_totp = relationship("MfaTotp", back_populates="user", uselist=False, cascade="all, delete-orphan")
     auth_providers = relationship("AuthProvider", back_populates="user", cascade="all, delete-orphan")
+    api_keys = relationship("ApiKey", foreign_keys="ApiKey.user_id", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(user_id={self.user_id}, email='{self.email}', status='{self.status}')>"

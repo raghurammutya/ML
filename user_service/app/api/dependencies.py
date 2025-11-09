@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.redis_client import get_redis, RedisClient
-from app.models import User
+from app.models import User, ApiKey, RateLimitTier
 from app.services.jwt_service import jwt_service
 from app.services.auth_service import AuthService
+from app.services.api_key_service import ApiKeyService
 
 
 # Security scheme
@@ -317,3 +318,218 @@ async def get_user_agent(request: Request) -> str:
         User agent string
     """
     return request.headers.get("User-Agent", "unknown")
+
+
+async def get_current_user_from_api_key(
+    request: Request,
+    db: Session = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    client_ip: str = Depends(get_client_ip)
+) -> User:
+    """
+    Authenticate user via API key.
+
+    Supports two header formats:
+    - X-API-Key: sb_30d4d5ea_bbb52c64...
+    - Authorization: Bearer sb_30d4d5ea_bbb52c64...
+
+    Args:
+        request: FastAPI request object
+        db: Database session
+        redis: Redis client
+        client_ip: Client IP address
+
+    Returns:
+        Authenticated user
+
+    Raises:
+        HTTPException: If API key is invalid or missing
+    """
+    # Extract API key from headers
+    x_api_key = request.headers.get("X-API-Key")
+    authorization = request.headers.get("Authorization", "")
+
+    api_key_string = None
+
+    if x_api_key:
+        api_key_string = x_api_key
+    elif authorization.startswith("Bearer sb_"):
+        api_key_string = authorization.replace("Bearer ", "")
+
+    if not api_key_string:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key required. Provide via X-API-Key header or Authorization: Bearer header"
+        )
+
+    # Parse key (format: sb_{prefix}_{secret})
+    if not api_key_string.startswith("sb_"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key format"
+        )
+
+    parts = api_key_string.split("_")
+    if len(parts) != 3:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key format. Expected: sb_{prefix}_{secret}"
+        )
+
+    key_prefix = f"sb_{parts[1]}"
+    secret = parts[2]
+
+    # Verify API key
+    api_key_service = ApiKeyService(db, redis)
+    api_key = api_key_service.verify_api_key(key_prefix, secret, client_ip)
+
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired API key"
+        )
+
+    # Check rate limit based on tier
+    rate_limits = {
+        RateLimitTier.FREE: (100, 3600),       # 100/hour
+        RateLimitTier.STANDARD: (1000, 3600),  # 1000/hour
+        RateLimitTier.PREMIUM: (10000, 3600),  # 10000/hour
+        RateLimitTier.UNLIMITED: None
+    }
+
+    if api_key.rate_limit_tier != RateLimitTier.UNLIMITED:
+        limit, window = rate_limits[api_key.rate_limit_tier]
+        rate_limit_key = f"ratelimit:apikey:{api_key.api_key_id}"
+        allowed, remaining = redis.check_rate_limit(rate_limit_key, limit, window)
+
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded for API key. Tier: {api_key.rate_limit_tier.value}",
+                headers={"Retry-After": str(window)}
+            )
+
+    # Return user
+    return api_key.user
+
+
+async def get_current_user_flexible(
+    request: Request,
+    db: Session = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    client_ip: str = Depends(get_client_ip)
+) -> User:
+    """
+    Authenticate user via JWT OR API key.
+
+    Priority:
+    1. Try JWT (Authorization: Bearer eyJ...)
+    2. Try API key (X-API-Key or Authorization: Bearer sb_...)
+
+    Args:
+        request: FastAPI request object
+        db: Database session
+        redis: Redis client
+        client_ip: Client IP address
+
+    Returns:
+        Authenticated user
+
+    Raises:
+        HTTPException: If authentication fails
+    """
+    authorization = request.headers.get("Authorization", "")
+    x_api_key = request.headers.get("X-API-Key")
+
+    # Try JWT first (if not an API key)
+    if authorization and not authorization.startswith("Bearer sb_"):
+        try:
+            token = authorization.replace("Bearer ", "")
+            return await get_current_user(token=token, db=db)
+        except HTTPException:
+            pass
+
+    # Try API key
+    return await get_current_user_from_api_key(
+        request=request,
+        db=db,
+        redis=redis,
+        client_ip=client_ip
+    )
+
+
+def require_scope(required_scope: str):
+    """
+    Dependency factory to require specific API key scope.
+
+    Usage:
+        @router.post("/orders")
+        async def place_order(
+            current_user: User = Depends(require_scope("trade"))
+        ):
+            ...
+
+    Args:
+        required_scope: Scope name required (e.g., 'trade', 'read')
+
+    Returns:
+        Dependency function that checks scope
+    """
+    async def dependency(
+        request: Request,
+        db: Session = Depends(get_db),
+        redis: RedisClient = Depends(get_redis),
+        client_ip: str = Depends(get_client_ip)
+    ) -> User:
+        # Check if API key was used
+        x_api_key = request.headers.get("X-API-Key")
+        authorization = request.headers.get("Authorization", "")
+
+        is_api_key = x_api_key or authorization.startswith("Bearer sb_")
+
+        if not is_api_key:
+            # Not API key auth, just authenticate normally (JWT doesn't have scopes)
+            return await get_current_user_flexible(
+                request=request,
+                db=db,
+                redis=redis,
+                client_ip=client_ip
+            )
+
+        # API key authentication - check scope
+        user = await get_current_user_from_api_key(
+            request=request,
+            db=db,
+            redis=redis,
+            client_ip=client_ip
+        )
+
+        # Get API key to check scopes
+        if authorization.startswith("Bearer sb_"):
+            api_key_string = authorization.replace("Bearer ", "")
+        else:
+            api_key_string = x_api_key
+
+        parts = api_key_string.split("_")
+        key_prefix = f"sb_{parts[1]}"
+        secret = parts[2]
+
+        api_key_service = ApiKeyService(db, redis)
+        api_key = api_key_service.verify_api_key(key_prefix, secret, client_ip)
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key"
+            )
+
+        # Check if scope is present
+        if required_scope not in api_key.scopes and "*" not in api_key.scopes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key missing required scope: {required_scope}"
+            )
+
+        return user
+
+    return dependency

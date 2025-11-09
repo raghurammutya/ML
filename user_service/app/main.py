@@ -11,7 +11,7 @@ from app.core.database import init_db, dispose_db
 from app.core.redis_client import redis_client
 
 # Import routers
-from app.api.v1.endpoints import auth, authz, users, mfa, trading_accounts, audit
+from app.api.v1.endpoints import auth, authz, users, mfa, trading_accounts, audit, api_keys
 # from app.api.v1.endpoints import admin
 
 
@@ -50,7 +50,7 @@ app.add_middleware(
     allow_origins=settings.CORS_ALLOWED_ORIGINS,
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-RateLimit-*"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-RateLimit-*", "X-API-Key"],
     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
 )
 
@@ -97,4 +97,5 @@ app.include_router(users.router, prefix=f"{settings.API_V1_PREFIX}/users", tags=
 app.include_router(mfa.router, prefix=f"{settings.API_V1_PREFIX}/mfa", tags=["mfa"])
 app.include_router(trading_accounts.router, prefix=f"{settings.API_V1_PREFIX}/trading-accounts", tags=["trading_accounts"])
 app.include_router(audit.router, prefix=f"{settings.API_V1_PREFIX}/audit", tags=["audit"])
+app.include_router(api_keys.router, prefix=f"{settings.API_V1_PREFIX}/api-keys", tags=["api_keys"])
 # app.include_router(admin.router, prefix=f"{settings.API_V1_PREFIX}/admin", tags=["admin"])
