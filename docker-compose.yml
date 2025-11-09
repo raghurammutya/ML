@@ -24,7 +24,7 @@ services:
       - APP_NAME=user_service
       - ENVIRONMENT=development
       - DEBUG=true
-      - DATABASE_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+      - DATABASE_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified_dev
       - REDIS_URL=redis://redis:6379/2
       - JWT_SIGNING_KEY_ID=key-001
       - JWT_ISSUER=user_service
@@ -65,7 +65,7 @@ services:
     environment:
      - DB_HOST=host.docker.internal
      - REDIS_URL=redis://redis:6379
-     - POSTGRES_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified
+     - POSTGRES_URL=postgresql://stocksblitz:stocksblitz123@host.docker.internal:5432/stocksblitz_unified_dev
      - TICKER_SERVICE_URL=http://ticker-service:8080
      - USER_SERVICE_URL=http://host.docker.internal:8001
     depends_on:
@@ -92,9 +92,16 @@ services:
       - "3001:80"
     environment:
       - VITE_API_BASE_URL=/tradingview-api
+      - VITE_USER_SERVICE_URL=http://user-service:8000
+      - VITE_TICKER_SERVICE_URL=http://ticker-service:8080
+      - VITE_TICKER_WS_URL=ws://ticker-service:8080
     depends_on:
       backend:
         condition: service_healthy
+      user-service:
+        condition: service_healthy
+      ticker-service:
+        condition: service_started
     networks:
       - tv-network
 
@@ -106,12 +113,12 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - INSTRUMENT_DB_HOST=host.docker.internal
       - INSTRUMENT_DB_PORT=5432
-      - INSTRUMENT_DB_NAME=stocksblitz_unified
+      - INSTRUMENT_DB_NAME=stocksblitz_unified_dev
       - INSTRUMENT_DB_USER=stocksblitz
       - INSTRUMENT_DB_PASSWORD=stocksblitz123
       - KITE_TOKEN_DIR=/app/app/kite/tokens
       # Calendar service integration
-      # - MARKET_MODE=mock  # Commented out - auto-detect based on market hours
+      - MARKET_MODE=mock  # Enable mock mode to simulate tick data
       - CALENDAR_API_URL=http://backend:8000
       - CALENDAR_CODE=NSE
       # Indian market hours (IST)
@@ -119,8 +126,16 @@ services:
       - MARKET_CLOSE_TIME=15:30
       # User service integration
       - USER_SERVICE_URL=http://host.docker.internal:8001
+      - USE_USER_SERVICE_ACCOUNTS=${USE_USER_SERVICE_ACCOUNTS:-false}
       # API authentication
       - API_KEY_ENABLED=false
+      # Kite credentials - loaded from .env file (DO NOT commit credentials to git)
+      - KITE_ACCOUNTS=${KITE_ACCOUNTS:-}
+      - KITE_primary_API_KEY=${KITE_primary_API_KEY:-}
+      - KITE_primary_API_SECRET=${KITE_primary_API_SECRET:-}
+      - KITE_primary_USERNAME=${KITE_primary_USERNAME:-}
+      - KITE_primary_PASSWORD=${KITE_primary_PASSWORD:-}
+      - KITE_primary_TOTP_KEY=${KITE_primary_TOTP_KEY:-}
     volumes:
       - ./ticker_service/tokens:/app/app/kite/tokens
       - ./ticker_service/app/kite/.env:/app/app/kite/.env:ro
@@ -152,7 +167,7 @@ services:
       - PORT=8082
       - DB_HOST=host.docker.internal
       - DB_PORT=5432
-      - DB_NAME=stocksblitz_unified
+      - DB_NAME=stocksblitz_unified_dev
       - DB_USER=stocksblitz
       - DB_PASSWORD=stocksblitz123
       - REDIS_URL=redis://redis:6379/3

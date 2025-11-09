@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from ..config import get_settings
 from ..database import DataManager, _normalize_symbol, _normalize_timeframe, _fo_strike_table
 from ..realtime import RealTimeHub
+from ..cache import CacheManager
+from ..dependencies import get_cache_manager
 from .indicators import get_data_manager
 
 from starlette.websockets import WebSocketState
@@ -23,7 +25,7 @@ router = APIRouter(prefix="/fo", tags=["fo"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-SUPPORTED_INDICATORS = {"iv", "delta", "gamma", "theta", "vega", "rho", "oi", "pcr", "max_pain"}
+SUPPORTED_INDICATORS = {"iv", "delta", "gamma", "theta", "vega", "rho", "oi", "pcr", "max_pain", "premium", "decay"}
 SUPPORTED_SEGMENTS = {"NFO-OPT", "NFO-FUT", "CDS-OPT", "CDS-FUT", "MCX-OPT", "MCX-FUT"}
 SUPPORTED_OPTION_TYPES = {"CE", "PE"}
 SUPPORTED_INSTRUMENT_TYPES = {"CE", "PE", "FUT"}
@@ -340,6 +342,66 @@ def _parse_expiry_params(expiry: Optional[List[str]]) -> Optional[List[date]]:
     return parsed or None
 
 
+async def _resolve_relative_expiries(
+    dm: DataManager, 
+    symbol: str, 
+    relative_labels: List[str],
+    as_of_date: Optional[date] = None
+) -> Dict[str, date]:
+    """
+    Resolve relative expiry labels (NWeek+0, NMonth+1, etc.) to actual expiry dates.
+    
+    Returns a mapping of relative_label -> expiry_date
+    """
+    from app.services.expiry_labeler import ExpiryLabeler
+    
+    if not as_of_date:
+        as_of_date = date.today()
+    
+    # Get all expiries for the symbol
+    all_expiries = await dm.list_fo_expiries(symbol)
+    if not all_expiries:
+        return {}
+    
+    # Initialize expiry labeler and compute labels
+    labeler = ExpiryLabeler(dm.pool)
+    
+    try:
+        # Compute labels for all expiries as of the given date
+        expiry_labels = await labeler.compute_labels(symbol, as_of_date)
+        
+        # Map relative labels to expiry dates
+        label_to_expiry = {}
+        for label_info in expiry_labels:
+            if label_info.relative_label in relative_labels:
+                label_to_expiry[label_info.relative_label] = label_info.expiry
+        
+        return label_to_expiry
+    except Exception as e:
+        logger.warning(f"Failed to resolve relative expiries: {e}")
+        # Fallback: Simple mapping based on position
+        # Filter future expiries
+        future_expiries = [exp for exp in all_expiries if exp >= as_of_date]
+        future_expiries.sort()
+        
+        label_to_expiry = {}
+        
+        # Map NWeek+0, NWeek+1, etc.
+        for i, label in enumerate(relative_labels):
+            if label.startswith("NWeek+") and i < len(future_expiries):
+                label_to_expiry[label] = future_expiries[i]
+            elif label == "NMonth+0" and future_expiries:
+                # Find the first monthly expiry (last Thursday of month)
+                for exp in future_expiries:
+                    # Check if it's last Thursday of month (rough check)
+                    days_in_month = (exp.replace(day=28) + timedelta(days=4)).day
+                    if exp.day > days_in_month - 7 and exp.weekday() == 3:  # Thursday
+                        label_to_expiry[label] = exp
+                        break
+        
+        return label_to_expiry
+
+
 def _classify_moneyness(strike: float, underlying: Optional[float], side: str) -> Optional[str]:
     if underlying is None or settings.fo_strike_gap <= 0:
         return None
@@ -442,6 +504,7 @@ async def moneyness_series(
     to_time: Optional[int] = Query(default=None, alias="to"),
     limit: Optional[int] = None,
     dm: DataManager = Depends(get_data_manager),
+    cache: CacheManager = Depends(get_cache_manager),
 ):
     """
     Return time-series data grouped by moneyness buckets.
@@ -483,6 +546,25 @@ async def moneyness_series(
     else:
         to_dt = datetime.now(timezone.utc)
         from_dt = to_dt - timedelta(hours=6)
+    
+    # Generate cache key
+    cache_key = cache.get_cache_key(
+        "fo:moneyness",
+        symbol=symbol_db,
+        tf=normalized_tf,
+        ind=indicator,
+        side=option_side,
+        exp=",".join(e.isoformat() for e in expiry_dates) if expiry_dates else "default",
+        ft=from_time,
+        tt=to_time,
+        limit=limit
+    )
+    
+    # Try to get from cache
+    cached_result = await cache.get(cache_key)
+    if cached_result:
+        logger.info(f"Cache hit for moneyness series: {cache_key}")
+        return cached_result
 
     # Map indicator to column expression
     if option_side == "both":
@@ -492,8 +574,16 @@ async def moneyness_series(
             "gamma": "(COALESCE(call_gamma_avg, 0) + COALESCE(put_gamma_avg, 0)) / 2.0",
             "theta": "(COALESCE(call_theta_avg, 0) + COALESCE(put_theta_avg, 0)) / 2.0",
             "vega": "(COALESCE(call_vega_avg, 0) + COALESCE(put_vega_avg, 0)) / 2.0",
+            "rho": "(COALESCE(call_rho_per_1pct_avg, 0) + COALESCE(put_rho_per_1pct_avg, 0)) / 2.0",
             "oi": "COALESCE(call_oi_sum, 0) + COALESCE(put_oi_sum, 0)",
             "pcr": "CASE WHEN COALESCE(call_oi_sum, 0) > 0 THEN COALESCE(put_oi_sum, 0) / call_oi_sum ELSE NULL END",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) + (COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0))) / 2.0",
+            # Decay is the daily theta
+            "decay": "(COALESCE(call_theta_daily_avg, 0) + COALESCE(put_theta_daily_avg, 0)) / 2.0",
+            # Premium/Discount metrics (market_price - model_price)
+            "premium_abs": "((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0) - COALESCE(call_model_price_avg, 0)) + (COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0) - COALESCE(put_model_price_avg, 0))) / 2.0",
+            "premium_pct": "((CASE WHEN COALESCE(call_model_price_avg, 0) > 0 THEN ((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - call_model_price_avg) / call_model_price_avg * 100 ELSE 0 END) + (CASE WHEN COALESCE(put_model_price_avg, 0) > 0 THEN ((COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - put_model_price_avg) / put_model_price_avg * 100 ELSE 0 END)) / 2.0",
         }
     elif option_side == "call":
         column_map = {
@@ -502,7 +592,15 @@ async def moneyness_series(
             "gamma": "call_gamma_avg",
             "theta": "call_theta_avg",
             "vega": "call_vega_avg",
+            "rho": "call_rho_per_1pct_avg",
             "oi": "call_oi_sum",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "(COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0))",
+            # Decay is the daily theta
+            "decay": "call_theta_daily_avg",
+            # Premium/Discount metrics
+            "premium_abs": "(COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - COALESCE(call_model_price_avg, 0)",
+            "premium_pct": "CASE WHEN COALESCE(call_model_price_avg, 0) > 0 THEN ((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - call_model_price_avg) / call_model_price_avg * 100 ELSE NULL END",
         }
     else:  # put
         column_map = {
@@ -511,7 +609,15 @@ async def moneyness_series(
             "gamma": "put_gamma_avg",
             "theta": "put_theta_avg",
             "vega": "put_vega_avg",
+            "rho": "put_rho_per_1pct_avg",
             "oi": "put_oi_sum",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "(COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0))",
+            # Decay is the daily theta
+            "decay": "put_theta_daily_avg",
+            # Premium/Discount metrics
+            "premium_abs": "(COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - COALESCE(put_model_price_avg, 0)",
+            "premium_pct": "CASE WHEN COALESCE(put_model_price_avg, 0) > 0 THEN ((COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - put_model_price_avg) / put_model_price_avg * 100 ELSE NULL END",
         }
 
     value_expr = column_map.get(indicator)
@@ -585,13 +691,24 @@ async def moneyness_series(
                 "points": points
             })
 
-    return {
+    result = {
         "status": "ok",
         "symbol": symbol_db,
         "timeframe": normalized_tf,
         "indicator": indicator,
         "series": series
     }
+    
+    # Cache the result
+    # For real-time data (recent time range), use shorter TTL
+    # For historical data (older time range), use longer TTL
+    time_diff = to_dt - from_dt
+    is_realtime = not from_time or (datetime.now(timezone.utc) - to_dt).total_seconds() < 300
+    ttl = 30 if is_realtime else 300  # 30s for real-time, 5min for historical
+    await cache.set(cache_key, result, ttl)
+    logger.info(f"Cached moneyness series with TTL={ttl}s: {cache_key}")
+    
+    return result
 
 
 def _classify_moneyness_bucket(strike: float, underlying: float, gap: int = 50) -> str:
@@ -610,42 +727,138 @@ def _classify_moneyness_bucket(strike: float, underlying: float, gap: int = 50) 
         return f"ITM{min(abs(level), 10)}"
 
 
+def _classify_moneyness(strike: float, underlying: float, option_type: str) -> str:
+    """
+    Classify strike into moneyness based on option type.
+    For calls: ITM when strike < underlying, OTM when strike > underlying
+    For puts: ITM when strike > underlying, OTM when strike < underlying
+    """
+    gap = settings.fo_strike_gap  # 50 for NIFTY
+    offset = strike - underlying
+    level = int(round(abs(offset) / gap))
+    
+    if abs(offset) <= gap * 0.6:  # Within 60% of strike gap = ATM
+        return "ATM"
+    
+    if option_type.lower() == "call":
+        if strike < underlying:  # Calls are ITM when strike < spot
+            return f"ITM{min(level, 10)}"
+        else:  # Calls are OTM when strike > spot
+            return f"OTM{min(level, 10)}"
+    else:  # put
+        if strike > underlying:  # Puts are ITM when strike > spot
+            return f"ITM{min(level, 10)}"
+        else:  # Puts are OTM when strike < spot
+            return f"OTM{min(level, 10)}"
+
+
 @router.get("/strike-distribution")
 async def strike_distribution(
     symbol: str = Query(settings.monitor_default_symbol),
-    timeframe: str = Query("5min"),  # Changed default from 1min to 5min for better data
     indicator: str = Query("iv"),
-    expiry: Optional[List[str]] = Query(default=None),
-    bucket_time: Optional[int] = None,
+    option_side: Optional[str] = Query(None, description="Filter by option side: 'call', 'put', or None for both"),
+    expiry: Optional[List[str]] = Query(default=None, description="Relative expiry labels like NWeek+0, NWeek+1, NMonth+0"),
+    datetime_param: Optional[int] = Query(None, alias="datetime", description="Unix timestamp for historical data. If not provided, returns real-time data"),
     strike_range: int = Query(50, description="ATM ± N strikes to return"),  # Increased to 50 for better coverage
     dm: DataManager = Depends(get_data_manager),
+    cache: CacheManager = Depends(get_cache_manager),
 ):
     """
     Return strike distribution for vertical panels.
     Frontend expects separate call/put arrays per expiry with complete Greek coverage.
+
+    Args:
+        symbol: Underlying symbol
+        indicator: Greek indicator (iv, delta, gamma, theta, vega, oi, etc.)
+        option_side: Filter results to only 'call' or 'put' options. If None, returns both.
+        expiry: List of relative expiry labels (NWeek+0, NWeek+1, NMonth+0, etc.)
+        datetime: Unix timestamp for historical data. If not provided, returns real-time data.
+        strike_range: Number of strikes above and below ATM to include
 
     Returns format:
     {
       "series": [
         {
           "expiry": "2025-11-04",
-          "call": [{"strike": 25000, "iv": 0.18, "delta": 0.45, ...}, ...],
-          "put": [{"strike": 25000, "iv": 0.20, "delta": -0.55, ...}, ...]
+          "relative_label": "NWeek+0",
+          "call": [{"strike": 25000, "iv": 0.18, "delta": 0.45, ...}, ...],  // only if option_side is None or 'call'
+          "put": [{"strike": 25000, "iv": 0.20, "delta": -0.55, ...}, ...]   // only if option_side is None or 'put'
         }
       ]
     }
     """
     indicator = indicator.lower()
-    if indicator not in SUPPORTED_INDICATORS - {"max_pain"}:
-        raise HTTPException(status_code=400, detail=f"Indicator {indicator} not supported for strike view")
+    # Define strike-level supported indicators (all except max_pain which is expiry-level)
+    STRIKE_SUPPORTED_INDICATORS = SUPPORTED_INDICATORS - {"max_pain"}
+    if indicator not in STRIKE_SUPPORTED_INDICATORS:
+        raise HTTPException(status_code=400, detail=f"Indicator {indicator} not supported for strike view. Supported: {sorted(STRIKE_SUPPORTED_INDICATORS)}")
+    
+    # Validate option_side parameter
+    if option_side and option_side not in {"call", "put"}:
+        raise HTTPException(status_code=400, detail=f"Invalid option_side: {option_side}. Must be 'call', 'put', or None")
 
-    normalized_tf = _normalize_timeframe(timeframe)
     symbol_db = _normalize_symbol(symbol)
-    expiries = _parse_expiry_params(expiry)
-
-    if bucket_time:
-        rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries, bucket_time, bucket_time + 1)
+    
+    # Determine if this is real-time or historical query
+    is_realtime = datetime_param is None
+    query_time = datetime.now(timezone.utc) if is_realtime else datetime.fromtimestamp(datetime_param, tz=timezone.utc)
+    query_date = query_time.date()
+    
+    # Resolve relative expiry labels to actual dates
+    label_to_expiry_map = {}
+    expiry_to_label_map = {}
+    expiries = []
+    
+    if expiry:
+        logger.info(f"Received expiry params: {expiry}")
+        # Check if these are relative labels or date strings
+        if all(e.startswith(("NWeek", "NMonth", "NQuarter")) for e in expiry):
+            # User provided relative labels, resolve them
+            label_to_expiry_map = await _resolve_relative_expiries(dm, symbol_db, expiry, query_date)
+            expiries = list(label_to_expiry_map.values())
+            expiry_to_label_map = {v: k for k, v in label_to_expiry_map.items()}
+            logger.info(f"Resolved relative labels: {label_to_expiry_map}")
+        else:
+            # User provided date strings, parse them
+            expiries = _parse_expiry_params(expiry)
+            logger.info(f"Parsed date strings to expiries: {expiries}")
     else:
+        # No expiries specified, get next 2 expiries as of query date
+        all_expiries = await dm.list_fo_expiries(symbol_db)
+        future_expiries = [exp for exp in all_expiries if exp >= query_date]
+        expiries = future_expiries[:2]
+    
+    # Determine appropriate timeframe for data fetching
+    # Use 5min for real-time, 15min for historical queries
+    timeframe = "5min" if is_realtime else "15min"
+    normalized_tf = _normalize_timeframe(timeframe)
+
+    # Generate cache key
+    cache_key = cache.get_cache_key(
+        "fo:strike_dist",
+        symbol=symbol_db,
+        tf=normalized_tf,
+        ind=indicator,
+        side=option_side or "both",
+        exp=",".join(expiry) if expiry else "default",  # Use relative labels in cache key
+        dt=datetime_param,
+        sr=strike_range
+    )
+    
+    # Try to get from cache
+    cached_result = await cache.get(cache_key)
+    if cached_result:
+        logger.info(f"Cache hit for strike distribution: {cache_key}")
+        return cached_result
+    
+    # Fetch from database
+    if datetime_param:
+        # Historical query - fetch data at specific timestamp
+        start_time = int(query_time.timestamp())
+        end_time = start_time + 1
+        rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries, start_time, end_time)
+    else:
+        # Real-time query - fetch latest data
         rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries)
 
     logger.info(f"Strike distribution fetched {len(rows)} rows for {symbol_db} tf={normalized_tf} indicator={indicator}")
@@ -702,6 +915,22 @@ async def strike_distribution(
             if new_ts > existing_ts:
                 expiry_strikes[expiry_key][strike] = row
 
+    # Calculate TOTAL OI across ALL expiries and strikes before building series
+    # This gives us the complete market picture
+    grand_total_call_oi = 0
+    grand_total_put_oi = 0
+    
+    # Sum OI from all expiries and strikes in the raw data
+    for exp_data in expiry_strikes.values():
+        for strike_row in exp_data.values():
+            if strike_row.get("call_oi_sum") is not None:
+                grand_total_call_oi += int(float(strike_row["call_oi_sum"]))
+            if strike_row.get("put_oi_sum") is not None:
+                grand_total_put_oi += int(float(strike_row["put_oi_sum"]))
+    
+    # Calculate grand PCR across all expiries
+    grand_pcr = (grand_total_put_oi / grand_total_call_oi) if grand_total_call_oi > 0 else None
+    
     # Build series with separate call/put arrays
     series = []
     for expiry_key in sorted(expiry_strikes.keys()):
@@ -713,6 +942,17 @@ async def strike_distribution(
         call_strikes = []
         put_strikes = []
         bucket_ts = None
+        
+        # Calculate expiry-specific totals for expiry-level metadata
+        expiry_call_oi = 0
+        expiry_put_oi = 0
+        
+        # Sum OI from all strikes in the raw data for this expiry
+        for strike_row in strikes_data.values():
+            if strike_row.get("call_oi_sum") is not None:
+                expiry_call_oi += int(float(strike_row["call_oi_sum"]))
+            if strike_row.get("put_oi_sum") is not None:
+                expiry_put_oi += int(float(strike_row["put_oi_sum"]))
 
         for strike in sorted(strikes_data.keys()):
             row = strikes_data[strike]
@@ -724,65 +964,166 @@ async def strike_distribution(
                 else:
                     bucket_ts = int(ts)
 
-            # Build call strike object with all Greeks
-            call_obj = {"strike": strike}
+            # Build call strike object with all Greeks (only if option_side is None or 'call')
+            if option_side is None or option_side == "call":
+                call_obj = {"strike": strike}
 
-            # Add all available Greeks (omit if 0 or None)
-            if row.get("call_iv_avg"):
-                call_obj["iv"] = round(float(row["call_iv_avg"]), 4)
-            if row.get("call_delta_avg"):
-                call_obj["delta"] = round(float(row["call_delta_avg"]), 4)
-            if row.get("call_gamma_avg"):
-                call_obj["gamma"] = round(float(row["call_gamma_avg"]), 6)
-            if row.get("call_theta_avg"):
-                call_obj["theta"] = round(float(row["call_theta_avg"]), 4)
-            if row.get("call_vega_avg"):
-                call_obj["vega"] = round(float(row["call_vega_avg"]), 4)
-            if row.get("call_oi_sum"):
-                call_obj["oi"] = int(float(row["call_oi_sum"]))
+                # Add all available Greeks (include if not None, even if zero)
+                if row.get("call_iv_avg") is not None:
+                    call_obj["iv"] = round(float(row["call_iv_avg"]), 4)
+                if row.get("call_delta_avg") is not None:
+                    call_obj["delta"] = round(float(row["call_delta_avg"]), 4)
+                if row.get("call_gamma_avg") is not None:
+                    call_obj["gamma"] = round(float(row["call_gamma_avg"]), 6)
+                if row.get("call_theta_avg") is not None:
+                    call_obj["theta"] = round(float(row["call_theta_avg"]), 4)
+                if row.get("call_vega_avg") is not None:
+                    call_obj["vega"] = round(float(row["call_vega_avg"]), 4)
+                if row.get("call_oi_sum") is not None:
+                    call_obj["oi"] = int(float(row["call_oi_sum"]))
 
-            # Enhanced Greeks
-            if row.get("call_rho_per_1pct_avg"):
-                call_obj["rho"] = round(float(row["call_rho_per_1pct_avg"]), 6)
-            if row.get("call_intrinsic_avg"):
-                call_obj["intrinsic"] = round(float(row["call_intrinsic_avg"]), 2)
-            if row.get("call_extrinsic_avg"):
-                call_obj["extrinsic"] = round(float(row["call_extrinsic_avg"]), 2)
-            if row.get("call_theta_daily_avg"):
-                call_obj["theta_daily"] = round(float(row["call_theta_daily_avg"]), 4)
-            if row.get("call_model_price_avg"):
-                call_obj["model_price"] = round(float(row["call_model_price_avg"]), 2)
+                # Enhanced Greeks
+                if row.get("call_rho_per_1pct_avg") is not None:
+                    call_obj["rho"] = round(float(row["call_rho_per_1pct_avg"]), 6)
+                if row.get("call_intrinsic_avg") is not None:
+                    call_obj["intrinsic"] = round(float(row["call_intrinsic_avg"]), 2)
+                if row.get("call_extrinsic_avg") is not None:
+                    call_obj["extrinsic"] = round(float(row["call_extrinsic_avg"]), 2)
+                if row.get("call_theta_daily_avg") is not None:
+                    call_obj["theta_daily"] = round(float(row["call_theta_daily_avg"]), 4)
+                    call_obj["decay"] = call_obj["theta_daily"]  # Add decay as an alias for theta_daily
+                if row.get("call_model_price_avg") is not None:
+                    call_obj["model_price"] = round(float(row["call_model_price_avg"]), 2)
+                
+                # Calculate premium/LTP and premium/discount
+                intrinsic = float(row.get("call_intrinsic_avg", 0) or 0)
+                extrinsic = float(row.get("call_extrinsic_avg", 0) or 0)
+                model_price = float(row.get("call_model_price_avg", 0) or 0)
+                
+                if intrinsic > 0 or extrinsic > 0:
+                    market_price = intrinsic + extrinsic
+                    call_obj["premium"] = round(market_price, 2)
+                    call_obj["ltp"] = call_obj["premium"]  # LTP is the premium/market price
+                    
+                    # Calculate premium/discount vs model price
+                    if model_price > 0:
+                        premium_abs = market_price - model_price
+                        premium_pct = (premium_abs / model_price) * 100
+                        call_obj["premium_discount_abs"] = round(premium_abs, 2)
+                        call_obj["premium_discount_pct"] = round(premium_pct, 2)
+                
+                # Volume
+                if row.get("call_volume") is not None:
+                    call_obj["volume"] = int(float(row["call_volume"]))
+                    
+                # Market depth metrics
+                if row.get("liquidity_score_avg") is not None:
+                    call_obj["liquidity_score"] = round(float(row["liquidity_score_avg"]), 2)
+                if row.get("spread_abs_avg") is not None:
+                    call_obj["spread_abs"] = round(float(row["spread_abs_avg"]), 2)
+                if row.get("spread_pct_avg") is not None:
+                    call_obj["spread_pct"] = round(float(row["spread_pct_avg"]), 2)
+                if row.get("depth_imbalance_pct_avg") is not None:
+                    call_obj["depth_imbalance"] = round(float(row["depth_imbalance_pct_avg"]), 2)
+                if row.get("book_pressure_avg") is not None:
+                    call_obj["book_pressure"] = round(float(row["book_pressure_avg"]), 4)
+                if row.get("microprice_avg") is not None:
+                    call_obj["microprice"] = round(float(row["microprice_avg"]), 2)
+                
+                # Add moneyness classification
+                if underlying_ltp:
+                    call_obj["moneyness"] = _classify_moneyness(strike, underlying_ltp, "call")
+                    call_obj["moneyness_bucket"] = call_obj["moneyness"]  # Add alias for compatibility
+                
+                # OI change will be calculated later for real-time data
+                    
+                # Add strike-level PCR if we have both call and put OI
+                call_oi = call_obj.get("oi", 0)
+                put_oi = float(row.get("put_oi_sum", 0) or 0)
+                if call_oi > 0 and put_oi > 0:
+                    call_obj["pcr"] = round(put_oi / call_oi, 3)
 
-            # Build put strike object with all Greeks
-            put_obj = {"strike": strike}
+                call_strikes.append(call_obj)
 
-            if row.get("put_iv_avg"):
-                put_obj["iv"] = round(float(row["put_iv_avg"]), 4)
-            if row.get("put_delta_avg"):
-                put_obj["delta"] = round(float(row["put_delta_avg"]), 4)
-            if row.get("put_gamma_avg"):
-                put_obj["gamma"] = round(float(row["put_gamma_avg"]), 6)
-            if row.get("put_theta_avg"):
-                put_obj["theta"] = round(float(row["put_theta_avg"]), 4)
-            if row.get("put_vega_avg"):
-                put_obj["vega"] = round(float(row["put_vega_avg"]), 4)
-            if row.get("put_oi_sum"):
-                put_obj["oi"] = int(float(row["put_oi_sum"]))
+            # Build put strike object with all Greeks (only if option_side is None or 'put')
+            if option_side is None or option_side == "put":
+                put_obj = {"strike": strike}
 
-            # Enhanced Greeks
-            if row.get("put_rho_per_1pct_avg"):
-                put_obj["rho"] = round(float(row["put_rho_per_1pct_avg"]), 6)
-            if row.get("put_intrinsic_avg"):
-                put_obj["intrinsic"] = round(float(row["put_intrinsic_avg"]), 2)
-            if row.get("put_extrinsic_avg"):
-                put_obj["extrinsic"] = round(float(row["put_extrinsic_avg"]), 2)
-            if row.get("put_theta_daily_avg"):
-                put_obj["theta_daily"] = round(float(row["put_theta_daily_avg"]), 4)
-            if row.get("put_model_price_avg"):
-                put_obj["model_price"] = round(float(row["put_model_price_avg"]), 2)
+                if row.get("put_iv_avg") is not None:
+                    put_obj["iv"] = round(float(row["put_iv_avg"]), 4)
+                if row.get("put_delta_avg") is not None:
+                    put_obj["delta"] = round(float(row["put_delta_avg"]), 4)
+                if row.get("put_gamma_avg") is not None:
+                    put_obj["gamma"] = round(float(row["put_gamma_avg"]), 6)
+                if row.get("put_theta_avg") is not None:
+                    put_obj["theta"] = round(float(row["put_theta_avg"]), 4)
+                if row.get("put_vega_avg") is not None:
+                    put_obj["vega"] = round(float(row["put_vega_avg"]), 4)
+                if row.get("put_oi_sum") is not None:
+                    put_obj["oi"] = int(float(row["put_oi_sum"]))
 
-            call_strikes.append(call_obj)
-            put_strikes.append(put_obj)
+                # Enhanced Greeks
+                if row.get("put_rho_per_1pct_avg") is not None:
+                    put_obj["rho"] = round(float(row["put_rho_per_1pct_avg"]), 6)
+                if row.get("put_intrinsic_avg") is not None:
+                    put_obj["intrinsic"] = round(float(row["put_intrinsic_avg"]), 2)
+                if row.get("put_extrinsic_avg") is not None:
+                    put_obj["extrinsic"] = round(float(row["put_extrinsic_avg"]), 2)
+                if row.get("put_theta_daily_avg") is not None:
+                    put_obj["theta_daily"] = round(float(row["put_theta_daily_avg"]), 4)
+                    put_obj["decay"] = put_obj["theta_daily"]  # Add decay as an alias for theta_daily
+                if row.get("put_model_price_avg") is not None:
+                    put_obj["model_price"] = round(float(row["put_model_price_avg"]), 2)
+                
+                # Calculate premium/LTP and premium/discount
+                intrinsic = float(row.get("put_intrinsic_avg", 0) or 0)
+                extrinsic = float(row.get("put_extrinsic_avg", 0) or 0)
+                model_price = float(row.get("put_model_price_avg", 0) or 0)
+                
+                if intrinsic > 0 or extrinsic > 0:
+                    market_price = intrinsic + extrinsic
+                    put_obj["premium"] = round(market_price, 2)
+                    put_obj["ltp"] = put_obj["premium"]  # LTP is the premium/market price
+                    
+                    # Calculate premium/discount vs model price
+                    if model_price > 0:
+                        premium_abs = market_price - model_price
+                        premium_pct = (premium_abs / model_price) * 100
+                        put_obj["premium_discount_abs"] = round(premium_abs, 2)
+                        put_obj["premium_discount_pct"] = round(premium_pct, 2)
+                
+                # Volume
+                if row.get("put_volume") is not None:
+                    put_obj["volume"] = int(float(row["put_volume"]))
+                    
+                # Market depth metrics (shared with calls)
+                if row.get("liquidity_score_avg") is not None:
+                    put_obj["liquidity_score"] = round(float(row["liquidity_score_avg"]), 2)
+                if row.get("spread_abs_avg") is not None:
+                    put_obj["spread_abs"] = round(float(row["spread_abs_avg"]), 2)
+                if row.get("spread_pct_avg") is not None:
+                    put_obj["spread_pct"] = round(float(row["spread_pct_avg"]), 2)
+                if row.get("depth_imbalance_pct_avg") is not None:
+                    put_obj["depth_imbalance"] = round(float(row["depth_imbalance_pct_avg"]), 2)
+                if row.get("book_pressure_avg") is not None:
+                    put_obj["book_pressure"] = round(float(row["book_pressure_avg"]), 4)
+                if row.get("microprice_avg") is not None:
+                    put_obj["microprice"] = round(float(row["microprice_avg"]), 2)
+                
+                # Add moneyness classification
+                if underlying_ltp:
+                    put_obj["moneyness"] = _classify_moneyness(strike, underlying_ltp, "put")
+                    put_obj["moneyness_bucket"] = put_obj["moneyness"]  # Add alias for compatibility
+                
+                # OI change will be calculated later for real-time data
+                    
+                # Add strike-level PCR if we have both call and put OI
+                put_oi = put_obj.get("oi", 0)
+                call_oi = float(row.get("call_oi_sum", 0) or 0)
+                if call_oi > 0 and put_oi > 0:
+                    put_obj["pcr"] = round(put_oi / call_oi, 3)
+
+                put_strikes.append(put_obj)
 
         # Determine data availability
         has_greeks = any(
@@ -790,33 +1131,145 @@ async def strike_distribution(
             for s in call_strikes + put_strikes
         )
         has_oi = any("oi" in s for s in call_strikes + put_strikes)
-
-        series.append({
+        
+        # Calculate expiry-specific PCR
+        expiry_pcr = (expiry_put_oi / expiry_call_oi) if expiry_call_oi > 0 else None
+        
+        # Calculate max pain for this expiry
+        max_pain_strike = None
+        # Always calculate max pain from raw data if we have both call and put OI
+        if expiry_call_oi > 0 and expiry_put_oi > 0:
+            # Create a map of strikes to OI from raw data
+            strike_oi_map = {}
+            for strike, row in strikes_data.items():
+                call_oi = int(float(row.get("call_oi_sum", 0) or 0))
+                put_oi = int(float(row.get("put_oi_sum", 0) or 0))
+                if call_oi > 0 or put_oi > 0:
+                    strike_oi_map[strike] = {"call_oi": call_oi, "put_oi": put_oi}
+            
+            # Calculate max pain as the strike with minimum total payout
+            min_payout = float('inf')
+            for strike, oi_data in strike_oi_map.items():
+                total_payout = 0
+                # For each other strike, calculate payout
+                for other_strike, other_oi in strike_oi_map.items():
+                    if other_strike < strike:
+                        # ITM puts
+                        total_payout += (strike - other_strike) * other_oi["put_oi"]
+                    elif other_strike > strike:
+                        # ITM calls  
+                        total_payout += (other_strike - strike) * other_oi["call_oi"]
+                
+                if total_payout < min_payout:
+                    min_payout = total_payout
+                    max_pain_strike = strike
+        
+        # Build series entry based on option_side filter
+        series_entry = {
             "expiry": expiry_key,
             "bucket_time": bucket_ts,
-            "call": call_strikes,
-            "put": put_strikes,
             "metadata": {
-                "strike_count": len(call_strikes),
+                "strike_count": len(call_strikes) + len(put_strikes),
                 "has_greeks": has_greeks,
                 "has_oi": has_oi,
-                "atm_strike": atm_strike if underlying_ltp else None
+                "atm_strike": atm_strike if underlying_ltp else None,
+                "expiry_call_oi": expiry_call_oi,
+                "expiry_put_oi": expiry_put_oi,
+                "expiry_pcr": round(expiry_pcr, 3) if expiry_pcr is not None else None,
+                "max_pain_strike": max_pain_strike
             }
-        })
+        }
+        
+        # Add relative label if available
+        expiry_date_obj = datetime.fromisoformat(expiry_key).date()
+        if expiry_date_obj in expiry_to_label_map:
+            series_entry["relative_label"] = expiry_to_label_map[expiry_date_obj]
+        
+        # Include call/put arrays based on option_side parameter
+        if option_side is None or option_side == "call":
+            series_entry["call"] = call_strikes
+        if option_side is None or option_side == "put":
+            series_entry["put"] = put_strikes
+            
+        series.append(series_entry)
+    
+    # Calculate OI changes for real-time data
+    if is_realtime and any(entry.get("metadata", {}).get("has_oi", False) for entry in series):
+        # Fetch previous period data to calculate OI changes
+        # Use 1 hour ago for 5min timeframe
+        prev_time = query_time - timedelta(hours=1)
+        prev_start = int(prev_time.timestamp())
+        prev_end = prev_start + 1
+        
+        try:
+            prev_rows = await dm.fetch_latest_fo_strike_rows(symbol_db, normalized_tf, expiries, prev_start, prev_end)
+            
+            # Create a map of (expiry, strike) -> previous OI values
+            prev_oi_map = {}
+            for row in prev_rows:
+                key = (row["expiry"].isoformat(), float(row["strike"]))
+                prev_oi_map[key] = {
+                    "call_oi": int(float(row.get("call_oi_sum", 0) or 0)),
+                    "put_oi": int(float(row.get("put_oi_sum", 0) or 0))
+                }
+            
+            # Update OI changes in the series
+            for entry in series:
+                expiry_key = entry["expiry"]
+                
+                if "call" in entry:
+                    for call_strike in entry["call"]:
+                        if "oi" in call_strike:
+                            key = (expiry_key, call_strike["strike"])
+                            if key in prev_oi_map:
+                                current_oi = call_strike["oi"]
+                                prev_oi = prev_oi_map[key]["call_oi"]
+                                call_strike["oi_change"] = current_oi - prev_oi
+                            else:
+                                call_strike["oi_change"] = call_strike["oi"]  # All new OI
+                
+                if "put" in entry:
+                    for put_strike in entry["put"]:
+                        if "oi" in put_strike:
+                            key = (expiry_key, put_strike["strike"])
+                            if key in prev_oi_map:
+                                current_oi = put_strike["oi"]
+                                prev_oi = prev_oi_map[key]["put_oi"]
+                                put_strike["oi_change"] = current_oi - prev_oi
+                            else:
+                                put_strike["oi_change"] = put_strike["oi"]  # All new OI
+        except Exception as e:
+            logger.warning(f"Failed to calculate OI changes: {e}")
+            # Continue without OI changes
 
-    return {
+    result = {
         "status": "ok",
         "symbol": symbol_db,
-        "timeframe": normalized_tf,
-        "indicator": indicator,  # Kept for backwards compatibility
+        "indicator": indicator,
+        "option_side": option_side,  # Include the filter that was applied
         "series": series,
         "metadata": {
             "total_expiries": len(series),
             "underlying_price": underlying_ltp,
             "strike_range": f"ATM ± {strike_range} strikes",
-            "data_available": len(series) > 0
+            "data_available": len(series) > 0,
+            "total_call_oi": grand_total_call_oi,
+            "total_put_oi": grand_total_put_oi,
+            "pcr": round(grand_pcr, 3) if grand_pcr is not None else None,
+            "query_time": query_time.isoformat(),
+            "is_realtime": is_realtime,
+            "timeframe_used": normalized_tf
         }
     }
+    
+    # Cache the result
+    # For real-time data, use shorter TTL
+    # For historical data, use longer TTL
+    ttl = 30 if is_realtime else 300  # 30s for real-time, 5min for historical
+    await cache.set(cache_key, result, ttl)
+    logger.info(f"Cached strike distribution with TTL={ttl}s: {cache_key}")
+    
+    return result
 
 
 @router.get("/strike-history")
@@ -1094,8 +1547,16 @@ async def get_moneyness_series_v2(
             "gamma": "(COALESCE(call_gamma_avg, 0) + COALESCE(put_gamma_avg, 0)) / 2.0",
             "theta": "(COALESCE(call_theta_avg, 0) + COALESCE(put_theta_avg, 0)) / 2.0",
             "vega": "(COALESCE(call_vega_avg, 0) + COALESCE(put_vega_avg, 0)) / 2.0",
+            "rho": "(COALESCE(call_rho_per_1pct_avg, 0) + COALESCE(put_rho_per_1pct_avg, 0)) / 2.0",
             "oi": "COALESCE(call_oi_sum, 0) + COALESCE(put_oi_sum, 0)",
             "pcr": "CASE WHEN COALESCE(call_oi_sum, 0) > 0 THEN COALESCE(put_oi_sum, 0) / call_oi_sum ELSE NULL END",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) + (COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0))) / 2.0",
+            # Decay is the daily theta
+            "decay": "(COALESCE(call_theta_daily_avg, 0) + COALESCE(put_theta_daily_avg, 0)) / 2.0",
+            # Premium/Discount metrics (market_price - model_price)
+            "premium_abs": "((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0) - COALESCE(call_model_price_avg, 0)) + (COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0) - COALESCE(put_model_price_avg, 0))) / 2.0",
+            "premium_pct": "((CASE WHEN COALESCE(call_model_price_avg, 0) > 0 THEN ((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - call_model_price_avg) / call_model_price_avg * 100 ELSE 0 END) + (CASE WHEN COALESCE(put_model_price_avg, 0) > 0 THEN ((COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - put_model_price_avg) / put_model_price_avg * 100 ELSE 0 END)) / 2.0",
         }
     elif option_side == "call":
         column_map = {
@@ -1104,7 +1565,15 @@ async def get_moneyness_series_v2(
             "gamma": "call_gamma_avg",
             "theta": "call_theta_avg",
             "vega": "call_vega_avg",
+            "rho": "call_rho_per_1pct_avg",
             "oi": "call_oi_sum",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "(COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0))",
+            # Decay is the daily theta
+            "decay": "call_theta_daily_avg",
+            # Premium/Discount metrics
+            "premium_abs": "(COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - COALESCE(call_model_price_avg, 0)",
+            "premium_pct": "CASE WHEN COALESCE(call_model_price_avg, 0) > 0 THEN ((COALESCE(call_intrinsic_avg, 0) + COALESCE(call_extrinsic_avg, 0)) - call_model_price_avg) / call_model_price_avg * 100 ELSE NULL END",
         }
     else:  # put
         column_map = {
@@ -1113,7 +1582,15 @@ async def get_moneyness_series_v2(
             "gamma": "put_gamma_avg",
             "theta": "put_theta_avg",
             "vega": "put_vega_avg",
+            "rho": "put_rho_per_1pct_avg",
             "oi": "put_oi_sum",
+            # Premium is the LTP (intrinsic + extrinsic)
+            "premium": "(COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0))",
+            # Decay is the daily theta
+            "decay": "put_theta_daily_avg",
+            # Premium/Discount metrics
+            "premium_abs": "(COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - COALESCE(put_model_price_avg, 0)",
+            "premium_pct": "CASE WHEN COALESCE(put_model_price_avg, 0) > 0 THEN ((COALESCE(put_intrinsic_avg, 0) + COALESCE(put_extrinsic_avg, 0)) - put_model_price_avg) / put_model_price_avg * 100 ELSE NULL END",
         }
 
     value_expr = column_map.get(indicator)

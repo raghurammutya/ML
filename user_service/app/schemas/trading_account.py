@@ -35,6 +35,14 @@ class MembershipPermission(str, Enum):
     MANAGE = "manage"  # Can modify settings (not unlink)
 
 
+class SubscriptionTier(str, Enum):
+    """KiteConnect API subscription tier"""
+    UNKNOWN = "unknown"  # Not yet detected
+    PERSONAL = "personal"  # Free tier - trading only, no market data
+    CONNECT = "connect"  # Paid tier (Rs. 500/month) - trading + market data
+    STARTUP = "startup"  # Startup program - free with full features
+
+
 # Link Trading Account schemas
 
 class LinkTradingAccountRequest(BaseModel):
@@ -65,6 +73,18 @@ class LinkTradingAccountRequest(BaseModel):
         max_length=255,
         description="API secret from broker"
     )
+    password: str = Field(
+        ...,
+        min_length=4,
+        max_length=255,
+        description="Broker account password used for session bootstrap"
+    )
+    totp_seed: str = Field(
+        ...,
+        min_length=16,
+        max_length=64,
+        description="TOTP secret in Base32 format"
+    )
     access_token: Optional[str] = Field(
         None,
         max_length=500,
@@ -76,7 +96,7 @@ class LinkTradingAccountRequest(BaseModel):
         description="Friendly name for account (e.g., 'My Trading Account')"
     )
 
-    @validator('broker_user_id', 'api_key', 'api_secret')
+    @validator('broker_user_id', 'api_key', 'api_secret', 'password', 'totp_seed')
     def trim_whitespace(cls, v):
         if isinstance(v, str):
             return v.strip()
@@ -107,6 +127,9 @@ class TradingAccountSummary(BaseModel):
     permissions: List[str]  # If shared access, what permissions
     linked_at: str  # ISO timestamp
     last_used_at: Optional[str]  # ISO timestamp
+    subscription_tier: str  # unknown/personal/connect/startup
+    subscription_tier_last_checked: Optional[str]  # ISO timestamp
+    market_data_available: bool
 
 
 class GetTradingAccountsResponse(BaseModel):
@@ -145,6 +168,16 @@ class RotateCredentialsRequest(BaseModel):
         None,
         max_length=500,
         description="New access token (optional)"
+    )
+    password: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="New broker password (optional)"
+    )
+    totp_seed: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="New TOTP seed in Base32 format (optional)"
     )
 
 
@@ -244,10 +277,15 @@ class GetCredentialsResponse(BaseModel):
     trading_account_id: int
     broker: str
     broker_user_id: str
+    account_name: Optional[str]
     api_key: str  # Decrypted
     api_secret: str  # Decrypted
     access_token: Optional[str]  # Decrypted
+    password: str
+    totp_seed: str
     status: str
+    subscription_tier: str  # unknown/personal/connect/startup
+    market_data_available: bool
     warning: str = "SENSITIVE: Handle credentials securely. Do not log or persist."
 
 
@@ -285,3 +323,28 @@ class UnlinkTradingAccountResponse(BaseModel):
         0,
         description="Number of memberships that were revoked"
     )
+
+
+# Subscription Tier Detection schemas
+
+class DetectSubscriptionTierResponse(BaseModel):
+    """Response from subscription tier detection"""
+    trading_account_id: int
+    subscription_tier: str  # unknown/personal/connect/startup
+    market_data_available: bool
+    last_checked: str  # ISO timestamp
+    detection_method: str  # e.g., "quote_api_test", "websocket_test", "cached"
+    message: Optional[str] = None
+
+
+class UpdateSubscriptionTierRequest(BaseModel):
+    """Manual override of subscription tier (for testing or correction)"""
+    subscription_tier: SubscriptionTier
+
+
+class UpdateSubscriptionTierResponse(BaseModel):
+    """Response from manual subscription tier update"""
+    trading_account_id: int
+    subscription_tier: str
+    market_data_available: bool
+    message: str = "Subscription tier updated successfully"

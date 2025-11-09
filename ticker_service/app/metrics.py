@@ -43,7 +43,14 @@ order_requests_completed = Counter(
 order_execution_duration_seconds = Histogram(
     'order_execution_duration_seconds',
     'Order execution duration in seconds',
-    ['operation']
+    ['operation'],
+    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]  # latency buckets
+)
+
+order_execution_success_rate = Gauge(
+    'order_execution_success_rate',
+    'Order execution success rate (0-100%)',
+    ['account_id']
 )
 
 # Circuit breaker metrics

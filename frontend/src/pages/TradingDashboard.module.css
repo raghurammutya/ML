@@ -67,13 +67,20 @@
 
 .chartShell {
   display: grid;
-  grid-template-columns: var(--tabs-width, 200px) 1fr var(--tabs-width, 200px);
+  grid-template-columns:
+    var(--tabs-width, 220px)
+    minmax(0, 1fr)
+    var(--tabs-width, 220px);
   column-gap: 12px;
   align-items: stretch;
+  width: 100%;
 }
 
 .sideTabsColumn {
-  min-width: var(--tabs-width, 200px);
+  width: var(--tabs-width, 220px);
+  min-width: var(--tabs-width, 220px);
+  max-width: var(--tabs-width, 220px);
+  flex: 0 0 var(--tabs-width, 220px);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -84,6 +91,7 @@
   flex-direction: column;
   gap: 18px;
   height: 100%;
+  width: 100%;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -129,8 +137,25 @@
     0 30px 60px -40px rgba(15, 23, 42, 0.85),
     inset 0 1px 0 rgba(148, 163, 184, 0.16);
   overflow: hidden;
+  position: relative;
 }
 
+.centerChartInner {
+  position: relative;
+}
+
+.oiRail {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 150px;
+  height: calc(100% - 32px);
+  pointer-events: none;
+}
+
+.oiRail :global(.rail) {
+  pointer-events: auto;
+}
 .placeholderWrapper {
   flex: 1;
   display: flex;
@@ -578,10 +603,16 @@
 }
 
 .accountsPanel {
-  flex: 0 0 280px;
+  flex: 0 0 320px;
   display: flex;
+  flex-direction: column;
   align-items: stretch;
-  min-width: 260px;
+  gap: 12px;
+  min-width: 280px;
+}
+
+.strategyChartRow {
+  margin-top: 16px;
 }
 
 @media (max-width: 640px) {

@@ -167,8 +167,10 @@ async def lifespan(app: FastAPI):
     # Start strike rebalancer for automatic option subscription management
     try:
         from .strike_rebalancer import strike_rebalancer
+        # Inject tick_processor from ticker_loop for price data access
+        strike_rebalancer._tick_processor = ticker_loop._tick_processor
         await strike_rebalancer.start()
-        logger.info("Strike rebalancer started")
+        logger.info("Strike rebalancer started with tick processor integration")
     except Exception as exc:
         logger.warning(f"Failed to start strike rebalancer: {exc}")
         # Non-critical, continue startup

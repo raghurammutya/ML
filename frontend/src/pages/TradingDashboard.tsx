@@ -14,6 +14,10 @@ import UnderlyingChart, {
 } from '../components/nifty-monitor/UnderlyingChart'
 import SideTabsPanel from '../components/tradingDashboard/SideTabsPanel'
 import TradingAccountsPanel from '../components/tradingDashboard/TradingAccountsPanel'
+import StrategySelector from '../components/tradingDashboard/StrategySelector'
+import StrategyPnlPanel from '../components/tradingDashboard/StrategyPnlPanel'
+import StrategyInstrumentsPanel from '../components/tradingDashboard/StrategyInstrumentsPanel'
+import StrategyM2MChart from '../components/tradingDashboard/StrategyM2MChart'
 import StrategyDrawer from '../components/tradingDashboard/StrategyDrawer'
 import { useSymbolUniverse } from '../hooks/useSymbolUniverse'
 import { useIndicatorCatalog } from '../hooks/useIndicatorCatalog'
@@ -24,6 +28,9 @@ import type { MonitorOptionStrike } from '../types'
 import MiniChartsPanel from '../components/tradingDashboard/MiniChartsPanel'
 import OptionsRadar from '../components/tradingDashboard/OptionsRadar'
 import OptionChart from '../components/tradingDashboard/OptionChart'
+import { buildOiProfile } from '../components/tradingDashboard/oiProfile'
+import OiProfileRail from '../components/tradingDashboard/OiProfileRail'
+import OiChangePanel from '../components/tradingDashboard/OiChangePanel'
 import {
   MOCK_TRADING_ACCOUNTS,
   TradingAccount,
@@ -662,11 +669,12 @@ const buildStrikePageTitle = useCallback((symbol: string) => displayUnderlyingSy
     console.log('Messages clicked - count:', messageCount)
   }
 
-  const handleAccountSelect = (accountId: string) => {
-    setOpenAccountId(accountId)
-    const account = tradingAccounts.find((item) => item.id === accountId)
-    setOpenStrategyId(account?.strategies[0]?.id ?? null)
-  }
+  // Account selection now handled by TradingAccountContext
+  // const handleAccountSelect = (accountId: string) => {
+  //   setOpenAccountId(accountId)
+  //   const account = tradingAccounts.find((item) => item.id === accountId)
+  //   setOpenStrategyId(account?.strategies[0]?.id ?? null)
+  // }
 
   const handleCloseDrawer = () => {
     setOpenAccountId(null)
@@ -727,8 +735,6 @@ const buildStrikePageTitle = useCallback((symbol: string) => displayUnderlyingSy
             <PrimaryColumn
               activeTab={activeTab}
               monitorTimeframe={monitorTimeframe}
-              accounts={tradingAccounts}
-              onAccountSelect={handleAccountSelect}
               analytics={analytics}
               selectedExpiries={selectedExpiries}
               selectedMoneyness={selectedMoneyness}
@@ -766,13 +772,28 @@ const buildStrikePageTitle = useCallback((symbol: string) => displayUnderlyingSy
   )
 }
 
-export default TradingDashboard
+// Wrap with Auth, TradingAccount, and Strategy providers
+import { AuthProvider } from '../contexts/AuthContext'
+import { TradingAccountProvider } from '../contexts/TradingAccountContext'
+import { StrategyProvider } from '../contexts/StrategyContext'
+
+const TradingDashboardWithProviders = () => {
+  return (
+    <AuthProvider>
+      <TradingAccountProvider>
+        <StrategyProvider>
+          <TradingDashboard />
+        </StrategyProvider>
+      </TradingAccountProvider>
+    </AuthProvider>
+  )
+}
+
+export default TradingDashboardWithProviders
 
 interface PrimaryColumnProps {
   activeTab: string
   monitorTimeframe: UnderlyingChartProps['timeframe']
-  accounts: TradingAccount[]
-  onAccountSelect: (accountId: string) => void
   analytics: FoAnalyticsState
   selectedExpiries: string[]
   selectedMoneyness: string[]
@@ -782,8 +803,6 @@ interface PrimaryColumnProps {
 const PrimaryColumn: React.FC<PrimaryColumnProps> = ({
   activeTab,
   monitorTimeframe,
-  accounts,
-  onAccountSelect,
   analytics,
   selectedExpiries,
   selectedMoneyness,
@@ -862,6 +881,11 @@ const PrimaryColumn: React.FC<PrimaryColumnProps> = ({
     return record
   }, [analytics.radar])
 
+  const oiProfile = useMemo(
+    () => buildOiProfile(analytics.strike.oi, selectedExpiries, selectedMoneyness),
+    [analytics.strike.oi, selectedExpiries, selectedMoneyness],
+  )
+
   return (
     <main className={styles.main}>
       <div className={styles.chartStack} ref={stackRef} style={stackStyle}>
@@ -912,15 +936,22 @@ const PrimaryColumn: React.FC<PrimaryColumnProps> = ({
             </div>
           </div>
           <div className={styles.centerChartFrame} style={{ width: primaryWidth }}>
-            <UnderlyingChart
-              key={`${activeTab}-${monitorTimeframe}-center`}
-              symbol={activeTab}
-              timeframe={monitorTimeframe}
-              surfaceId="primary-underlying"
-              reportDimensions
-              enableRealtime
-              onContextAction={onContextAction}
-            />
+            <div className={styles.centerChartInner}>
+              <UnderlyingChart
+                key={`${activeTab}-${monitorTimeframe}-center`}
+                symbol={activeTab}
+                timeframe={monitorTimeframe}
+                surfaceId="primary-underlying"
+                reportDimensions
+                enableRealtime
+                onContextAction={onContextAction}
+              />
+              {oiProfile.perStrike.length > 0 && (
+                <div className={styles.oiRail}>
+                  <OiProfileRail data={oiProfile.perStrike} />
+                </div>
+              )}
+            </div>
           </div>
           <div className={styles.sideTabsColumn}>
             <SideTabsPanel
@@ -937,16 +968,19 @@ const PrimaryColumn: React.FC<PrimaryColumnProps> = ({
         </div>
 
         <div className={styles.analyticsRow}>
-          <MiniChartsPanel
-            symbol={activeTab}
-            timeframe={monitorTimeframe}
-            chartWidth={effectiveWidth}
-            offsetLeft={effectiveOffset}
-            panels={analytics.moneyness}
-            loading={analytics.loading}
-            visibleExpiries={selectedExpiries}
-            visibleMoneyness={selectedMoneyness}
-          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <MiniChartsPanel
+              symbol={activeTab}
+              timeframe={monitorTimeframe}
+              chartWidth={effectiveWidth}
+              offsetLeft={effectiveOffset}
+              panels={analytics.moneyness}
+              loading={analytics.loading}
+              visibleExpiries={selectedExpiries}
+              visibleMoneyness={selectedMoneyness}
+            />
+            {oiProfile.perExpiry.length > 0 && <OiChangePanel entries={oiProfile.perExpiry} />}
+          </div>
           <OptionsRadar
             symbol={activeTab}
             timeframe={monitorTimeframe}
@@ -954,8 +988,14 @@ const PrimaryColumn: React.FC<PrimaryColumnProps> = ({
             values={radarValues}
           />
           <div className={styles.accountsPanel}>
-            <TradingAccountsPanel accounts={accounts} onSelect={onAccountSelect} />
+            <StrategySelector />
+            <TradingAccountsPanel />
+            <StrategyPnlPanel />
+            <StrategyInstrumentsPanel />
           </div>
+        </div>
+        <div className={styles.strategyChartRow}>
+          <StrategyM2MChart />
         </div>
       </div>
     </main>

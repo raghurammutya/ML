@@ -55,6 +55,13 @@ class BackfillManager:
         self._recent_failures: Dict[int, datetime] = {}
         self._failure_cooldown = timedelta(minutes=30)  # configurable
 
+        # Gap detection configuration
+        self._gap_detection_enabled = settings.backfill_gap_detection_enabled
+        self._gap_lookback_days = settings.backfill_gap_detection_lookback_days
+        self._gap_max_days_per_fill = settings.backfill_gap_max_days_per_fill
+        self._last_gap_check: Dict[str, datetime] = {}  # Track last gap check per instrument
+        self._gap_check_cooldown = timedelta(hours=1)  # Don't check for gaps too frequently
+
 
     async def run(self) -> None:
         if not self._enabled:
@@ -91,14 +98,20 @@ class BackfillManager:
         futures_info = metadata.get("futures", [])
         options_info = metadata.get("options", [])
 
-        await self._backfill_underlying(underlying_info, now)
         underlying_symbol = (
             (underlying_info or {}).get("tradingsymbol")
             or (underlying_info or {}).get("name")
             or settings.monitor_default_symbol
         )
+
+        # Standard forward-fill (from last bar to now)
+        await self._backfill_underlying(underlying_info, now)
         await self._backfill_futures(underlying_symbol, futures_info, now)
         await self._backfill_options(underlying_symbol, options_info, now)
+
+        # Gap detection and backfill (historical gaps)
+        if self._gap_detection_enabled:
+            await self._detect_and_fill_gaps(underlying_info, futures_info, underlying_symbol, now)
 
     async def _backfill_underlying(self, info: Optional[dict], now: datetime) -> None:
         if not info or not info.get("instrument_token"):
@@ -326,7 +339,170 @@ class BackfillManager:
 
         return candles
 
-    
+    async def _detect_and_fill_gaps(
+        self,
+        underlying_info: Optional[dict],
+        futures_info: List[dict],
+        underlying_symbol: str,
+        now: datetime
+    ) -> None:
+        """
+        Detect and fill historical gaps across all instrument types.
+
+        This runs less frequently (controlled by cooldown) to avoid overhead.
+        """
+        # Check if enough time has passed since last gap check for underlying
+        underlying_key = f"underlying_{underlying_symbol}"
+        last_check = self._last_gap_check.get(underlying_key)
+        if last_check and (now - last_check) < self._gap_check_cooldown:
+            return  # Skip gap detection for now
+
+        logger.info("Starting gap detection for %s", underlying_symbol)
+
+        # Detect and fill underlying gaps
+        if underlying_info and underlying_info.get("instrument_token"):
+            await self._detect_and_fill_underlying_gaps(underlying_info)
+
+        # Detect and fill futures gaps
+        for fut in futures_info[:3]:  # Limit to first 3 futures to avoid overload
+            await self._detect_and_fill_futures_gaps(underlying_symbol, fut)
+
+        # Detect and fill options gaps (less frequently due to volume)
+        # Options gap fill is done once per 3 cycles to reduce load
+        if not hasattr(self, '_options_gap_cycle'):
+            self._options_gap_cycle = 0
+        self._options_gap_cycle += 1
+
+        if self._options_gap_cycle % 3 == 0:
+            await self._detect_and_fill_options_gaps(underlying_symbol)
+
+        # Update last gap check time
+        self._last_gap_check[underlying_key] = now
+        logger.info("Gap detection completed for %s", underlying_symbol)
+
+    async def _detect_and_fill_underlying_gaps(self, info: dict) -> None:
+        """Detect and fill gaps in underlying time series."""
+        symbol = info.get("tradingsymbol") or info.get("name") or settings.monitor_default_symbol
+        instrument_token = info.get("instrument_token")
+
+        if not instrument_token:
+            return
+
+        try:
+            # Detect gaps
+            gaps = await self._dm.detect_gaps_underlying(
+                symbol,
+                "1min",
+                lookback_days=self._gap_lookback_days,
+                min_gap_minutes=60  # Only fill gaps > 1 hour
+            )
+
+            if not gaps:
+                logger.debug("No gaps detected for underlying %s", symbol)
+                return
+
+            logger.info("Detected %d gaps for underlying %s", len(gaps), symbol)
+
+            # Fill each gap (limit to prevent overload)
+            for gap_start, gap_end in gaps[:5]:  # Max 5 gaps per cycle
+                # Limit gap size to prevent huge fetches
+                gap_duration = gap_end - gap_start
+                if gap_duration > timedelta(days=self._gap_max_days_per_fill):
+                    gap_end = gap_start + timedelta(days=self._gap_max_days_per_fill)
+                    logger.warning(
+                        "Gap too large for %s, limiting to %d days: %s -> %s",
+                        symbol, self._gap_max_days_per_fill, gap_start, gap_end
+                    )
+
+                candles = await self._fetch_history(instrument_token, gap_start, gap_end, include_greeks=False)
+                rows = self._candles_to_rows(symbol, candles)
+
+                if rows:
+                    await self._dm.upsert_underlying_bars(rows)
+                    logger.info(
+                        "Filled gap for underlying %s: %d bars from %s to %s",
+                        symbol, len(rows), gap_start, gap_end
+                    )
+
+        except Exception as e:
+            logger.error("Gap detection/fill failed for underlying %s: %s", symbol, e, exc_info=True)
+
+    async def _detect_and_fill_futures_gaps(self, symbol: str, fut_info: dict) -> None:
+        """Detect and fill gaps in futures time series."""
+        contract = fut_info.get("tradingsymbol")
+        instrument_token = fut_info.get("instrument_token")
+
+        if not contract or not instrument_token:
+            return
+
+        try:
+            gaps = await self._dm.detect_gaps_futures(
+                symbol,
+                contract,
+                "1min",
+                lookback_days=self._gap_lookback_days,
+                min_gap_minutes=60
+            )
+
+            if not gaps:
+                return
+
+            logger.info("Detected %d gaps for future %s", len(gaps), contract)
+
+            expiry_raw = fut_info.get("expiry")
+            expiry_date: Optional[date] = None
+            if expiry_raw:
+                try:
+                    expiry_date = datetime.fromisoformat(str(expiry_raw)).date()
+                except ValueError:
+                    expiry_date = None
+
+            for gap_start, gap_end in gaps[:3]:  # Max 3 gaps per future
+                gap_duration = gap_end - gap_start
+                if gap_duration > timedelta(days=self._gap_max_days_per_fill):
+                    gap_end = gap_start + timedelta(days=self._gap_max_days_per_fill)
+
+                candles = await self._fetch_history(instrument_token, gap_start, gap_end, include_greeks=True)
+                rows = self._candles_to_future_rows(symbol, contract, expiry_date, candles)
+
+                if rows:
+                    await self._dm.upsert_futures_bars(rows)
+                    logger.info(
+                        "Filled gap for future %s: %d bars from %s to %s",
+                        contract, len(rows), gap_start, gap_end
+                    )
+
+        except Exception as e:
+            logger.error("Gap detection/fill failed for future %s: %s", contract, e, exc_info=True)
+
+    async def _detect_and_fill_options_gaps(self, symbol: str) -> None:
+        """Detect and fill gaps in options time series."""
+        try:
+            gaps = await self._dm.detect_gaps_options(
+                symbol,
+                "1min",
+                lookback_days=self._gap_lookback_days,
+                min_gap_minutes=120  # Only fill gaps > 2 hours for options
+            )
+
+            if not gaps:
+                return
+
+            logger.info("Detected %d gaps for options %s", len(gaps), symbol)
+
+            # Options gap fill requires coordinated backfill across entire option chain
+            # For now, log the gaps and let the regular option backfill handle it
+            # in the next scheduled cycle with proper metadata
+            for gap_start, gap_end in gaps[:2]:  # Log first 2 gaps
+                logger.info(
+                    "Options gap detected for %s: %s to %s (requires full chain backfill)",
+                    symbol, gap_start, gap_end
+                )
+
+        except Exception as e:
+            logger.error("Gap detection failed for options %s: %s", symbol, e, exc_info=True)
+
+
     def _candles_to_rows(self, symbol: str, candles: List[object]) -> List[dict]:
         rows: List[dict] = []
         for candle in candles:

@@ -1,0 +1,96 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow:
+    0 16px 30px -20px rgba(2, 6, 23, 0.9),
+    inset 0 1px 0 rgba(148, 163, 184, 0.08);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.badge {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #22d3ee;
+  background: rgba(34, 211, 238, 0.16);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+}
+
+.timestamp {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.currentBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.currentBlock span {
+  font-size: 13px;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.currentBlock strong {
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+
+.currentPnl {
+  font-weight: 600;
+}
+
+.positive {
+  color: #26a69a;
+}
+
+.negative {
+  color: #ef5350;
+}
+
+.metricsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metricsGrid label {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.7);
+  margin-bottom: 4px;
+}
+
+.metricsGrid span {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.empty {
+  text-align: center;
+  color: rgba(148, 163, 184, 0.85);
+  font-size: 13px;
+}

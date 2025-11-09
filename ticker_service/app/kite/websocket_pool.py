@@ -1,16 +1,17 @@
 """
 Kite WebSocket Connection Pool
 
-Manages multiple KiteTicker WebSocket connections to scale beyond the 1000 instrument limit.
-Each WebSocket connection can handle up to 1000 instruments. The pool automatically creates
+Manages multiple KiteTicker WebSocket connections to scale beyond the 3000 instrument limit.
+Each WebSocket connection can handle up to 3000 instruments. The pool automatically creates
 additional connections as needed when subscriptions exceed capacity.
 
 Features:
-- Automatic connection pooling when hitting 1000 instrument limit
+- Automatic connection pooling when hitting 3000 instrument limit (configurable)
 - Load balancing across connections
 - Unified subscription management
 - Connection health monitoring
 - Automatic reconnection handling
+- Hard limit enforcement (max 3 connections per API key per KiteConnect)
 """
 from __future__ import annotations
 
@@ -58,7 +59,7 @@ class WebSocketConnection:
     ticker: Any  # KiteTicker
     subscribed_tokens: Set[int]
     connected: bool = False
-    max_instruments: int = 1000
+    max_instruments: int = 3000  # KiteConnect limit per connection
 
     def has_capacity(self) -> bool:
         """Check if this connection can accept more subscriptions"""
@@ -71,10 +72,11 @@ class WebSocketConnection:
 
 class KiteWebSocketPool:
     """
-    Pool of KiteTicker WebSocket connections for scaling beyond 1000 instruments.
+    Pool of KiteTicker WebSocket connections for scaling beyond 3000 instruments.
 
     Automatically creates new connections when existing ones reach capacity.
     Distributes subscriptions across connections for optimal load balancing.
+    Enforces KiteConnect hard limits: max 3 connections per API key, 3000 instruments per connection.
     """
 
     def __init__(
@@ -84,7 +86,8 @@ class KiteWebSocketPool:
         access_token: str,
         ws_root: str,
         ticker_mode: str = "LTP",
-        max_instruments_per_connection: int = 1000,
+        max_instruments_per_connection: int = 3000,
+        max_connections_per_account: int = 3,
         tick_handler: Optional[TickHandler] = None,
         error_handler: Optional[ErrorHandler] = None,
     ):
@@ -94,6 +97,7 @@ class KiteWebSocketPool:
         self.ws_root = ws_root
         self.ticker_mode = ticker_mode
         self.max_instruments_per_connection = max_instruments_per_connection
+        self.max_connections_per_account = max_connections_per_account
 
         self._tick_handler = tick_handler
         self._error_handler = error_handler
@@ -143,6 +147,17 @@ class KiteWebSocketPool:
         logger.info("DEBUG: _create_connection() called for account %s", self.account_id)
         if not KiteTicker:
             raise RuntimeError("KiteTicker not available")
+
+        # SAFETY: Enforce KiteConnect's connection limit
+        if len(self._connections) >= self.max_connections_per_account:
+            max_capacity = self.max_connections_per_account * self.max_instruments_per_connection
+            raise RuntimeError(
+                f"Cannot create connection #{len(self._connections)}: "
+                f"KiteConnect limits to {self.max_connections_per_account} WebSocket connections per API key. "
+                f"Current capacity: {len(self._connections)} × {self.max_instruments_per_connection} = "
+                f"{len(self._connections) * self.max_instruments_per_connection} instruments maximum. "
+                f"Total system capacity: {max_capacity} instruments."
+            )
 
         connection_id = self._next_connection_id
         self._next_connection_id += 1
@@ -510,11 +525,36 @@ class KiteWebSocketPool:
                 logger.debug("All tokens already subscribed for account %s", self.account_id)
                 return
 
+            # Calculate capacity after subscription
+            total_after = len(self._target_tokens)
+            max_capacity = self.max_connections_per_account * self.max_instruments_per_connection
+            capacity_pct = (total_after / max_capacity) * 100
+
+            # Warn at 80% capacity
+            if capacity_pct >= 80:
+                logger.warning(
+                    "⚠️ Approaching subscription capacity for account %s: %d / %d instruments (%.1f%%)",
+                    self.account_id,
+                    total_after,
+                    max_capacity,
+                    capacity_pct
+                )
+
+            # Error at capacity
+            if total_after > max_capacity:
+                raise ValueError(
+                    f"Cannot subscribe to {len(tokens)} more instruments for account {self.account_id}: "
+                    f"would exceed {max_capacity} limit "
+                    f"(current: {len(self._target_tokens) - len(tokens)}, requested: {len(tokens)})"
+                )
+
             logger.info(
-                "Subscribing to %d new tokens for account %s (total target: %d)",
+                "Subscribing to %d new tokens for account %s (total target: %d / %d, %.1f%% capacity)",
                 len(tokens_to_subscribe),
                 self.account_id,
                 len(self._target_tokens),
+                max_capacity,
+                capacity_pct,
             )
 
             # Distribute tokens across connections (while holding lock)

@@ -14,35 +14,23 @@ mkdir -p "$(dirname "$LOG_FILE")"
 echo "========================================" >> "$LOG_FILE"
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting midnight refresh" >> "$LOG_FILE"
 
-# 1. Clean up old expiry metadata
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Cleaning up old expiry metadata..." >> "$LOG_FILE"
-cd "$PROJECT_DIR/backend"
-docker exec tv-backend python3 -c "
-import asyncio
-import asyncpg
-from app.config import get_settings
+# 1. Clean up old expiry metadata and refresh for today
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Cleaning up old expiry metadata and refreshing for today..." >> "$LOG_FILE"
 
-async def cleanup_expiries():
-    settings = get_settings()
-    conn = await asyncpg.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        user=settings.db_user,
-        password=settings.db_password,
-        database=settings.db_name
-    )
+# Run database functions directly using psql
+PGPASSWORD=stocksblitz123 psql -h localhost -U stocksblitz -d stocksblitz_unified -c "
+    -- Refresh expiry metadata for today
+    SELECT refresh_expiry_metadata() as refreshed_rows;
 
-    # Remove expired entries from expiry_metadata
-    result = await conn.execute('''
-        DELETE FROM expiry_metadata
-        WHERE expiry < CURRENT_DATE
-    ''')
-
-    print(f'Removed {result} expired entries from expiry_metadata')
-    await conn.close()
-
-asyncio.run(cleanup_expiries())
+    -- Clean up old expiry metadata (keep last 90 days)
+    SELECT cleanup_old_expiry_metadata(90) as cleaned_rows;
 " >> "$LOG_FILE" 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully refreshed and cleaned up expiry metadata" >> "$LOG_FILE"
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to refresh/cleanup expiry metadata" >> "$LOG_FILE"
+fi
 
 # 2. Refresh tokens for all trading accounts in ticker_service
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Refreshing tokens for ticker service..." >> "$LOG_FILE"

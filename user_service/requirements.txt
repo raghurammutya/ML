@@ -51,6 +51,7 @@ hvac==2.0.0   # HashiCorp Vault
 python-dateutil==2.8.2
 pytz==2023.3
 pycountry==23.12.11
+kiteconnect==5.0.1  # For subscription tier detection
 
 # Rate limiting
 slowapi==0.1.9

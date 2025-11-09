@@ -13,6 +13,8 @@ from loguru import logger
 import yaml
 
 from .config import get_settings
+from .user_service_client import fetch_remote_trading_accounts
+from .database_loader import load_accounts_from_database, check_database_connection
 from .kite.client import KiteClient
 
 KITE_SCRIPTS_ROOT = Path(__file__).resolve().parents[2] / "Kite_FOdata_scripts"
@@ -110,6 +112,50 @@ def _load_accounts_from_yaml(accounts_file: Path) -> Dict[str, KiteAccount]:
             accounts[account_id] = KiteAccount.from_raw(account_id, raw, base_dir)
         except RuntimeError as exc:
             logger.warning("Skipping account %s from YAML: %s", account_id, exc)
+    return accounts
+
+
+def _load_accounts_from_database() -> Dict[str, KiteAccount]:
+    """
+    Load accounts from ticker_service database (kite_accounts table).
+
+    This is the primary method for production deployments.
+    Credentials are stored encrypted in the database and decrypted on load.
+
+    Returns:
+        Dict mapping account_id to KiteAccount objects
+    """
+    logger.info("Loading Kite accounts from database")
+    db_accounts = load_accounts_from_database()
+
+    if not db_accounts:
+        raise FileNotFoundError("No accounts found in database or database connection failed")
+
+    accounts: Dict[str, KiteAccount] = {}
+    for account_id, creds in db_accounts.items():
+        token_dir = Path(creds.get('token_dir', './tokens'))
+        if not token_dir.is_absolute():
+            token_dir = (Path(__file__).parent / token_dir).resolve()
+
+        accounts[account_id] = KiteAccount(
+            account_id=account_id,
+            api_key=creds['api_key'],
+            api_secret=creds.get('api_secret'),
+            access_token=creds.get('access_token'),
+            username=creds.get('username'),
+            password=creds.get('password'),
+            totp_key=creds.get('totp_key'),
+            token_dir=token_dir,
+        )
+
+        logger.debug(
+            "Loaded account %s from database: username=%s, tier=%s",
+            account_id,
+            creds.get('username'),
+            creds.get('subscription_tier')
+        )
+
+    logger.info("Loaded %d account(s) from database", len(accounts))
     return accounts
 
 
@@ -213,14 +259,41 @@ class SessionOrchestrator:
     """
 
     def __init__(self, accounts_file: Optional[Path] = None):
-        accounts_file = Path(accounts_file or os.getenv("KITE_ACCOUNTS_FILE", DEFAULT_ACCOUNTS_FILE))
-        logger.debug("SessionOrchestrator initialising with accounts_file=%s", accounts_file)
-        try:
-            self._accounts = _load_accounts_from_yaml(accounts_file)
-            logger.info("Loaded Kite accounts from YAML (%d found)", len(self._accounts))
-        except FileNotFoundError:
-            logger.warning("Accounts file %s not found; falling back to environment", accounts_file)
-            self._accounts = _load_accounts_from_env()
+        settings = get_settings()
+        self._accounts: Dict[str, KiteAccount] = {}
+        accounts_loaded = False
+
+        # Priority 1: User service API (if enabled)
+        if settings.use_user_service_accounts:
+            remote_accounts = fetch_remote_trading_accounts()
+            if remote_accounts:
+                try:
+                    self._accounts = self._build_accounts_from_remote(remote_accounts)
+                    accounts_loaded = True
+                    logger.info("Loaded %d Kite account(s) from user service", len(self._accounts))
+                except Exception as exc:
+                    logger.exception("Failed to build accounts from user service response: %s", exc)
+
+        # Priority 2: Database (ticker_service owns credentials)
+        if not accounts_loaded and check_database_connection():
+            try:
+                self._accounts = _load_accounts_from_database()
+                accounts_loaded = True
+                logger.info("Loaded %d Kite account(s) from database", len(self._accounts))
+            except Exception as exc:
+                logger.warning("Failed to load accounts from database: %s", exc)
+
+        # Priority 3: YAML file (legacy/development)
+        if not accounts_loaded:
+            accounts_file = Path(accounts_file or os.getenv("KITE_ACCOUNTS_FILE", DEFAULT_ACCOUNTS_FILE))
+            logger.debug("SessionOrchestrator initialising with accounts_file=%s", accounts_file)
+            try:
+                self._accounts = _load_accounts_from_yaml(accounts_file)
+                logger.info("Loaded Kite accounts from YAML (%d found)", len(self._accounts))
+            except FileNotFoundError:
+                logger.warning("Accounts file %s not found; falling back to environment", accounts_file)
+                # Priority 4: Environment variables (last resort)
+                self._accounts = _load_accounts_from_env()
 
         self._sessions: Dict[str, AccountSession] = {}
         for account_id, account in self._accounts.items():
@@ -229,8 +302,6 @@ class SessionOrchestrator:
             logger.debug("Session created for account %s", account_id)
 
         # Allow running without accounts when mock mode is enabled
-        from .config import get_settings
-        settings = get_settings()
         if not self._sessions and not settings.enable_mock_data:
             raise RuntimeError("No Kite accounts available for ticker service.")
         elif not self._sessions:
@@ -249,6 +320,71 @@ class SessionOrchestrator:
         if "default" in self._sessions:
             return self._sessions["default"].client
         return self._rotation[0].client if self._rotation else None
+
+    @staticmethod
+    def _build_accounts_from_remote(records: List[Dict[str, Any]]) -> Dict[str, KiteAccount]:
+        """
+        Build KiteAccount objects from remote trading account records.
+
+        Filters accounts to only include those with market data access (Connect/Startup tier).
+        Personal API accounts (free tier) are excluded as they cannot subscribe to market data.
+        """
+        # Filter to accounts with market data access only
+        market_data_accounts = [
+            rec for rec in records
+            if rec.get("market_data_available", False)
+        ]
+
+        no_market_data_accounts = [
+            rec for rec in records
+            if not rec.get("market_data_available", False)
+        ]
+
+        # Log filtering results
+        if no_market_data_accounts:
+            excluded_ids = [rec.get("broker_user_id", rec.get("trading_account_id")) for rec in no_market_data_accounts]
+            excluded_tiers = [rec.get("subscription_tier", "unknown") for rec in no_market_data_accounts]
+            logger.warning(
+                "Excluding %d account(s) without market data access: %s (tiers: %s)",
+                len(no_market_data_accounts),
+                excluded_ids,
+                excluded_tiers
+            )
+            logger.info(
+                "These accounts have Personal API tier (free) which does not support WebSocket market data. "
+                "They can still be used for trading via other APIs."
+            )
+
+        logger.info(
+            "Loading %d account(s) with market data access for WebSocket subscriptions",
+            len(market_data_accounts)
+        )
+
+        # Log tier information for loaded accounts
+        for rec in market_data_accounts:
+            tier = rec.get("subscription_tier", "unknown")
+            broker_id = rec.get("broker_user_id", rec.get("trading_account_id"))
+            logger.info(
+                "Account %s: tier=%s, market_data=True",
+                broker_id,
+                tier
+            )
+
+        # Build KiteAccount objects from filtered list
+        accounts: Dict[str, KiteAccount] = {}
+        for record in market_data_accounts:
+            account_id = str(record["trading_account_id"])
+            accounts[account_id] = KiteAccount(
+                account_id=account_id,
+                api_key=record["api_key"],
+                api_secret=record.get("api_secret"),
+                access_token=record.get("access_token"),
+                username=record.get("broker_user_id"),
+                password=record.get("password"),
+                totp_key=record.get("totp_seed"),
+                token_dir=None,
+            )
+        return accounts
     def list_accounts(self) -> List[str]:
         return list(self._sessions.keys())
 

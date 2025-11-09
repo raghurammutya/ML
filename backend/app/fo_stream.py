@@ -281,9 +281,12 @@ class FOAggregator:
                 for key, bucket in buffer.items():
                     items.append((tf, key, bucket))
                 buffer.clear()
+            # BUGFIX: Only persist underlying bars for configured persist_timeframes
+            # to prevent duplicate resolutions in minute_bars table
             for tf, buffer in self._underlying_buffers.items():
-                for key, bar in buffer.items():
-                    underlying_items.append((tf, key, bar))
+                if tf in self._persist_timeframes:
+                    for key, bar in buffer.items():
+                        underlying_items.append((tf, key, bar))
                 buffer.clear()
         await self._persist_underlying_bars(self._convert_underlying_items(underlying_items))
         await self._persist_batches(items)

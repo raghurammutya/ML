@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Backfill improvements
     backfill_subscription_aware: bool = True  # Only backfill subscribed instruments
     backfill_immediate_on_subscribe: bool = True  # Trigger immediate backfill on subscription event
+    backfill_gap_detection_enabled: bool = True  # Detect and fill historical gaps in time series
+    backfill_gap_detection_lookback_days: int = 30  # How far back to look for gaps
+    backfill_gap_max_days_per_fill: int = 7  # Maximum days to backfill in one batch (prevents overload)
 
     # Cache TTLs (seconds)
     cache_ttl_1m: int = 60
@@ -79,10 +82,10 @@ class Settings(BaseSettings):
     # CORS Configuration
     # Security: In production, specify exact origins instead of "*"
     # Example: ["https://your-frontend.com", "https://app.yourdomain.com"]
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://localhost:5174"]
     cors_credentials: bool = True
     cors_methods: list[str] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
-    cors_headers: list[str] = ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
+    cors_headers: list[str] = ["Content-Type", "Authorization", "X-Requested-With", "Accept", "X-Account-ID", "X-Correlation-ID"]
     
     class Config:
         env_file = ".env"

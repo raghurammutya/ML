@@ -66,6 +66,7 @@ export const fetchFoMoneynessSeries = async (params: MoneynessSeriesParams): Pro
       expiry: params.expiry,
       from: params.from,
       to: params.to,
+      _ts: Date.now(),
     }
   })
   return response.data
@@ -75,6 +76,7 @@ export interface StrikeDistributionParams {
   symbol: string
   timeframe: string
   indicator: string
+  option_side?: string
   expiry: string[]
   bucket_time?: number
 }
@@ -87,8 +89,10 @@ export const fetchFoStrikeDistribution = async (params: StrikeDistributionParams
         symbol: normalizedSymbol,
         timeframe: params.timeframe,
         indicator: params.indicator,
+        option_side: params.option_side,
         expiry: params.expiry,
         bucket_time: params.bucket_time,
+        _ts: Date.now(),
       }
     })
     return response.data

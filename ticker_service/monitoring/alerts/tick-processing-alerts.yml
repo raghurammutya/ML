@@ -1,0 +1,170 @@
+# Prometheus Alerting Rules for Tick Processing
+#
+# These alerts monitor the health and performance of the ticker service
+# Phase 4 - Performance & Observability
+
+groups:
+  - name: tick_processing
+    interval: 30s
+    rules:
+      # ==========================================
+      # LATENCY ALERTS
+      # ==========================================
+
+      - alert: HighTickProcessingLatency
+        expr: histogram_quantile(0.99, rate(tick_processing_latency_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: tick_processor
+        annotations:
+          summary: "High P99 tick processing latency"
+          description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 100ms). This may indicate performance degradation."
+          runbook_url: "https://docs.example.com/runbooks/high-tick-latency"
+
+      - alert: CriticalTickProcessingLatency
+        expr: histogram_quantile(0.99, rate(tick_processing_latency_seconds_bucket[5m])) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+          component: tick_processor
+        annotations:
+          summary: "CRITICAL: P99 tick processing latency over 500ms"
+          description: "P99 latency is {{ $value | humanizeDuration }}. Immediate investigation required."
+          runbook_url: "https://docs.example.com/runbooks/critical-tick-latency"
+
+      - alert: HighGreeksCalculationLatency
+        expr: histogram_quantile(0.99, rate(greeks_calculation_latency_seconds_bucket[5m])) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          component: greeks_calculator
+        annotations:
+          summary: "High Greeks calculation latency"
+          description: "P99 Greeks calculation latency is {{ $value | humanizeDuration }} (threshold: 10ms)"
+
+      # ==========================================
+      # ERROR RATE ALERTS
+      # ==========================================
+
+      - alert: HighTickProcessingErrorRate
+        expr: rate(tick_processing_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          component: tick_processor
+        annotations:
+          summary: "High tick processing error rate"
+          description: "Error rate: {{ $value | humanize }}/sec. Check logs for error details."
+          runbook_url: "https://docs.example.com/runbooks/high-error-rate"
+
+      - alert: TickValidationErrorsIncreasing
+        expr: rate(tick_validation_errors_total[5m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+          component: tick_validator
+        annotations:
+          summary: "High tick validation error rate"
+          description: "Validation error rate: {{ $value | humanize }}/sec. Possible data quality issues from upstream."
+
+      # ==========================================
+      # THROUGHPUT ALERTS
+      # ==========================================
+
+      - alert: LowTickThroughput
+        expr: rate(ticks_processed_total{status="success"}[1m]) < 100
+        for: 5m
+        labels:
+          severity: warning
+          component: tick_processor
+        annotations:
+          summary: "Low tick processing throughput"
+          description: "Throughput: {{ $value | humanize }} ticks/sec (expected > 1000). Possible upstream data flow issue."
+          runbook_url: "https://docs.example.com/runbooks/low-throughput"
+
+      - alert: NoTicksProcessed
+        expr: increase(ticks_processed_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: tick_processor
+        annotations:
+          summary: "No ticks being processed"
+          description: "Tick processing appears to be stalled. Check WebSocket connections and account health."
+          runbook_url: "https://docs.example.com/runbooks/no-ticks"
+
+      # ==========================================
+      # BATCHING ALERTS
+      # ==========================================
+
+      - alert: HighBatchFlushLatency
+        expr: histogram_quantile(0.95, rate(tick_batch_flush_latency_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: tick_batcher
+        annotations:
+          summary: "High batch flush latency"
+          description: "P95 batch flush latency is {{ $value | humanizeDuration }}. Redis may be slow."
+
+      - alert: LowBatchFillRate
+        expr: avg_over_time(tick_batch_fill_rate[10m]) < 50
+        for: 15m
+        labels:
+          severity: info
+          component: tick_batcher
+        annotations:
+          summary: "Low batch fill rate"
+          description: "Average batch fill rate is {{ $value | humanize }}%. Batching may be inefficient due to low tick volume."
+
+      # ==========================================
+      # BUSINESS METRICS ALERTS
+      # ==========================================
+
+      - alert: NoGreeksCalculations
+        expr: increase(greeks_calculations_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: greeks_calculator
+        annotations:
+          summary: "No Greeks calculations occurring"
+          description: "Greeks calculations have stopped. Check option tick flow and underlying price updates."
+
+      - alert: NoActiveAccounts
+        expr: tick_processor_active_accounts == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: tick_processor
+        annotations:
+          summary: "No active trading accounts"
+          description: "No accounts are currently active. Check account health and WebSocket connections."
+          runbook_url: "https://docs.example.com/runbooks/no-active-accounts"
+
+      # ==========================================
+      # SYSTEM HEALTH ALERTS
+      # ==========================================
+
+      - alert: TickProcessorDown
+        expr: up{job="ticker-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "Ticker service is down"
+          description: "The ticker service is not responding. Check service status immediately."
+          runbook_url: "https://docs.example.com/runbooks/service-down"
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / 1024 / 1024 > 2048
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage"
+          description: "Process is using {{ $value | humanize }}MB of memory. Possible memory leak."
+          runbook_url: "https://docs.example.com/runbooks/high-memory"

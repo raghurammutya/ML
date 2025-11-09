@@ -989,7 +989,12 @@ class KiteClient:
         max_instruments_per_connection = getattr(
             self._settings,
             "max_instruments_per_ws_connection",
-            1000,
+            3000,  # Updated default to match KiteConnect's current limit
+        )
+        max_connections_per_account = getattr(
+            self._settings,
+            "max_ws_connections_per_account",
+            3,  # KiteConnect hard limit
         )
 
         # Create pool
@@ -1000,6 +1005,7 @@ class KiteClient:
             ws_root=WS_ROOT,
             ticker_mode=ticker_mode,
             max_instruments_per_connection=max_instruments_per_connection,
+            max_connections_per_account=max_connections_per_account,
             tick_handler=self._tick_handler,
             error_handler=self._error_handler,
         )
@@ -1008,11 +1014,14 @@ class KiteClient:
         self._ws_pool.start(self._loop)
         self._pool_started = True
 
+        max_capacity = max_connections_per_account * max_instruments_per_connection
         logger.info(
-            "WebSocket pool initialized for account %s (mode=%s, max_per_connection=%d)",
+            "WebSocket pool initialized for account %s (mode=%s, max_per_connection=%d, max_connections=%d, total_capacity=%d)",
             self.account_id,
             ticker_mode,
             max_instruments_per_connection,
+            max_connections_per_account,
+            max_capacity,
         )
 
     def get_pool_stats(self) -> Optional[Dict[str, Any]]:

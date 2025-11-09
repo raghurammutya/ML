@@ -1,0 +1,69 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+
+# Limits configuration
+limits_config:
+  # Allow ingestion of older logs
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h  # 7 days
+
+  # Retention
+  retention_period: 744h  # 31 days
+
+  # Performance tuning
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  max_query_series: 500
+  max_query_lookback: 720h  # 30 days
+
+  # Stream limits
+  max_streams_per_user: 10000
+  max_global_streams_per_user: 50000
+
+# Table manager for retention
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 744h  # 31 days
+
+# Compactor for chunk management
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150

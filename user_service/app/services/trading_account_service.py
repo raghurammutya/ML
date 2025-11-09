@@ -17,7 +17,9 @@ from sqlalchemy import and_
 from app.core.config import settings
 from app.core.redis_client import RedisClient
 from app.models import User, TradingAccount, TradingAccountMembership, TradingAccountStatus
+from app.models.trading_account import SubscriptionTier as SubscriptionTierEnum
 from app.services.event_service import EventService
+from app.services.subscription_tier_detector import SubscriptionTierDetector
 
 
 class TradingAccountService:
@@ -35,6 +37,8 @@ class TradingAccountService:
         broker_user_id: str,
         api_key: str,
         api_secret: str,
+        password: str,
+        totp_seed: str,
         access_token: Optional[str] = None,
         account_name: Optional[str] = None
     ) -> TradingAccount:
@@ -76,17 +80,26 @@ class TradingAccountService:
         # Encrypt credentials with KMS
         encrypted_api_key = self._encrypt_credential(api_key)
         encrypted_api_secret = self._encrypt_credential(api_secret)
+        encrypted_password = self._encrypt_credential(password)
+        encrypted_totp = self._encrypt_credential(totp_seed)
         encrypted_access_token = self._encrypt_credential(access_token) if access_token else None
+
+        account_label = account_name or broker_user_id
 
         # Create trading account
         account = TradingAccount(
             user_id=user_id,
             broker=broker,
             broker_user_id=broker_user_id,
+            nickname=account_label,
+            account_name=account_label,
             api_key_encrypted=encrypted_api_key,
             api_secret_encrypted=encrypted_api_secret,
             access_token_encrypted=encrypted_access_token,
-            account_name=account_name,
+            password_encrypted=encrypted_password,
+            totp_secret_encrypted=encrypted_totp,
+            credential_vault_ref="inline",
+            data_key_wrapped="inline",
             status=TradingAccountStatus.ACTIVE
         )
 
@@ -194,7 +207,9 @@ class TradingAccountService:
         user_id: int,
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
-        access_token: Optional[str] = None
+        access_token: Optional[str] = None,
+        password: Optional[str] = None,
+        totp_seed: Optional[str] = None
     ) -> TradingAccount:
         """
         Rotate API credentials for trading account
@@ -207,6 +222,8 @@ class TradingAccountService:
             api_key: New API key (optional)
             api_secret: New API secret (optional)
             access_token: New access token (optional)
+            password: New broker password (optional)
+            totp_seed: New TOTP seed (optional)
 
         Returns:
             Updated TradingAccount
@@ -235,6 +252,10 @@ class TradingAccountService:
 
         if access_token is not None:
             account.access_token_encrypted = self._encrypt_credential(access_token)
+        if password is not None:
+            account.password_encrypted = self._encrypt_credential(password)
+        if totp_seed is not None:
+            account.totp_secret_encrypted = self._encrypt_credential(totp_seed)
 
         account.updated_at = datetime.utcnow()
         self.db.commit()
@@ -510,11 +531,9 @@ class TradingAccountService:
         # Decrypt credentials
         api_key = self._decrypt_credential(account.api_key_encrypted)
         api_secret = self._decrypt_credential(account.api_secret_encrypted)
-        access_token = (
-            self._decrypt_credential(account.access_token_encrypted)
-            if account.access_token_encrypted
-            else None
-        )
+        password = self._decrypt_credential(account.password_encrypted)
+        totp_seed = self._decrypt_credential(account.totp_secret_encrypted)
+        access_token = self._decrypt_credential(account.access_token_encrypted) or None
 
         # TODO: Log credential access to audit trail
         # self._log_credential_access(
@@ -526,13 +545,36 @@ class TradingAccountService:
             "trading_account_id": trading_account_id,
             "broker": account.broker,
             "broker_user_id": account.broker_user_id,
+            "account_name": account.account_name,
             "api_key": api_key,
             "api_secret": api_secret,
             "access_token": access_token,
-            "status": account.status.value
+            "password": password,
+            "totp_seed": totp_seed,
+            "status": account.status.value,
+            "subscription_tier": account.subscription_tier.value,
+            "market_data_available": account.market_data_available
         }
 
-    def _encrypt_credential(self, plaintext: str) -> str:
+    def get_all_credentials(
+        self,
+        requesting_service: str,
+        status_filter: Optional[TradingAccountStatus] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Return decrypted credentials for all trading accounts, optionally filtered by status.
+        """
+        query = self.db.query(TradingAccount)
+        if status_filter:
+            query = query.filter(TradingAccount.status == status_filter)
+
+        accounts = query.all()
+        return [
+            self.get_decrypted_credentials(account.trading_account_id, requesting_service)
+            for account in accounts
+        ]
+
+    def _encrypt_credential(self, plaintext: Optional[str]) -> str:
         """
         Encrypt credential with KMS
 
@@ -558,10 +600,12 @@ class TradingAccountService:
         """
         # DEVELOPMENT ONLY - Store plaintext
         # TODO: Replace with actual KMS encryption before production
+        if plaintext is None:
+            return ""
         import base64
         return base64.b64encode(plaintext.encode()).decode()
 
-    def _decrypt_credential(self, encrypted: str) -> str:
+    def _decrypt_credential(self, encrypted: Optional[str]) -> str:
         """
         Decrypt credential with KMS
 
@@ -586,5 +630,128 @@ class TradingAccountService:
         """
         # DEVELOPMENT ONLY - Decode base64
         # TODO: Replace with actual KMS decryption before production
+        if not encrypted:
+            return ""
         import base64
         return base64.b64decode(encrypted.encode()).decode()
+
+    async def detect_subscription_tier(
+        self,
+        trading_account_id: int,
+        force_refresh: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Detect subscription tier for trading account.
+
+        Args:
+            trading_account_id: Trading account ID
+            force_refresh: Force re-detection even if recently checked
+
+        Returns:
+            Dict with tier info
+        """
+        # Get trading account
+        account = self.db.query(TradingAccount).filter(
+            TradingAccount.trading_account_id == trading_account_id
+        ).first()
+
+        if not account:
+            raise ValueError(f"Trading account {trading_account_id} not found")
+
+        # Check if we need to refresh
+        if not force_refresh:
+            if not SubscriptionTierDetector.should_refresh_tier(
+                account.subscription_tier_last_checked
+            ):
+                # Return cached tier
+                return {
+                    "trading_account_id": trading_account_id,
+                    "subscription_tier": account.subscription_tier.value,
+                    "market_data_available": account.market_data_available,
+                    "last_checked": (
+                        account.subscription_tier_last_checked.isoformat()
+                        if account.subscription_tier_last_checked
+                        else None
+                    ),
+                    "detection_method": "cached",
+                    "message": "Using cached subscription tier"
+                }
+
+        # Decrypt credentials
+        api_key = self._decrypt_credential(account.api_key_encrypted)
+        access_token = self._decrypt_credential(account.access_token_encrypted)
+
+        if not api_key or not access_token:
+            raise ValueError(
+                f"Trading account {trading_account_id} has incomplete credentials "
+                "(api_key or access_token missing)"
+            )
+
+        # Detect tier
+        tier_str, market_data_available, detection_method = await SubscriptionTierDetector.detect_tier(
+            api_key=api_key,
+            access_token=access_token
+        )
+
+        # Convert string to enum
+        tier_enum = SubscriptionTierEnum(tier_str)
+
+        # Update database
+        account.subscription_tier = tier_enum
+        account.market_data_available = market_data_available
+        account.subscription_tier_last_checked = datetime.utcnow()
+
+        self.db.commit()
+        self.db.refresh(account)
+
+        return {
+            "trading_account_id": trading_account_id,
+            "subscription_tier": tier_str,
+            "market_data_available": market_data_available,
+            "last_checked": account.subscription_tier_last_checked.isoformat(),
+            "detection_method": detection_method,
+            "message": f"Detected tier: {SubscriptionTierDetector.tier_to_string_description(tier_str)}"
+        }
+
+    async def update_subscription_tier(
+        self,
+        trading_account_id: int,
+        tier: str
+    ) -> Dict[str, Any]:
+        """
+        Manually update subscription tier (for testing/correction).
+
+        Args:
+            trading_account_id: Trading account ID
+            tier: Tier to set (unknown/personal/connect/startup)
+
+        Returns:
+            Dict with updated tier info
+        """
+        account = self.db.query(TradingAccount).filter(
+            TradingAccount.trading_account_id == trading_account_id
+        ).first()
+
+        if not account:
+            raise ValueError(f"Trading account {trading_account_id} not found")
+
+        # Convert string to enum
+        tier_enum = SubscriptionTierEnum(tier)
+
+        # Determine market_data_available based on tier
+        market_data_available = tier in ['connect', 'startup']
+
+        # Update database
+        account.subscription_tier = tier_enum
+        account.market_data_available = market_data_available
+        account.subscription_tier_last_checked = datetime.utcnow()
+
+        self.db.commit()
+        self.db.refresh(account)
+
+        return {
+            "trading_account_id": trading_account_id,
+            "subscription_tier": tier,
+            "market_data_available": market_data_available,
+            "message": f"Subscription tier manually updated to {tier}"
+        }

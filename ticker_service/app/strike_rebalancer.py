@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from loguru import logger
 
 from .config import get_settings
 from .instrument_registry import instrument_registry
 from .subscription_store import subscription_store
+
+if TYPE_CHECKING:
+    from .services.tick_processor import TickProcessor
 
 
 class StrikeRebalancer:
@@ -25,12 +28,13 @@ class StrikeRebalancer:
     Maintains a subscription range of ATM ± (otm_levels * strike_step) for configured expiries.
     """
 
-    def __init__(self):
+    def __init__(self, tick_processor: Optional["TickProcessor"] = None):
         self._settings = get_settings()
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._last_rebalance: Dict[str, datetime] = {}
         self._last_atm: Dict[str, float] = {}
+        self._tick_processor = tick_processor
 
         # Rebalancing configuration
         self._check_interval = 60  # Check every 60 seconds
@@ -154,45 +158,28 @@ class StrikeRebalancer:
         self._last_atm[underlying] = atm
 
     async def _get_underlying_ltp(self, symbol: str) -> Optional[float]:
-        """Get current LTP for underlying from instrument registry cache or tick data."""
-        # Try to get from instrument registry first
+        """Get current LTP for underlying from tick processor's cached price."""
+        # Primary source: Use tick processor's cached underlying price
+        if self._tick_processor:
+            ltp = self._tick_processor.get_last_underlying_price()
+            if ltp and ltp > 0:
+                logger.debug(f"Got underlying LTP from tick processor: {ltp:.2f}")
+                return ltp
+
+        # Fallback: Try to get from instrument registry
         await instrument_registry.initialise()
 
-        # Look for the underlying instrument
+        # Look for the underlying instrument in cache
         for instrument in instrument_registry._cache.values():
             if (
                 instrument.tradingsymbol in [symbol, f"NSE:{symbol}"]
                 or instrument.name == symbol
             ):
-                # Check if we have recent tick data (this would need to be stored somewhere)
-                # For now, return None to trigger subscription based on database query
-                pass
+                if hasattr(instrument, 'last_price') and instrument.last_price:
+                    logger.debug(f"Got underlying LTP from instrument registry: {instrument.last_price:.2f}")
+                    return float(instrument.last_price)
 
-        # Fallback: query database for recent price
-        try:
-            from psycopg_pool import AsyncConnectionPool
-
-            conninfo = self._build_db_conninfo()
-            async with AsyncConnectionPool(conninfo, min_size=1, max_size=2, timeout=5) as pool:
-                async with pool.connection() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            """
-                            SELECT close
-                            FROM minute_bars
-                            WHERE symbol = ANY(%s)
-                              AND resolution = 1
-                            ORDER BY time DESC
-                            LIMIT 1
-                            """,
-                            ([symbol.lower(), symbol.upper(), "nifty50", "nifty"],),
-                        )
-                        row = await cur.fetchone()
-                        if row and row[0]:
-                            return float(row[0])
-        except Exception as exc:
-            logger.error(f"Failed to get LTP for {symbol}: {exc}")
-
+        logger.warning(f"No LTP available for {symbol} - strike rebalancing unavailable")
         return None
 
     async def _get_upcoming_expiries(self, underlying: str) -> List[date]:
@@ -346,18 +333,5 @@ class StrikeRebalancer:
         except Exception as exc:
             logger.error(f"Failed to reload subscriptions: {exc}")
 
-    def _build_db_conninfo(self) -> str:
-        """Build database connection string for querying underlying prices."""
-        parts = [
-            f"host={self._settings.instrument_db_host}",
-            f"port={self._settings.instrument_db_port}",
-            f"dbname={self._settings.instrument_db_name}",
-            f"user={self._settings.instrument_db_user}",
-        ]
-        if self._settings.instrument_db_password:
-            parts.append(f"password={self._settings.instrument_db_password}")
-        return " ".join(parts)
-
-
-# Global instance
+# Global instance (tick_processor will be injected at startup)
 strike_rebalancer = StrikeRebalancer()

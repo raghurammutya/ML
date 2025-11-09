@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useLayoutEffect } from 'react'
 import {
   ResponsiveContainer,
   LineChart,
@@ -12,11 +12,11 @@ import {
 import styles from './SideTabsPanel.module.css'
 import { useMonitorSync } from '../../components/nifty-monitor/MonitorSyncContext'
 import { fetchHistoryBars, HistoryBar } from './analytics'
-import type { FoAnalyticsState, StrikeSeriesLine } from '../../hooks/useFoAnalytics'
+import type { FoAnalyticsState, StrikeSeriesLine, StrikeValuePoint } from '../../hooks/useFoAnalytics'
 
 type Side = 'left' | 'right'
 
-type PanelId = 'Delta' | 'Gamma' | 'Theta' | 'Rho' | 'Vega' | 'IV' | 'OI' | 'PCR'
+type PanelId = 'Delta' | 'Gamma' | 'Theta' | 'Rho' | 'Vega' | 'IV' | 'OI' | 'PCR' | 'Premium' | 'Decay'
 
 interface PanelConfig {
   id: PanelId
@@ -74,17 +74,31 @@ const PANEL_CONFIG: PanelConfig[] = [
     indicator: 'pcr',
     formatter: (value) => (value != null ? value.toFixed(2) : '—'),
   },
+  {
+    id: 'Premium',
+    label: 'Premium',
+    indicator: 'premium',
+    formatter: (value) => (value != null ? value.toFixed(2) : '—'),
+  },
+  {
+    id: 'Decay',
+    label: 'Decay',
+    indicator: 'decay',
+    formatter: (value) => (value != null ? value.toFixed(3) : '—'),
+  },
 ]
-
-interface StrikePoint {
-  strike: number
-  value: number | null
-}
 
 interface DecoratedLine {
   label: string
   color: string
-  points: StrikePoint[]
+  points: StrikeValuePoint[]
+  expiry?: string | null
+  metadata?: {
+    total_call_oi?: number | null
+    total_put_oi?: number | null
+    pcr?: number | null
+    max_pain_strike?: number | null
+  }
 }
 
 interface SideTabsPanelProps {
@@ -100,7 +114,7 @@ interface SideTabsPanelProps {
 
 const FALLBACK_COLORS = ['#60a5fa', '#f97316', '#a855f7', '#34d399']
 
-const findClosestPoint = (points: StrikePoint[], targetStrike: number | null): StrikePoint | null => {
+const findClosestPoint = (points: StrikeValuePoint[], targetStrike: number | null): StrikeValuePoint | null => {
   if (!points.length) return null
   if (targetStrike == null) return points[points.length - 1]
   let closest = points[0]
@@ -116,7 +130,7 @@ const findClosestPoint = (points: StrikePoint[], targetStrike: number | null): S
   return closest
 }
 
-const computeStrikeGap = (points: StrikePoint[]): number => {
+const computeStrikeGap = (points: StrikeValuePoint[]): number => {
   if (points.length < 2) return 0
   const ordered = Array.from(new Set(points.map((point) => point.strike))).sort((a, b) => a - b)
   let minGap = Infinity
@@ -149,13 +163,19 @@ const decorateLines = (lines: StrikeSeriesLine[], side: Side, moneynessFilter?: 
     .map((line) => {
       const basePoints = side === 'left' ? line.calls : line.puts
       const points = basePoints
-        .map((point) => ({ strike: point.strike, value: point.value }))
+        .map((point) => ({
+          strike: point.strike,
+          value: point.value,
+          source: point.source,
+        }))
         .filter((point) => point.value != null)
       if (!points.length) {
         return {
           label: line.label ?? line.expiry,
           color: line.color,
           points,
+          expiry: line.expiry,
+          metadata: line.metadata,
         }
       }
       const strikeGap = computeStrikeGap(points)
@@ -165,12 +185,20 @@ const decorateLines = (lines: StrikeSeriesLine[], side: Side, moneynessFilter?: 
         null
       const filteredPoints =
         moneynessFilter && moneynessFilter.size
-          ? points.filter((point) => moneynessFilter.has(resolveMoneynessBucket(point.strike, atmReference, strikeGap, side)))
+          ? points.filter((point) => {
+              const bucket =
+                point.source?.moneyness_bucket ??
+                point.source?.moneyness ??
+                resolveMoneynessBucket(point.strike, atmReference, strikeGap, side)
+              return moneynessFilter.has(bucket)
+            })
           : points
       return {
         label: line.label ?? line.expiry,
         color: line.color,
         points: filteredPoints,
+        expiry: line.expiry,
+        metadata: line.metadata,
       }
     })
     .filter((line) => line.points.length > 0)
@@ -227,6 +255,14 @@ const computeStrikeDomain = (
   return [min, max]
 }
 
+const formatCompact = (value: number | null, digits = 2): string => {
+  if (value == null || Number.isNaN(value)) return '—'
+  return new Intl.NumberFormat('en-IN', {
+    notation: 'compact',
+    maximumFractionDigits: digits,
+  }).format(value)
+}
+
 const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
   symbol,
   timeframe,
@@ -237,6 +273,41 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
   visibleExpiries,
   visibleMoneyness,
 }) => {
+  const holderRef = useRef<HTMLDivElement | null>(null)
+  const [holderSize, setHolderSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
+  useLayoutEffect(() => {
+    if (!holderRef.current) return
+    const element = holderRef.current
+    const update = (rect: DOMRect | ResizeObserverSize) => {
+      const width = 'inlineSize' in rect ? rect.inlineSize : rect.width
+      const height = 'blockSize' in rect ? rect.blockSize : rect.height
+      setHolderSize((prev) => {
+        const rounded = { width, height }
+        const ignoreZeroWidth = width < 1 && prev.width > 1
+        if (ignoreZeroWidth) {
+          return prev
+        }
+        console.info(`[SideTabsPanel] ${title}(${side}) holder size`, {
+          width: Math.round(width),
+          height: Math.round(height),
+        })
+        return rounded
+      })
+    }
+    const initialRect = element.getBoundingClientRect()
+    update(initialRect)
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver((entries) => {
+        if (entries[0]) {
+          update(entries[0].contentRect)
+        }
+      })
+      observer.observe(element)
+    }
+    return () => observer?.disconnect()
+  }, [side, title])
+
   const { crosshairTime, priceRange, crosshairPrice } = useMonitorSync()
   const [bars, setBars] = useState<HistoryBar[]>([])
   const [activeId, setActiveId] = useState<PanelId>(PANEL_CONFIG[0].id)
@@ -290,6 +361,44 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
   }, [analytics.expiries, side, visibleExpiries])
 
   const activeLines = decoratedLines.length ? decoratedLines : fallbackLines
+  const containerCollapsed = holderSize.width < 120 || holderSize.height < 160
+  const debugLineData = useMemo(
+    () => [
+      { strike: -1, probe: -1 },
+      { strike: 0, probe: 0 },
+      { strike: 1, probe: 1 },
+    ],
+    [],
+  )
+
+  const { chartData, seriesMeta } = useMemo(() => {
+    const strikeMap = new Map<number, Record<string, number | null>>()
+    const meta: Array<{ key: string; label: string; color: string }> = []
+    activeLines.forEach((line, index) => {
+      const rawLabel = line.label ?? line.expiry ?? `Series ${index + 1}`
+      const safeKey =
+        `${rawLabel}-${index}`
+          .replace(/\s+/g, '_')
+          .replace(/[^a-zA-Z0-9_-]/g, '_')
+      meta.push({ key: safeKey, label: rawLabel, color: line.color })
+      line.points.forEach((point) => {
+        if (!strikeMap.has(point.strike)) {
+          strikeMap.set(point.strike, { strike: point.strike })
+        }
+        strikeMap.get(point.strike)![safeKey] = point.value ?? null
+      })
+    })
+    const ordered = Array.from(strikeMap.keys()).sort((a, b) => a - b)
+    const rows = ordered.map((strike) => strikeMap.get(strike)!)
+    return { chartData: rows, seriesMeta: meta }
+  }, [activeLines])
+
+  const safeChartData = chartData.length >= 2 ? chartData : [...chartData]
+  if (safeChartData.length < 2) {
+    const placeholderKey = seriesMeta[0]?.key ?? 'series_placeholder'
+    safeChartData.push({ strike: -1, [placeholderKey]: -1 })
+    safeChartData.push({ strike: 1, [placeholderKey]: 1 })
+  }
 
   const strikeDomain = useMemo(
     () => computeStrikeDomain(activeLines, priceRange),
@@ -314,6 +423,26 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
   const displayValue = useMemo(
     () => activeConfig.formatter(targetPoint?.value ?? null),
     [activeConfig, targetPoint],
+  )
+
+  const summaryRows = useMemo(
+    () =>
+      activeLines
+        .map((line) => ({
+          label: line.label ?? line.expiry ?? 'Series',
+          color: line.color,
+          callOi: line.metadata?.total_call_oi ?? null,
+          putOi: line.metadata?.total_put_oi ?? null,
+          pcr: line.metadata?.pcr ?? null,
+          maxPain: line.metadata?.max_pain_strike ?? null,
+        }))
+        .filter(
+          (row) =>
+            row.callOi != null ||
+            row.putOi != null ||
+            (side === 'right' && (row.pcr != null || row.maxPain != null)),
+        ),
+    [activeLines, side],
   )
 
   const matchingBar = useMemo(() => {
@@ -360,7 +489,11 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
             </button>
           ))}
         </div>
-        <div className={`${styles.chartHolder} ${side === 'right' ? styles.chartHolderRight : styles.chartHolderLeft}`} style={chartStyle}>
+        <div
+          ref={holderRef}
+          className={`${styles.chartHolder} ${side === 'right' ? styles.chartHolderRight : styles.chartHolderLeft}`}
+          style={chartStyle}
+        >
           {activeLines.length > 0 && (
             <div className={styles.overlayTop}>
               <div className={styles.valueLine} style={{ color: valueColor }}>
@@ -373,9 +506,19 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
             </div>
           )}
 
-          {activeLines.length ? (
+          {containerCollapsed ? (
+            <div className={styles.debugNotice}>
+              <p>Chart area is {Math.round(holderSize.width)}×{Math.round(holderSize.height)}px. Rendering fixed-size probe.</p>
+              <LineChart width={360} height={220} data={debugLineData} margin={{ top: 12, right: 18, bottom: 12, left: 18 }}>
+                <CartesianGrid strokeDasharray="4 4" />
+                <XAxis dataKey="strike" />
+                <YAxis />
+                <Line type="monotone" dataKey="probe" stroke="#38bdf8" strokeWidth={2} dot />
+              </LineChart>
+            </div>
+          ) : activeLines.length ? (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart layout="vertical" margin={{ top: 2, right: 4, bottom: 2, left: 6 }}>
+              <LineChart data={safeChartData} layout="vertical" margin={{ top: 2, right: 4, bottom: 2, left: 6 }}>
                 <CartesianGrid stroke="rgba(148, 163, 184, 0.12)" horizontal={false} />
                 <XAxis
                   type="number"
@@ -423,16 +566,15 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
                     })}`
                   }
                 />
-                {activeLines.map((line) => (
+                {seriesMeta.map((series) => (
                   <Line
-                    key={line.label}
+                    key={series.key}
                     type="monotone"
-                    data={line.points}
-                    dataKey="value"
-                    stroke={line.color}
+                    dataKey={series.key}
+                    stroke={series.color}
                     strokeWidth={2}
                     dot={false}
-                    name={line.label}
+                    name={series.label}
                     isAnimationActive={false}
                   />
                 ))}
@@ -444,6 +586,45 @@ const SideTabsPanel: React.FC<SideTabsPanelProps> = ({
             </div>
           )}
         </div>
+
+        {summaryRows.length > 0 && (
+          <div className={styles.summaryRow}>
+            {summaryRows.map((row) => (
+              <div key={row.label} className={styles.summaryItem}>
+                <div className={styles.summaryItemHeader}>
+                  <span className={styles.summaryDot} style={{ background: row.color }} />
+                  <span className={styles.summaryLabel}>{row.label}</span>
+                </div>
+                {row.callOi != null && (
+                  <div className={styles.summaryMetricRow}>
+                    <span>Call OI</span>
+                    <strong className={styles.summaryValue}>{formatCompact(row.callOi, 2)}</strong>
+                  </div>
+                )}
+                {row.putOi != null && (
+                  <div className={styles.summaryMetricRow}>
+                    <span>Put OI</span>
+                    <strong className={styles.summaryValue}>{formatCompact(row.putOi, 2)}</strong>
+                  </div>
+                )}
+                {side === 'right' && row.pcr != null && (
+                  <div className={styles.summaryMetricRow}>
+                    <span>PCR</span>
+                    <strong className={styles.summaryValue}>{row.pcr.toFixed(2)}</strong>
+                  </div>
+                )}
+                {side === 'right' && row.maxPain != null && (
+                  <div className={styles.summaryMetricRow}>
+                    <span>Max Pain</span>
+                    <strong className={styles.summaryValue}>
+                      {row.maxPain.toLocaleString('en-IN')}
+                    </strong>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

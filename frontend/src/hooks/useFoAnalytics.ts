@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AxiosError } from 'axios'
 import {
-  fetchFoExpiriesV2,
+  fetchFoExpiries,
   fetchFoMoneynessSeries,
   fetchFoStrikeDistribution,
 } from '../services/fo'
@@ -87,9 +87,11 @@ const INDICATOR_MAP: Record<string, string> = {
   Vega: 'vega',
   OI: 'oi',
   PCR: 'pcr',
+  Premium: 'premium',
+  Decay: 'decay',
 }
 
-const STRIKE_INDICATORS = ['delta', 'gamma', 'theta', 'rho', 'vega', 'iv', 'oi', 'pcr'] as const
+const STRIKE_INDICATORS = ['delta', 'gamma', 'theta', 'rho', 'vega', 'iv', 'oi', 'pcr', 'premium', 'decay'] as const
 
 const EXPIRY_COLORS = [
   '#60a5fa',
@@ -104,7 +106,20 @@ const EXPIRY_COLORS = [
 
 type StrikeIndicator = typeof STRIKE_INDICATORS[number]
 
-type StrikeValueSource = Partial<Record<StrikeIndicator | 'value', number | null | undefined>>
+type StrikeValueSource = Partial<Record<StrikeIndicator | 'value', number | null | undefined>> & {
+  premium_ltp?: number | null
+  daily_theta?: number | null
+  moneyness?: string | null
+  moneyness_bucket?: string | null
+  oi?: number | null
+  oi_change?: number | null
+}
+
+export interface StrikeValuePoint {
+  strike: number
+  value: number | null
+  source?: StrikeValueSource | null
+}
 
 export interface MoneynessLine {
   expiry: string
@@ -120,10 +135,14 @@ export interface StrikeSeriesLine {
   expiry: string
   label: string | null
   color: string
-  calls: { strike: number; value: number | null }[]
-  puts: { strike: number; value: number | null }[]
+  calls: StrikeValuePoint[]
+  puts: StrikeValuePoint[]
   metadata?: {
     atm_strike?: number | null
+    total_call_oi?: number | null
+    total_put_oi?: number | null
+    pcr?: number | null
+    max_pain_strike?: number | null
   }
 }
 
@@ -161,6 +180,8 @@ const defaultState: FoAnalyticsState = {
     iv: [],
     oi: [],
     pcr: [],
+    premium: [],
+    decay: [],
   },
   radar: [],
 }
@@ -215,6 +236,8 @@ const createEmptyStrikePanel = (): StrikePanelData => ({
   iv: [],
   oi: [],
   pcr: [],
+  premium: [],
+  decay: [],
 })
 
 const MONEYNESS_BUCKETS_ORDER: string[] = [
@@ -275,6 +298,8 @@ const extractIndicatorValue = (indicator: StrikeIndicator, entry: StrikeValueSou
     case 'iv':
     case 'oi':
     case 'pcr':
+    case 'premium':
+    case 'decay':
       {
         const candidate = entry[indicator]
         if (typeof candidate === 'number') {
@@ -287,6 +312,12 @@ const extractIndicatorValue = (indicator: StrikeIndicator, entry: StrikeValueSou
   }
   if (typeof entry.value === 'number') {
     return entry.value
+  }
+  if (indicator === 'premium') {
+    if (typeof entry.premium_ltp === 'number') return entry.premium_ltp
+  }
+  if (indicator === 'decay' && typeof entry.daily_theta === 'number') {
+    return entry.daily_theta
   }
   return null
 }
@@ -402,6 +433,7 @@ const toStrikeLines = (
       .map(({ strike, raw }) => ({
         strike,
         value: extractIndicatorValue(indicator, raw),
+        source: raw,
       }))
       .filter((entry) => entry.value != null)
 
@@ -409,6 +441,7 @@ const toStrikeLines = (
       .map(({ strike, raw }) => ({
         strike,
         value: extractIndicatorValue(indicator, raw),
+        source: raw,
       }))
       .filter((entry) => entry.value != null)
 
@@ -441,6 +474,10 @@ const toStrikeLines = (
         puts: seededPuts,
         metadata: {
           atm_strike: series.metadata?.atm_strike ?? null,
+          total_call_oi: series.metadata?.total_call_oi ?? null,
+          total_put_oi: series.metadata?.total_put_oi ?? null,
+          pcr: series.metadata?.pcr ?? null,
+          max_pain_strike: series.metadata?.max_pain_strike ?? null,
         },
       })
     }
@@ -479,9 +516,34 @@ export const useFoAnalytics = (symbol: string, timeframe: string): FoAnalyticsSt
           loading: prev.expiries.length === 0,
           error: null,
         }))
-        const expiriesResponse = await fetchFoExpiriesV2(symbol)
+        // Use v1 endpoint for now as v2 might not be deployed
+        const expiriesV1Response = await fetchFoExpiries(symbol)
         const today = new Date()
         today.setUTCHours(0, 0, 0, 0)
+        
+        // Convert v1 response to v2 format
+        const expiriesResponse = {
+          symbol: expiriesV1Response.symbol,
+          expiries: expiriesV1Response.expiries.map((expiryDate: string, index: number) => {
+            const date = new Date(`${expiryDate}T00:00:00Z`)
+            const isLastThursday = () => {
+              const nextWeek = new Date(date)
+              nextWeek.setDate(date.getDate() + 7)
+              return nextWeek.getMonth() !== date.getMonth()
+            }
+            return {
+              date: expiryDate,
+              is_weekly: !isLastThursday(),
+              is_monthly: isLastThursday(),
+              is_quarterly: false,
+              days_to_expiry: Math.ceil((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)),
+              relative_label_today: isLastThursday() ? `NMonth+${Math.floor(index / 4)}` : `NWeek+${index % 4}`,
+              relative_rank: index,
+              relative_label_timestamp: []
+            }
+          })
+        }
+        
         const filteredExpiries = expiriesResponse.expiries.filter((detail) => {
           const iso = detail.date
           const date = new Date(`${iso}T00:00:00Z`)
@@ -529,13 +591,39 @@ export const useFoAnalytics = (symbol: string, timeframe: string): FoAnalyticsSt
 
         const strikePromises = STRIKE_INDICATORS.map(async (indicator: StrikeIndicator) => {
           try {
-            const response = await fetchFoStrikeDistribution({
-              symbol,
-              timeframe,
-              indicator,
-              expiry: expiries,
-            })
-            return { indicator, response }
+            // Fetch call and put data separately for better separation
+            const [callResponse, putResponse] = await Promise.all([
+              fetchFoStrikeDistribution({
+                symbol,
+                timeframe,
+                indicator,
+                option_side: 'call',
+                expiry: expiries,
+              }),
+              fetchFoStrikeDistribution({
+                symbol,
+                timeframe,
+                indicator,
+                option_side: 'put',
+                expiry: expiries,
+              })
+            ])
+            
+            // Merge the responses to maintain backward compatibility
+            const mergedResponse = {
+              ...callResponse,
+              series: callResponse.series.map((callSeries, index) => {
+                const putSeries = putResponse.series[index]
+                return {
+                  ...callSeries,
+                  call: callSeries.call || [],
+                  put: putSeries?.put || [],
+                  points: callSeries.points || putSeries?.points || [] // For backward compatibility
+                }
+              })
+            }
+            
+            return { indicator, response: mergedResponse }
           } catch (error) {
             if (!isHttpStatus(error, 400)) {
               console.error(`[useFoAnalytics] strike fetch failed for ${indicator}`, error)

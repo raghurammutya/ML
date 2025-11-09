@@ -4,11 +4,19 @@ import asyncio
 from typing import Optional
 
 from loguru import logger
+from prometheus_client import Counter, Gauge
 
 import redis.asyncio as redis
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from .config import get_settings
+from .utils.circuit_breaker import CircuitBreaker, CircuitState
+
+# Prometheus metrics
+redis_publish_total = Counter("redis_publish_total", "Total Redis publish attempts")
+redis_publish_failures = Counter("redis_publish_failures", "Total Redis publish failures")
+redis_circuit_open_drops = Counter("redis_circuit_open_drops", "Messages dropped when circuit open")
+redis_circuit_state = Gauge("redis_circuit_state", "Circuit breaker state (0=closed, 1=open, 2=half_open)")
 
 
 class RedisPublisher:
@@ -16,6 +24,14 @@ class RedisPublisher:
         self._settings = get_settings()
         self._client: Optional[redis.Redis] = None
         self._lock = asyncio.Lock()
+
+        # Circuit breaker for fault tolerance
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=10,
+            recovery_timeout_seconds=60.0,
+            half_open_max_attempts=3,
+            name="redis_publisher",
+        )
 
     async def connect(self) -> None:
         if self._client:
@@ -41,14 +57,36 @@ class RedisPublisher:
                 logger.info("Redis connection closed")
 
     async def publish(self, channel: str, message: str) -> None:
+        redis_publish_total.inc()
+
+        # Update circuit state metric
+        state = self._circuit_breaker.get_state()
+        redis_circuit_state.set(
+            0 if state == CircuitState.CLOSED else 1 if state == CircuitState.OPEN else 2
+        )
+
+        # Check circuit state
+        if not await self._circuit_breaker.can_execute():
+            # Circuit OPEN - drop message gracefully
+            redis_circuit_open_drops.inc()
+            logger.warning(
+                f"Redis circuit breaker OPEN, dropping message | channel={channel} size={len(message)}"
+            )
+            return  # DON'T block streaming!
+
         if not self._client:
             await self.connect()
         if not self._client:
-            raise RuntimeError("Redis client not initialized")
+            logger.error("Redis client not initialized, dropping message")
+            redis_publish_failures.inc()
+            await self._circuit_breaker.record_failure()
+            return  # Drop, don't raise
 
+        # Attempt publish with retries
         for attempt in (1, 2):
             try:
                 await self._client.publish(channel, message)
+                await self._circuit_breaker.record_success()
                 logger.debug(f"Published message to Redis channel={channel} size={len(message)}")
                 return
             except (RedisConnectionError, RedisTimeoutError) as exc:
@@ -59,7 +97,15 @@ class RedisPublisher:
                     exc,
                 )
                 await self._reset()
-        raise RuntimeError(f"Failed to publish message to {channel} after retries")
+                if attempt == 2:
+                    # Final failure - record in circuit breaker
+                    redis_publish_failures.inc()
+                    await self._circuit_breaker.record_failure(exc)
+                    logger.error(
+                        f"Redis publish failed after retries, circuit may open | "
+                        f"channel={channel} error={exc}"
+                    )
+                    return  # Drop, don't raise
 
     async def _reset(self) -> None:
         async with self._lock:

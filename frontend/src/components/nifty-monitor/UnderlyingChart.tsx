@@ -234,8 +234,14 @@ const UnderlyingChart = ({
       const bucketTime = normalizeBucketTime(timestampSeconds, timeframe)
       const interval = timeframeToSeconds(timeframe)
       const lastBar = lastBarRef.current
+      const lastBarTime = lastBar ? toEpochSeconds(lastBar.time) : null
 
-      if (lastBar && typeof lastBar.time === 'number' && lastBar.time === bucketTime) {
+      if (lastBarTime != null && bucketTime < lastBarTime) {
+        // Lightweight charts throws if we try to update with an older bucket, so ignore stale ticks
+        return
+      }
+
+      if (lastBar && lastBarTime === bucketTime) {
         const updated: CandlestickData = {
           ...lastBar,
           close: price,
@@ -251,9 +257,7 @@ const UnderlyingChart = ({
       const newBar: CandlestickData = {
         time: bucketTime as Time,
         open:
-          lastBar && typeof lastBar.time === 'number' && bucketTime - lastBar.time <= interval
-            ? lastBar.close
-            : price,
+          lastBar && lastBarTime != null && bucketTime - lastBarTime <= interval ? lastBar.close : price,
         high: Math.max(previousClose, price),
         low: Math.min(previousClose, price),
         close: price,

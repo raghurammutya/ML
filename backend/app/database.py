@@ -919,6 +919,8 @@ class DataManager:
         symbol: str,
         timeframe: str,
         expiries: Optional[List[date]],
+        from_time: Optional[int] = None,
+        to_time: Optional[int] = None,
     ):
         tf = _normalize_timeframe(timeframe)
         symbol_variants = _symbol_variants(symbol)
@@ -926,26 +928,49 @@ class DataManager:
 
         # Build query parameters
         params: List[Any] = [symbol_variants]
+        param_idx = 2
+        
         if expiries:
             params.append(expiries)
-
-        # Query latest data from the appropriate table/view
-        query = f"""
-            WITH latest AS (
-                SELECT expiry, MAX(bucket_time) AS bucket_time
-                FROM {table_name}
-                WHERE symbol = ANY($1::text[])
-                GROUP BY expiry
-            )
-            SELECT s.*
-            FROM {table_name} s
-            JOIN latest l
-              ON s.expiry = l.expiry
-             AND s.bucket_time = l.bucket_time
-            WHERE s.symbol = ANY($1::text[])
-              {"AND s.expiry = ANY($2)" if expiries else ""}
-            ORDER BY s.expiry ASC, s.strike ASC
-        """
+            expiry_clause = f"AND s.expiry = ANY(${param_idx})"
+            param_idx += 1
+        else:
+            expiry_clause = ""
+            
+        # If time range is specified, query within that range
+        if from_time is not None and to_time is not None:
+            from_dt = datetime.fromtimestamp(from_time, tz=timezone.utc)
+            to_dt = datetime.fromtimestamp(to_time, tz=timezone.utc)
+            params.extend([from_dt, to_dt])
+            
+            query = f"""
+                SELECT s.*
+                FROM {table_name} s
+                WHERE s.symbol = ANY($1::text[])
+                  {expiry_clause}
+                  AND s.bucket_time >= ${param_idx}
+                  AND s.bucket_time <= ${param_idx + 1}
+                ORDER BY s.bucket_time DESC, s.expiry ASC, s.strike ASC
+            """
+        else:
+            # Query latest data from the appropriate table/view
+            query = f"""
+                WITH latest AS (
+                    SELECT expiry, MAX(bucket_time) AS bucket_time
+                    FROM {table_name}
+                    WHERE symbol = ANY($1::text[])
+                    GROUP BY expiry
+                )
+                SELECT s.*
+                FROM {table_name} s
+                JOIN latest l
+                  ON s.expiry = l.expiry
+                 AND s.bucket_time = l.bucket_time
+                WHERE s.symbol = ANY($1::text[])
+                  {expiry_clause}
+                ORDER BY s.expiry ASC, s.strike ASC
+            """
+            
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, *params)
 
@@ -1615,6 +1640,244 @@ class DataManager:
                 _timeframe_to_resolution(timeframe),
             )
         return row["time"] if row else None
+
+    async def detect_gaps_underlying(
+        self,
+        symbol: str,
+        timeframe: str,
+        lookback_days: int = 30,
+        min_gap_minutes: int = 60
+    ) -> List[tuple[datetime, datetime]]:
+        """
+        Detect gaps in underlying (index/equity) time series data.
+
+        Returns list of (gap_start, gap_end) tuples representing missing data windows.
+        Only detects gaps during trading hours (9:15 AM - 3:30 PM IST, Mon-Fri).
+        """
+        sql = """
+            WITH RECURSIVE
+            -- Get earliest and latest times in lookback window
+            bounds AS (
+                SELECT
+                    MIN(time) as first_time,
+                    MAX(time) as last_time
+                FROM minute_bars
+                WHERE symbol = $1
+                  AND resolution = $2
+                  AND time >= NOW() - INTERVAL '1 day' * $3
+            ),
+            -- Generate expected timestamps (every minute during trading hours)
+            expected_times AS (
+                SELECT generate_series(
+                    (SELECT first_time FROM bounds),
+                    (SELECT last_time FROM bounds),
+                    INTERVAL '1 minute'
+                ) AS expected_time
+            ),
+            -- Find missing timestamps
+            missing AS (
+                SELECT expected_time
+                FROM expected_times
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM minute_bars
+                    WHERE symbol = $1
+                      AND resolution = $2
+                      AND time = expected_time
+                )
+                -- Only consider trading hours: 9:15 AM - 3:30 PM IST
+                -- Time is stored in UTC, so convert to IST for validation
+                -- Trading hours: 9:15 to 15:30 IST = 555 to 930 minutes from midnight
+                AND EXTRACT(DOW FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) BETWEEN 1 AND 5  -- Monday to Friday
+                AND (
+                    EXTRACT(HOUR FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) * 60 +
+                    EXTRACT(MINUTE FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'))
+                ) BETWEEN 555 AND 930  -- 9:15 to 15:30 in minutes
+            ),
+            -- Group consecutive missing times into gaps
+            gap_groups AS (
+                SELECT
+                    expected_time,
+                    expected_time - (ROW_NUMBER() OVER (ORDER BY expected_time) * INTERVAL '1 minute') as gap_group
+                FROM missing
+            ),
+            -- Aggregate gaps
+            gaps AS (
+                SELECT
+                    MIN(expected_time) as gap_start,
+                    MAX(expected_time) as gap_end,
+                    COUNT(*) as missing_count
+                FROM gap_groups
+                GROUP BY gap_group
+                HAVING COUNT(*) >= $4  -- Minimum gap size in minutes
+            )
+            SELECT gap_start, gap_end, missing_count
+            FROM gaps
+            ORDER BY gap_start;
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                _normalize_symbol(symbol),
+                _timeframe_to_resolution(timeframe),
+                lookback_days,
+                min_gap_minutes
+            )
+
+        return [(row["gap_start"], row["gap_end"]) for row in rows]
+
+    async def detect_gaps_options(
+        self,
+        symbol: str,
+        timeframe: str,
+        lookback_days: int = 30,
+        min_gap_minutes: int = 60
+    ) -> List[tuple[datetime, datetime]]:
+        """
+        Detect gaps in options time series data (fo_option_strike_bars).
+
+        Returns list of (gap_start, gap_end) tuples representing missing data windows.
+        """
+        sql = """
+            WITH RECURSIVE
+            bounds AS (
+                SELECT
+                    MIN(bucket_time) as first_time,
+                    MAX(bucket_time) as last_time
+                FROM fo_option_strike_bars
+                WHERE symbol = $1
+                  AND timeframe = $2
+                  AND bucket_time >= NOW() - INTERVAL '1 day' * $3
+            ),
+            expected_times AS (
+                SELECT generate_series(
+                    (SELECT first_time FROM bounds),
+                    (SELECT last_time FROM bounds),
+                    INTERVAL '1 minute'
+                ) AS expected_time
+            ),
+            missing AS (
+                SELECT expected_time
+                FROM expected_times
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM fo_option_strike_bars
+                    WHERE symbol = $1
+                      AND timeframe = $2
+                      AND bucket_time = expected_time
+                )
+                AND EXTRACT(DOW FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) BETWEEN 1 AND 5
+                AND (
+                    EXTRACT(HOUR FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) * 60 +
+                    EXTRACT(MINUTE FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'))
+                ) BETWEEN 555 AND 930
+            ),
+            gap_groups AS (
+                SELECT
+                    expected_time,
+                    expected_time - (ROW_NUMBER() OVER (ORDER BY expected_time) * INTERVAL '1 minute') as gap_group
+                FROM missing
+            ),
+            gaps AS (
+                SELECT
+                    MIN(expected_time) as gap_start,
+                    MAX(expected_time) as gap_end,
+                    COUNT(*) as missing_count
+                FROM gap_groups
+                GROUP BY gap_group
+                HAVING COUNT(*) >= $4
+            )
+            SELECT gap_start, gap_end, missing_count
+            FROM gaps
+            ORDER BY gap_start;
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                _normalize_symbol(symbol),
+                _normalize_timeframe(timeframe),
+                lookback_days,
+                min_gap_minutes
+            )
+
+        return [(row["gap_start"], row["gap_end"]) for row in rows]
+
+    async def detect_gaps_futures(
+        self,
+        symbol: str,
+        contract: str,
+        timeframe: str,
+        lookback_days: int = 30,
+        min_gap_minutes: int = 60
+    ) -> List[tuple[datetime, datetime]]:
+        """
+        Detect gaps in futures time series data.
+
+        Returns list of (gap_start, gap_end) tuples representing missing data windows.
+        """
+        sql = """
+            WITH RECURSIVE
+            bounds AS (
+                SELECT
+                    MIN(time) as first_time,
+                    MAX(time) as last_time
+                FROM futures_bars
+                WHERE symbol = $1
+                  AND contract = $2
+                  AND resolution = $3
+                  AND time >= NOW() - INTERVAL '1 day' * $4
+            ),
+            expected_times AS (
+                SELECT generate_series(
+                    (SELECT first_time FROM bounds),
+                    (SELECT last_time FROM bounds),
+                    INTERVAL '1 minute'
+                ) AS expected_time
+            ),
+            missing AS (
+                SELECT expected_time
+                FROM expected_times
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM futures_bars
+                    WHERE symbol = $1
+                      AND contract = $2
+                      AND resolution = $3
+                      AND time = expected_time
+                )
+                AND EXTRACT(DOW FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) BETWEEN 1 AND 5
+                AND (
+                    EXTRACT(HOUR FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')) * 60 +
+                    EXTRACT(MINUTE FROM (expected_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'))
+                ) BETWEEN 555 AND 930
+            ),
+            gap_groups AS (
+                SELECT
+                    expected_time,
+                    expected_time - (ROW_NUMBER() OVER (ORDER BY expected_time) * INTERVAL '1 minute') as gap_group
+                FROM missing
+            ),
+            gaps AS (
+                SELECT
+                    MIN(expected_time) as gap_start,
+                    MAX(expected_time) as gap_end,
+                    COUNT(*) as missing_count
+                FROM gap_groups
+                GROUP BY gap_group
+                HAVING COUNT(*) >= $5
+            )
+            SELECT gap_start, gap_end, missing_count
+            FROM gaps
+            ORDER BY gap_start;
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                sql,
+                _normalize_symbol(symbol),
+                contract,
+                _timeframe_to_resolution(timeframe),
+                lookback_days,
+                min_gap_minutes
+            )
+
+        return [(row["gap_start"], row["gap_end"]) for row in rows]
 
 # -----------------------------
 # Background refresh task expected by main.py

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Iterable
+from typing import Any, Dict, List, Optional
 
 from zoneinfo import ZoneInfo
 
@@ -14,45 +13,20 @@ from loguru import logger
 from .accounts import SessionOrchestrator
 from .config import get_settings
 from .instrument_registry import instrument_registry
-from .subscription_store import SubscriptionRecord, subscription_store
+from .subscription_store import subscription_store
 from .kite.client import KiteClient
 from .publisher import publish_option_snapshot, publish_underlying_bar
 from .schema import Instrument, OptionSnapshot, DepthLevel, MarketDepth
 from .greeks_calculator import GreeksCalculator
 from .utils.symbol_utils import normalize_symbol
+from .services.mock_generator import MockDataGenerator
+from .services.subscription_reconciler import SubscriptionReconciler
+from .services.historical_bootstrapper import HistoricalBootstrapper
+from .services.tick_processor import TickProcessor
+from .services.tick_batcher import TickBatcher  # NEW: Phase 4 batching
+from .services.tick_validator import TickValidator  # NEW: Phase 4 validation
 
 settings = get_settings()
-
-
-@dataclass
-class SubscriptionPlanItem:
-    record: SubscriptionRecord
-    instrument: Instrument
-
-
-@dataclass
-class MockOptionState:
-    instrument: Instrument
-    base_price: float
-    last_price: float
-    base_volume: int
-    base_oi: int
-    iv: float
-    delta: float
-    gamma: float
-    theta: float
-    vega: float
-
-
-@dataclass
-class MockUnderlyingState:
-    symbol: str
-    base_open: float
-    base_high: float
-    base_low: float
-    base_close: float
-    base_volume: int
-    last_close: float
 
 
 def _to_iso(value: Optional[datetime]) -> Optional[str]:
@@ -68,8 +42,15 @@ class MultiAccountTickerLoop:
     Supervises the option streaming flow across every configured Kite account.
     """
 
-    def __init__(self, orchestrator: SessionOrchestrator | None = None) -> None:
+    def __init__(
+        self,
+        orchestrator: SessionOrchestrator | None = None,
+        task_monitor: Optional[Any] = None,  # TaskMonitor for exception handling
+        mock_generator: Optional[MockDataGenerator] = None,  # NEW: Injected mock data generator
+        tick_processor: Optional[TickProcessor] = None,  # NEW: Injected tick processor
+    ) -> None:
         self._orchestrator = orchestrator
+        self._task_monitor = task_monitor
         self._settings = get_settings()
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
@@ -85,18 +66,52 @@ class MultiAccountTickerLoop:
         except Exception:
             logger.warning("Invalid timezone %s; falling back to UTC", settings.market_timezone)
             self._market_tz = timezone.utc
-        self._mock_option_state: Dict[int, MockOptionState] = {}
-        self._mock_underlying_state: MockUnderlyingState | None = None
-        self._mock_seed_lock = asyncio.Lock()
-        self._historical_bootstrap_done: Dict[str, bool] = {}
+
+        self._cleanup_task: asyncio.Task | None = None
         self._last_market_state: Optional[bool] = None
         self._last_underlying_price: float | None = None
+
+        # Initialize Greeks calculator
         self._greeks_calculator = GreeksCalculator(
             interest_rate=self._settings.option_greeks_interest_rate,
             dividend_yield=self._settings.option_greeks_dividend_yield,
             expiry_time_hour=self._settings.option_expiry_time_hour,
             expiry_time_minute=self._settings.option_expiry_time_minute,
             market_timezone=self._settings.market_timezone,
+        )
+
+        # NEW: Initialize mock data generator (injected or created)
+        self._mock_generator = mock_generator or MockDataGenerator(
+            greeks_calculator=self._greeks_calculator,
+            market_tz=self._market_tz,
+            max_size=settings.mock_state_max_size,
+        )
+
+        # NEW: Initialize subscription reconciler
+        self._reconciler = SubscriptionReconciler(market_tz=self._market_tz)
+
+        # NEW: Initialize historical bootstrapper
+        self._bootstrapper = HistoricalBootstrapper()
+
+        # NEW: Initialize tick batcher (Phase 4)
+        self._tick_batcher = TickBatcher(
+            window_ms=self._settings.tick_batch_window_ms,
+            max_batch_size=self._settings.tick_batch_max_size,
+            enabled=self._settings.tick_batch_enabled,
+        )
+
+        # NEW: Initialize tick validator (Phase 4)
+        self._tick_validator = TickValidator(
+            strict_mode=self._settings.tick_validation_strict,
+            enabled=self._settings.tick_validation_enabled,
+        )
+
+        # NEW: Initialize tick processor (injected or created)
+        self._tick_processor = tick_processor or TickProcessor(
+            greeks_calculator=self._greeks_calculator,
+            market_tz=self._market_tz,
+            batcher=self._tick_batcher,
+            validator=self._tick_validator,
         )
 
     async def start(self) -> None:
@@ -122,7 +137,7 @@ class MultiAccountTickerLoop:
 
         # Step 2: Initialize subscription store and load plan
         await subscription_store.initialise()
-        plan_items = await self._load_subscription_plan()
+        plan_items = await self._reconciler.load_subscription_plan()
         if not plan_items:
             self._assignments = {}
             self._running = False
@@ -142,7 +157,7 @@ class MultiAccountTickerLoop:
             raise RuntimeError("No Kite accounts authenticated successfully; unable to start streaming.")
 
         # Step 4: Build assignments
-        assignments = await self._build_assignments(plan_items, available_accounts)
+        assignments = await self._reconciler.build_assignments(plan_items, available_accounts)
         if not assignments:
             self._assignments = {}
             self._running = False
@@ -154,16 +169,57 @@ class MultiAccountTickerLoop:
         self._assignments = assignments
         self._running = True
         self._started_at = time.time()
-        self._underlying_task = asyncio.create_task(self._stream_underlying())
+
+        # NEW: Create underlying task with monitoring
+        if self._task_monitor:
+            self._underlying_task = self._task_monitor.create_monitored_task(
+                self._stream_underlying(),
+                task_name="stream_underlying",
+                on_error=self._on_underlying_stream_error,
+            )
+        else:
+            # Fallback if no task monitor provided
+            self._underlying_task = asyncio.create_task(self._stream_underlying())
+            logger.warning("Task monitor not available - using unmonitored underlying task")
+
         self._historical_bootstrap_done = {}
 
         for account_id, acc_instruments in assignments.items():
-            task = asyncio.create_task(self._stream_account(account_id, acc_instruments))
+            # NEW: Create account tasks with monitoring
+            if self._task_monitor:
+                task = self._task_monitor.create_monitored_task(
+                    self._stream_account(account_id, acc_instruments),
+                    task_name=f"stream_account_{account_id}",
+                    on_error=lambda exc, aid=account_id: self._on_account_stream_error(aid, exc),
+                )
+            else:
+                task = asyncio.create_task(self._stream_account(account_id, acc_instruments))
+                logger.warning(f"Creating unmonitored task for account {account_id}")
+
             logger.debug("Streaming task created for %s instruments=%d", account_id, len(acc_instruments))
             self._account_tasks[account_id] = task
 
         # Step 6: Start periodic registry refresh
         self._start_periodic_registry_refresh()
+
+        # NEW: Initialize and start subscription reloader
+        self._reconciler.initialize_reloader(self._perform_reload)
+        await self._reconciler.start_reloader()
+
+        # NEW: Start tick batcher (Phase 4)
+        await self._tick_batcher.start()
+        logger.info("Tick batcher started")
+
+        # NEW: Start mock state cleanup task
+        if self._task_monitor:
+            self._cleanup_task = self._task_monitor.create_monitored_task(
+                self._mock_state_cleanup_loop(),
+                task_name="mock_state_cleanup"
+            )
+            logger.info("Mock state cleanup task started")
+        else:
+            self._cleanup_task = asyncio.create_task(self._mock_state_cleanup_loop())
+            logger.warning("Mock cleanup task created without monitoring")
 
         logger.info(
             "Ticker loop live | accounts=%s",
@@ -184,40 +240,97 @@ class MultiAccountTickerLoop:
             except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
                 pass
             self._registry_refresh_task = None
+
+        # NEW: Stop subscription reloader
+        await self._reconciler.stop_reloader()
+
+        # NEW: Stop tick batcher (Phase 4) - flushes remaining batches
+        await self._tick_batcher.stop()
+        logger.info("Tick batcher stopped")
+
+        # NEW: Stop cleanup task
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
+            logger.info("Mock state cleanup task stopped")
+
         self._account_tasks.clear()
         self._underlying_task = None
         self._running = False
         self._assignments = {}
         self._last_tick_at = {}
         self._started_at = None
-        self._historical_bootstrap_done = {}
-        await self._reset_mock_state()
+        await self._mock_generator.reset_state()  # NEW: Delegate to service
+        self._bootstrapper.reset_bootstrap_state()  # NEW: Delegate to service
         logger.info("Ticker loop stopped")
 
-    async def reload_subscriptions(self) -> None:
+    async def _on_underlying_stream_error(self, exc: Exception) -> None:
+        """Callback when underlying stream task fails"""
+        logger.critical(
+            f"Underlying stream failed critically: {exc}",
+            exc_info=True,
+            extra={"component": "ticker_loop", "stream": "underlying"}
+        )
+        # Optional: Attempt restart
+        # await asyncio.sleep(5.0)
+        # await self.start()
+
+    async def _on_account_stream_error(self, account_id: str, exc: Exception) -> None:
+        """Callback when account stream task fails"""
+        logger.critical(
+            f"Account stream for {account_id} failed critically: {exc}",
+            exc_info=True,
+            extra={"component": "ticker_loop", "account_id": account_id}
+        )
+        # Remove failed task from tracking
+        if account_id in self._account_tasks:
+            del self._account_tasks[account_id]
+        # Optional: Attempt to restart just this account
+        # await asyncio.sleep(5.0)
+        # if account_id in self._assignments:
+        #     task = self._task_monitor.create_monitored_task(
+        #         self._stream_account(account_id, self._assignments[account_id]),
+        #         task_name=f"stream_account_{account_id}",
+        #         on_error=lambda exc: self._on_account_stream_error(account_id, exc),
+        #     )
+        #     self._account_tasks[account_id] = task
+
+    async def _perform_reload(self) -> None:
+        """
+        Internal method: Perform actual subscription reload.
+
+        Called by SubscriptionReloader, not directly.
+        This method stops and restarts the ticker loop to apply new subscriptions.
+        """
         async with self._reconcile_lock:
             if self._running:
                 await self.stop()
             await self.start()
 
+    async def reload_subscriptions(self) -> None:
+        """
+        Public API: Reload subscriptions immediately (blocking).
+
+        For most use cases, prefer reload_subscriptions_async() which is non-blocking.
+        """
+        # Directly call the implementation (bypass reloader for blocking API)
+        await self._reconciler.reload_subscriptions_blocking()
+
     def reload_subscriptions_async(self) -> None:
         """
-        Trigger subscription reload in the background without blocking.
+        Trigger subscription reload in the background without blocking (non-blocking, coalesced).
+
         Returns immediately while the reload happens asynchronously.
+        Multiple rapid calls will be coalesced into a single reload.
 
         Use this for API endpoints to avoid blocking HTTP responses.
         """
-        import asyncio
-
-        async def _reload():
-            try:
-                await self.reload_subscriptions()
-                logger.info("Background subscription reload completed")
-            except Exception as exc:
-                logger.error(f"Background subscription reload failed: {exc}", exc_info=True)
-
-        # Create task in the current event loop
-        asyncio.create_task(_reload())
+        # Trigger reload via reconciler (which uses SubscriptionReloader for rate limiting)
+        self._reconciler.trigger_reload()
 
     async def fetch_history(
         self,
@@ -304,342 +417,52 @@ class MultiAccountTickerLoop:
             self._last_market_state = active
         return active
 
-    async def _reset_mock_state(self) -> None:
-        """Reset mock state with thread-safe locking"""
-        async with self._mock_seed_lock:
-            self._mock_option_state.clear()
-            self._mock_underlying_state = None
-
     async def _ensure_mock_underlying_seed(self, client: KiteClient) -> None:
-        # Quick check without lock for performance
-        if self._mock_underlying_state is not None:
-            return
-
-        async with self._mock_seed_lock:
-            # Double-check pattern: verify state is still None after acquiring lock
-            if self._mock_underlying_state is not None:
-                return
-
-            try:
-                quote = await client.get_quote([settings.nifty_quote_symbol])
-            except Exception as exc:
-                logger.error("Failed to seed mock underlying quote: %s", exc)
-                return
-
-            payload = quote.get(settings.nifty_quote_symbol)
-            if not payload:
-                logger.warning("Mock underlying seed missing quote for %s", settings.nifty_quote_symbol)
-                return
-
-            ohlc = payload.get("ohlc") or {}
-            last_price = float(payload.get("last_price") or ohlc.get("close") or 0.0)
-            if not last_price:
-                logger.warning("Mock underlying seed missing price data for %s", settings.nifty_quote_symbol)
-                return
-
-            base_open = float(ohlc.get("open") or last_price)
-            base_high = float(ohlc.get("high") or last_price)
-            base_low = float(ohlc.get("low") or last_price)
-            base_close = float(ohlc.get("close") or last_price)
-            volume = int(payload.get("volume") or 0)
-            if not volume:
-                volume = 1000
-
-            self._mock_underlying_state = MockUnderlyingState(
-                symbol=settings.fo_underlying or settings.nifty_symbol or "NIFTY",
-                base_open=base_open,
-                base_high=base_high,
-                base_low=base_low,
-                base_close=base_close,
-                base_volume=volume,
-                last_close=base_close,
-            )
-            logger.info("Seeded mock underlying state | symbol=%s close=%.2f volume=%d",
-                        self._mock_underlying_state.symbol,
-                        self._mock_underlying_state.last_close,
-                        self._mock_underlying_state.base_volume)
+        """Delegate to mock generator service"""
+        await self._mock_generator.ensure_underlying_seeded(client)
 
     async def _generate_mock_underlying_bar(self) -> Dict[str, Any]:
-        """Generate mock underlying bar with thread-safe state access"""
-        async with self._mock_seed_lock:
-            state = self._mock_underlying_state
-            if state is None:
-                return {}
-
-            variance = settings.mock_price_variation_bps / 10_000.0
-            drift = random.uniform(-variance, variance)
-            new_close = max(0.01, state.last_close * (1 + drift))
-            open_price = state.last_close
-
-            high = max(open_price, new_close, state.base_high, new_close * (1 + variance))
-            low = min(open_price, new_close, state.base_low, new_close * (1 - variance))
-
-            volume_variance = max(int(state.base_volume * settings.mock_volume_variation), 50)
-            volume = max(0, state.base_volume + random.randint(-volume_variance, volume_variance))
-
-            state.last_close = new_close
-            state.base_close = (state.base_close * 0.9) + (new_close * 0.1)
-            state.base_volume = max(100, int((state.base_volume * 0.8) + (volume * 0.2)))
-
-            return {
-                "symbol": state.symbol,
-                "open": round(open_price, 2),
-                "high": round(high, 2),
-                "low": round(low, 2),
-                "close": round(new_close, 2),
-                "volume": volume,
-                "ts": int(time.time()),
-                "is_mock": False,  # TEMP: Changed from True for testing
-            }
+        """Delegate to mock generator service"""
+        return await self._mock_generator.generate_underlying_bar()
 
     async def _ensure_mock_option_seed(self, client: KiteClient, instruments: Iterable[Instrument]) -> None:
-        missing = [inst for inst in instruments if inst.instrument_token not in self._mock_option_state]
-        if not missing:
-            return
-
-        now = int(time.time())
-        from_ts = now - settings.mock_history_minutes * 60
-        async with self._mock_seed_lock:
-            for instrument in missing:
-                if instrument.instrument_token in self._mock_option_state:
-                    continue
-                state = await self._seed_option_state(client, instrument, from_ts, now)
-                if state:
-                    self._mock_option_state[instrument.instrument_token] = state
-
-    async def _seed_option_state(
-        self,
-        client: KiteClient,
-        instrument: Instrument,
-        from_ts: int,
-        to_ts: int,
-    ) -> Optional[MockOptionState]:
-        try:
-            candles = await client.fetch_historical(
-                instrument_token=instrument.instrument_token,
-                from_ts=from_ts,
-                to_ts=to_ts,
-                interval="minute",
-                oi=True,
-            )
-        except Exception as exc:
-            logger.debug("Historical seed fetch failed for %s (%s): %s", instrument.tradingsymbol, instrument.instrument_token, exc)
-            candles = []
-
-        last_price = 0.0
-        volume = 0
-        oi = 0
-        if candles:
-            last = candles[-1]
-            last_price = float(last.get("close") or 0.0)
-            volume = int(last.get("volume") or 0)
-            oi = int(last.get("oi") or 0)
-
-        tradingsymbol = instrument.tradingsymbol or instrument.symbol
-        if last_price <= 0 and tradingsymbol:
-            candidates = [tradingsymbol]
-            if ":" not in tradingsymbol:
-                candidates.append(f"NFO:{tradingsymbol}")
-            for candidate in candidates:
-                try:
-                    last_price = await client.get_last_price(candidate)
-                    if last_price:
-                        break
-                except Exception:
-                    continue
-
-        if last_price <= 0:
-            # Fallback: Calculate theoretical price for options when live data unavailable
-            logger.info(
-                "No live price data for {} - using theoretical fallback",
-                tradingsymbol or instrument.instrument_token,
-            )
-
-            # Estimate NIFTY spot price (can be improved with actual spot fetch)
-            estimated_spot = 24000.0
-
-            if instrument.strike and instrument.instrument_type in ['CE', 'PE']:
-                strike = float(instrument.strike)
-
-                if instrument.instrument_type == 'CE':
-                    # Call option
-                    intrinsic = max(0, estimated_spot - strike)
-                    time_value = max(10, strike * 0.01)  # 1% time value minimum
-                    last_price = intrinsic + time_value
-                else:
-                    # Put option
-                    intrinsic = max(0, strike - estimated_spot)
-                    time_value = max(10, strike * 0.01)
-                    last_price = intrinsic + time_value
-
-                # Add some randomness
-                last_price *= random.uniform(0.9, 1.1)
-                last_price = max(0.05, last_price)  # Minimum price
-
-                # Estimate volume and OI based on strike distance
-                distance = abs(strike - estimated_spot)
-                if distance < 500:  # ATM/near ATM
-                    volume = random.randint(5000, 20000)
-                    oi = random.randint(50000, 200000)
-                else:  # OTM
-                    volume = random.randint(500, 5000)
-                    oi = random.randint(5000, 50000)
-            else:
-                # For spot/futures, use estimated spot
-                last_price = estimated_spot
-                volume = random.randint(100000, 500000)
-                oi = 0
-
-            logger.debug(
-                "Fallback seed: {} strike={} price={:.2f}",
-                tradingsymbol,
-                instrument.strike if instrument.strike else "N/A",
-                last_price
-            )
-
-        # Calculate Greeks for options in mock mode
-        iv = 0.0
-        delta = 0.0
-        gamma = 0.0
-        theta = 0.0
-        vega = 0.0
-
-        if (last_price > 0 and
-            instrument.strike and
-            instrument.expiry and
-            instrument.instrument_type in ('CE', 'PE')):
-
-            # Get spot price from underlying state
-            spot_price = None
-            if self._mock_underlying_state:
-                spot_price = self._mock_underlying_state.last_close
-            elif self._last_underlying_price:
-                spot_price = self._last_underlying_price
-
-            if spot_price and spot_price > 0:
-                try:
-                    iv, greeks = self._greeks_calculator.calculate_option_greeks(
-                        market_price=last_price,
-                        spot_price=spot_price,
-                        strike_price=instrument.strike,
-                        expiry_date=instrument.expiry,
-                        option_type=instrument.instrument_type,
-                    )
-                    delta = greeks.get("delta", 0.0)
-                    gamma = greeks.get("gamma", 0.0)
-                    theta = greeks.get("theta", 0.0)
-                    vega = greeks.get("vega", 0.0)
-                    logger.info(
-                        f"MOCK GREEKS: Calculated for {instrument.tradingsymbol} | "
-                        f"price={last_price:.2f} spot={spot_price:.2f} | "
-                        f"IV={iv:.4f} delta={delta:.4f}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to calculate mock Greeks for {instrument.tradingsymbol}: {e}")
-
-        return MockOptionState(
-            instrument=instrument,
-            base_price=last_price,
-            last_price=last_price,
-            base_volume=volume or 1,
-            base_oi=oi,
-            iv=iv,
-            delta=delta,
-            gamma=gamma,
-            theta=theta,
-            vega=vega,
-        )
+        """Delegate to mock generator service"""
+        await self._mock_generator.ensure_options_seeded(client, instruments, self._last_underlying_price)
 
     async def _generate_mock_option_snapshot(self, instrument: Instrument) -> Optional[OptionSnapshot]:
-        """Generate mock option snapshot with thread-safe state access"""
-        async with self._mock_seed_lock:
-            state = self._mock_option_state.get(instrument.instrument_token)
-            if not state:
-                return None
+        """Delegate to mock generator service"""
+        return await self._mock_generator.generate_option_snapshot(instrument)
 
-            variance = settings.mock_price_variation_bps / 10_000.0
-            price_drift = random.uniform(-variance, variance)
-            new_price = max(0.05, state.last_price * (1 + price_drift))
-            state.last_price = new_price
-            state.base_price = (state.base_price * 0.85) + (new_price * 0.15)
+    async def _reset_mock_state(self) -> None:
+        """Reset mock state when transitioning to live mode"""
+        try:
+            await self._mock_generator.cleanup_expired()
+            logger.debug("Mock state reset for live mode transition")
+        except Exception as exc:
+            logger.warning(f"Failed to reset mock state: {exc}")
 
-            volume = self._jitter_int(state.base_volume, settings.mock_volume_variation, minimum=0)
-            oi = self._jitter_int(state.base_oi, settings.mock_volume_variation, minimum=0)
-            state.base_volume = max(1, int((state.base_volume * 0.7) + (volume * 0.3)))
-            state.base_oi = max(0, int((state.base_oi * 0.7) + (oi * 0.3)))
+    async def _mock_state_cleanup_loop(self) -> None:
+        """Background task: Cleanup expired mock state every 5 minutes"""
+        logger.info("Mock state cleanup loop started")
 
-            # Generate mock market depth
-            tick_size = instrument.tick_size or 0.05
-            mock_depth = self._generate_mock_market_depth(new_price, tick_size)
+        while self._running:
+            try:
+                await asyncio.sleep(300)  # 5 minutes
 
-            # Calculate total buy/sell quantities
-            total_buy_qty = sum(level.quantity for level in mock_depth.buy)
-            total_sell_qty = sum(level.quantity for level in mock_depth.sell)
+                if not self._running:
+                    break
 
-            return OptionSnapshot(
-                instrument=instrument,
-                last_price=round(new_price, 2),
-                volume=volume,
-                oi=oi,
-                iv=state.iv,
-                delta=state.delta,
-                gamma=state.gamma,
-                theta=state.theta,
-                vega=state.vega,
-                timestamp=int(time.time()),
-                is_mock=False,  # TEMP: Changed from True for testing
-                depth=mock_depth,
-                total_buy_quantity=total_buy_qty,
-                total_sell_quantity=total_sell_qty,
-            )
+                # Cleanup expired options
+                await self._mock_generator.cleanup_expired()
 
-    @staticmethod
-    def _generate_mock_market_depth(last_price: float, tick_size: float = 0.05) -> MarketDepth:
-        """
-        Generate realistic mock market depth.
+            except asyncio.CancelledError:
+                logger.info("Mock state cleanup loop cancelled")
+                break
+            except Exception as exc:
+                logger.exception(f"Mock state cleanup loop error: {exc}")
+                await asyncio.sleep(60)  # Wait 1 minute on error before retrying
 
-        Args:
-            last_price: Current option price
-            tick_size: Minimum price increment
-
-        Returns:
-            MarketDepth with 5 bid and 5 ask levels
-        """
-        # Generate 5 bid levels (descending prices)
-        buy_levels = []
-        for i in range(5):
-            bid_price = last_price - (tick_size * (i + 1))
-            if bid_price < tick_size:
-                bid_price = tick_size
-            quantity = random.randint(25, 200) * (5 - i)  # More quantity at better prices
-            orders = random.randint(2, 8)
-            buy_levels.append(DepthLevel(
-                quantity=quantity,
-                price=round(bid_price, 2),
-                orders=orders
-            ))
-
-        # Generate 5 ask levels (ascending prices)
-        sell_levels = []
-        for i in range(5):
-            ask_price = last_price + (tick_size * (i + 1))
-            quantity = random.randint(25, 200) * (5 - i)  # More quantity at better prices
-            orders = random.randint(2, 8)
-            sell_levels.append(DepthLevel(
-                quantity=quantity,
-                price=round(ask_price, 2),
-                orders=orders
-            ))
-
-        return MarketDepth(buy=buy_levels, sell=sell_levels)
-
-    @staticmethod
-    def _jitter_int(base: int, proportion: float, minimum: int = 0) -> int:
-        base = max(base, minimum)
-        jitter = max(int(base * proportion), 5 if base == 0 else 1)
-        low = base - jitter
-        high = base + jitter
-        return max(minimum, random.randint(low, high))
+        logger.info("Mock state cleanup loop stopped")
 
     async def _registry_refresh_loop(self, interval: int) -> None:
         while not self._stop_event.is_set():
@@ -658,37 +481,6 @@ class MultiAccountTickerLoop:
             except Exception as exc:  # pragma: no cover - network dependent
                 logger.exception("Instrument registry background refresh failed: %s", exc)
                 await asyncio.sleep(60)
-
-    async def _load_subscription_plan(self) -> List[SubscriptionPlanItem]:
-        await instrument_registry.initialise()
-
-        active_records = await subscription_store.list_active()
-        if not active_records:
-            return []
-
-        plan: List[SubscriptionPlanItem] = []
-        stale: List[int] = []
-
-        for record in active_records:
-            metadata = await instrument_registry.fetch_metadata(record.instrument_token)
-            if not metadata or not metadata.is_active:
-                stale.append(record.instrument_token)
-                continue
-            plan.append(
-                SubscriptionPlanItem(
-                    record=record,
-                    instrument=metadata.to_instrument(),
-                )
-            )
-
-        for token in stale:
-            try:
-                await subscription_store.deactivate(token)
-                logger.info("Deactivated subscription %s – instrument missing or inactive.", token)
-            except Exception as exc:
-                logger.exception("Failed to deactivate stale subscription %s: %s", token, exc)
-
-        return plan
 
     async def _available_accounts(self) -> List[str]:
         orchestrator = self._orchestrator or SessionOrchestrator()
@@ -711,35 +503,6 @@ class MultiAccountTickerLoop:
         if unavailable:
             logger.warning("Accounts skipped due to authentication failure: %s", ", ".join(unavailable))
         return available
-
-    async def _build_assignments(
-        self, plan_items: List[SubscriptionPlanItem], accounts: List[str]
-    ) -> Dict[str, List[Instrument]]:
-        if not accounts:
-            return {}
-
-        assignments: Dict[str, List[Instrument]] = {account_id: [] for account_id in accounts}
-        rr_index = 0
-        account_count = len(accounts)
-
-        for item in plan_items:
-            target_account = item.record.account_id if item.record.account_id in assignments else None
-            if target_account is None:
-                target_account = accounts[rr_index % account_count]
-                rr_index += 1
-
-            assignments[target_account].append(item.instrument)
-            try:
-                await subscription_store.update_account(item.record.instrument_token, target_account)
-            except Exception as exc:
-                logger.exception(
-                    "Failed to persist account assignment for token %s -> %s: %s",
-                    item.record.instrument_token,
-                    target_account,
-                    exc,
-                )
-
-        return {account: instruments for account, instruments in assignments.items() if instruments}
 
     async def _stream_underlying(self) -> None:
         try:
@@ -800,7 +563,7 @@ class MultiAccountTickerLoop:
         await publish_underlying_bar(payload)
 
     async def _emit_mock_underlying(self) -> None:
-        if self._mock_underlying_state is None:
+        if self._mock_generator.get_underlying_snapshot() is None:
             try:
                 async with self._orchestrator.borrow() as client:
                     await self._ensure_mock_underlying_seed(client)
@@ -866,9 +629,8 @@ class MultiAccountTickerLoop:
             logger.error("Ticker error [%s]: %s", _account, exc)
 
         await client.subscribe_tokens(tokens, on_ticks=on_ticks, on_error=on_error)
-        if not self._historical_bootstrap_done.get(account_id):
-            await self._emit_historical_bootstrap(client, instruments)
-            self._historical_bootstrap_done[account_id] = True
+        if not self._bootstrapper.is_bootstrap_done(account_id):
+            await self._bootstrapper.backfill_missing_history(account_id, instruments, client)
 
         try:
             while self._is_market_hours() and not self._stop_event.is_set():
@@ -900,11 +662,27 @@ class MultiAccountTickerLoop:
         logger.info("Account %s: Starting MOCK data stream (outside market hours)", account_id)
         await self._ensure_mock_option_seed(client, instruments)
 
+        # Get current date for expiry filtering
+        today_market = self._now_market().date()
+
+        # Filter out expired instruments
+        active_instruments = [
+            inst for inst in instruments
+            if not inst.expiry or inst.expiry >= today_market
+        ]
+
+        if len(active_instruments) < len(instruments):
+            logger.info(
+                "Filtered out %d expired contracts from mock stream for account %s",
+                len(instruments) - len(active_instruments),
+                account_id
+            )
+
         try:
             while not self._is_market_hours() and not self._stop_event.is_set():
-                await self._ensure_mock_option_seed(client, instruments)
+                await self._ensure_mock_option_seed(client, active_instruments)
                 emitted = 0
-                for instrument in instruments:
+                for instrument in active_instruments:
                     # Double-check market hours before each emission
                     if self._is_market_hours():
                         logger.debug("Market hours started during mock emission - stopping")
@@ -923,144 +701,31 @@ class MultiAccountTickerLoop:
             logger.info("Account %s: Stopping MOCK data stream (market hours started)", account_id)
 
     async def _handle_ticks(self, account_id: str, lookup: Dict[int, Instrument], ticks: List[Dict[str, Any]]) -> None:
+        """
+        Handle incoming tick data by delegating to TickProcessor.
+
+        Args:
+            account_id: Account ID that received these ticks
+            lookup: Mapping of instrument tokens to instruments
+            ticks: List of raw tick data from WebSocket
+        """
+        # Update last tick time
         if ticks:
             self._last_tick_at[account_id] = time.time()
-        for tick in ticks:
-            instrument = lookup.get(tick.get("instrument_token"))
-            if not instrument:
-                continue
 
-            # Route index/underlying instruments to underlying channel
-            if instrument.segment == "INDICES":
-                last_price = float(tick.get("last_price") or 0.0)
+        # Get current date for expiry checking
+        today_market = self._now_market().date()
 
-                # Normalize symbol to canonical form (NIFTY 50 -> NIFTY)
-                canonical_symbol = normalize_symbol(instrument.tradingsymbol)
+        # Delegate to tick processor
+        await self._tick_processor.process_ticks(
+            account_id=account_id,
+            lookup=lookup,
+            ticks=ticks,
+            today_market=today_market,
+        )
 
-                bar = {
-                    "symbol": canonical_symbol,
-                    "instrument_token": instrument.instrument_token,
-                    "last_price": last_price,
-                    "volume": int(tick.get("volume_traded_today") or tick.get("volume") or 0),
-                    "timestamp": int(tick.get("timestamp", int(time.time()))),
-                    "ohlc": tick.get("ohlc", {}),
-                }
-                # Track underlying price for Greeks calculation
-                self._last_underlying_price = last_price
-                logger.info(f"GREEKS TEST: Underlying {canonical_symbol} price updated to {last_price}")
-                await publish_underlying_bar(bar)
-            else:
-                # Route option instruments to options channel
-                # Calculate Greeks for options using underlying price
-                market_price = float(tick.get("last_price") or 0.0)
-
-                # Initialize Greeks to zero
-                iv = 0.0
-                delta = 0.0
-                gamma = 0.0
-                theta = 0.0
-                vega = 0.0
-
-                # Only calculate Greeks if we have valid data
-                if (market_price > 0 and
-                    self._last_underlying_price and
-                    self._last_underlying_price > 0 and
-                    instrument.strike and
-                    instrument.expiry and
-                    instrument.instrument_type in ('CE', 'PE')):
-
-                    try:
-                        # Calculate IV and Greeks
-                        iv, greeks = self._greeks_calculator.calculate_option_greeks(
-                            market_price=market_price,
-                            spot_price=self._last_underlying_price,
-                            strike_price=instrument.strike,
-                            expiry_date=instrument.expiry,
-                            option_type=instrument.instrument_type,
-                        )
-                        delta = greeks.get("delta", 0.0)
-                        gamma = greeks.get("gamma", 0.0)
-                        theta = greeks.get("theta", 0.0)
-                        vega = greeks.get("vega", 0.0)
-                        logger.info(
-                            f"GREEKS TEST: Calculated for {instrument.tradingsymbol} | "
-                            f"price={market_price:.2f} spot={self._last_underlying_price:.2f} | "
-                            f"IV={iv:.4f} delta={delta:.4f}"
-                        )
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to calculate Greeks for %s (strike=%s, spot=%s, price=%s): %s",
-                            instrument.tradingsymbol,
-                            instrument.strike,
-                            self._last_underlying_price,
-                            market_price,
-                            e,
-                        )
-
-                # Normalize the underlying symbol (e.g., NIFTY 50 -> NIFTY)
-                canonical_symbol = normalize_symbol(instrument.symbol)
-
-                # Extract market depth if available
-                depth_data = tick.get("depth")
-                market_depth = None
-                total_buy_qty = int(tick.get("total_buy_quantity", 0))
-                total_sell_qty = int(tick.get("total_sell_quantity", 0))
-
-                if depth_data:
-                    try:
-                        # Extract buy (bid) levels
-                        buy_levels = []
-                        for level in depth_data.get("buy", []):
-                            buy_levels.append(DepthLevel(
-                                quantity=int(level.get("quantity", 0)),
-                                price=float(level.get("price", 0.0)) / 100.0,  # Convert paise to rupees
-                                orders=int(level.get("orders", 0))
-                            ))
-
-                        # Extract sell (ask) levels
-                        sell_levels = []
-                        for level in depth_data.get("sell", []):
-                            sell_levels.append(DepthLevel(
-                                quantity=int(level.get("quantity", 0)),
-                                price=float(level.get("price", 0.0)) / 100.0,  # Convert paise to rupees
-                                orders=int(level.get("orders", 0))
-                            ))
-
-                        if buy_levels or sell_levels:
-                            market_depth = MarketDepth(buy=buy_levels, sell=sell_levels)
-                    except Exception as e:
-                        logger.debug(f"Failed to parse market depth for {instrument.tradingsymbol}: {e}")
-
-                # Create a normalized instrument with canonical underlying symbol
-                normalized_instrument = Instrument(
-                    symbol=canonical_symbol,  # Normalized underlying (NIFTY)
-                    instrument_token=instrument.instrument_token,
-                    tradingsymbol=instrument.tradingsymbol,  # Keep full option name as-is (NIFTY25NOV25000CE)
-                    segment=instrument.segment,
-                    exchange=instrument.exchange,
-                    strike=instrument.strike,
-                    expiry=instrument.expiry,
-                    instrument_type=instrument.instrument_type,
-                    lot_size=instrument.lot_size,
-                    tick_size=instrument.tick_size,
-                )
-
-                snapshot = OptionSnapshot(
-                    instrument=normalized_instrument,
-                    last_price=market_price,
-                    volume=int(tick.get("volume_traded_today") or tick.get("volume") or 0),
-                    oi=int(tick.get("oi") or tick.get("open_interest") or 0),
-                    iv=iv,
-                    delta=delta,
-                    gamma=gamma,
-                    theta=theta,
-                    vega=vega,
-                    timestamp=int(tick.get("timestamp", int(time.time()))),
-                    depth=market_depth,
-                    total_buy_quantity=total_buy_qty,
-                    total_sell_quantity=total_sell_qty,
-                )
-                await publish_option_snapshot(snapshot)
+        # Sync underlying price from processor to generator (for backward compatibility)
+        self._last_underlying_price = self._tick_processor.get_last_underlying_price()
 
     def runtime_state(self) -> Dict[str, Any]:
         orchestrator_stats = self._orchestrator.stats() if self._orchestrator else []
@@ -1096,31 +761,5 @@ class MultiAccountTickerLoop:
         if self._orchestrator is None:
             self._orchestrator = orchestrator
         return orchestrator.borrow(account_id)
-
-    async def _emit_historical_bootstrap(self, client: KiteClient, instruments: List[Instrument]) -> None:
-        if settings.historical_days <= 0:
-            return
-        now = int(time.time())
-        from_ts = now - settings.historical_days * 86400
-        sample = instruments[: settings.historical_bootstrap_batch]
-        for instrument in sample:
-            try:
-                await client.fetch_historical(
-                    instrument_token=instrument.instrument_token,
-                    from_ts=from_ts,
-                    to_ts=now,
-                    interval="minute",
-                )
-            except Exception as exc:
-                logger.error("Historical fetch failed [%s token=%s]: %s", client.account_id, instrument.instrument_token, exc)
-        logger.info(
-            "Historical bootstrap complete | account=%s instruments=%d days=%d",
-            client.account_id,
-            len(sample),
-            settings.historical_days,
-        )
-        if not sample:
-            logger.debug("Historical bootstrap skipped (no instruments sampled)")
-
 
 ticker_loop = MultiAccountTickerLoop()

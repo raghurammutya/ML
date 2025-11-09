@@ -39,6 +39,30 @@ export default defineConfig({
         target: 'http://tv-backend-dev:8000',
         changeOrigin: true,
       },
+      
+      // ───── Monitor endpoints ─────
+      '/monitor': {
+        target: 'http://tv-backend-dev:8000',
+        changeOrigin: true,
+      },
+
+      // ───── F&O Analytics endpoints ─────
+      '/fo': {
+        target: 'http://tv-backend-dev:8000',
+        changeOrigin: true,
+      },
+
+      // ───── Instruments API endpoints ─────
+      '/instruments': {
+        target: 'http://tv-backend-dev:8000',
+        changeOrigin: true,
+      },
+
+      // ───── Indicators API endpoints ─────
+      '/indicators': {
+        target: 'http://tv-backend-dev:8000',
+        changeOrigin: true,
+      },
 
       // ───── Keep any other routes you actually use ─────
       // Example: if you have a config endpoint:

@@ -1,0 +1,36 @@
+# Prometheus Configuration for Ticker Service
+
+global:
+  scrape_interval: 15s       # Scrape targets every 15 seconds
+  evaluation_interval: 15s   # Evaluate rules every 15 seconds
+  external_labels:
+    cluster: 'ticker-service'
+    env: 'development'
+
+# Load alerting rules
+rule_files:
+  - /etc/prometheus/rules/tick-processing-alerts.yml
+
+# Scrape configurations
+scrape_configs:
+  # Ticker service metrics
+  - job_name: 'ticker-service'
+    static_configs:
+      - targets: ['host.docker.internal:8080']  # Ticker service /metrics endpoint
+        labels:
+          service: 'ticker-service'
+          component: 'tick-processor'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+# Optional: Alertmanager configuration (uncomment if using Alertmanager)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - alertmanager:9093

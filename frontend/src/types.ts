@@ -98,14 +98,53 @@ export interface FoStrikePoint {
 
 export interface FoStrikeGreekEntry {
   strike: number
+  moneyness?: string | null
+  moneyness_bucket?: string | null
+  
+  // Standard Greeks
   iv?: number | null
   delta?: number | null
   gamma?: number | null
   theta?: number | null
   vega?: number | null
+  
+  // Enhanced Greeks
+  rho?: number | null
+  theta_daily?: number | null
+  
+  // Pricing
+  intrinsic?: number | null
+  extrinsic?: number | null
+  premium?: number | null
+  ltp?: number | null
+  model_price?: number | null
+  premium_discount_abs?: number | null
+  premium_discount_pct?: number | null
+  
+  // Volume & OI
+  volume?: number | null
   oi?: number | null
   pcr?: number | null
+  
+  // Market Depth
+  liquidity_score?: number | null
+  spread_abs?: number | null
+  spread_pct?: number | null
+  depth_imbalance?: number | null
+  book_pressure?: number | null
+  bid_qty?: number | null
+  ask_qty?: number | null
+  microprice?: number | null
+  
+  // Legacy fields for backward compatibility
   value?: number | null
+  premium_ltp?: number | null
+  intrinsic_value?: number | null
+  extrinsic_value?: number | null
+  decay?: number | null
+  daily_theta?: number | null
+  oi_change?: number | null
+  order_imbalance?: number | null
 }
 
 export interface FoStrikeSeriesMetadata {
@@ -113,6 +152,10 @@ export interface FoStrikeSeriesMetadata {
   has_greeks?: boolean
   has_oi?: boolean
   atm_strike?: number | null
+  total_call_oi?: number | null
+  total_put_oi?: number | null
+  pcr?: number | null
+  max_pain_strike?: number | null
 }
 
 export interface FoStrikeSeries {
@@ -136,6 +179,7 @@ export interface FoStrikeDistributionResponse {
   symbol: string
   timeframe: string
   indicator: string
+  option_side?: string | null
   series: FoStrikeSeries[]
   metadata?: FoStrikeDistributionMetadata
 }

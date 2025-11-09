@@ -27,7 +27,9 @@ from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
 from app.services.session_subscription_manager import SessionSubscriptionManager, init_subscription_manager
-from app.routes import marks_asyncpg, labels, indicators, fo, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments
+from app.dependencies import set_cache_manager
+from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies
+from app.workers.strategy_m2m_worker import strategy_m2m_task
 from app.routes import calendar_simple as calendar
 from app.routes import admin_calendar
 from app.routes import corporate_calendar
@@ -66,13 +68,14 @@ async def task_supervisor():
     """
     Supervise background tasks and restart them if they fail.
     """
-    global data_manager, cache_manager
+    global data_manager, cache_manager, redis_client
 
     # If you have a separate health_check_task, import and add it here.
     task_configs = [
         {"name": "cache_maintenance", "func": cache_maintenance_task, "args": [cache_manager]},
         {"name": "data_refresh", "func": data_refresh_task, "args": [data_manager]},
         {"name": "metrics_update", "func": metrics_update_task, "args": []},
+        {"name": "strategy_m2m", "func": strategy_m2m_task, "args": [data_manager.pool, redis_client, settings.ticker_service_url]},
         # {"name": "health_check", "func": health_check_task, "args": []},  # only if defined
     ]
 
@@ -138,6 +141,7 @@ async def lifespan(app: FastAPI):
 
         # Cache
         cache_manager = CacheManager(redis_client)
+        set_cache_manager(cache_manager)  # Set global cache manager for dependencies
 
         # Session Subscription Manager (Session-isolated indicator subscriptions)
         init_subscription_manager(redis_client)
@@ -178,6 +182,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to include indicators router: {e}")
         logger.info("UDF routes included successfully")
         app.include_router(fo.router)
+        app.include_router(futures.router)  # Futures position analysis & rollover metrics
 
         ticker_client = TickerServiceClient(
             settings.ticker_service_url,
@@ -227,6 +232,7 @@ async def lifespan(app: FastAPI):
         app.include_router(corporate_calendar.router)  # Corporate calendar: corporate actions API
         instruments.set_data_manager(data_manager)  # Set data manager for instruments
         app.include_router(instruments.router)  # Instruments: list and filter tradeable symbols
+        app.include_router(strategies.router)  # Strategies: manage trading strategies and instruments
         logger.info("Indicator API and WebSocket routes included")
 
         if settings.fo_stream_enabled:
