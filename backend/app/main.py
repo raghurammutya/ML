@@ -29,6 +29,9 @@ from .realtime import RealTimeHub
 from .ticker_client import TickerServiceClient
 from .nifty_monitor_service import NiftyMonitorStream, NiftySubscriptionManager
 from .order_stream import OrderStreamManager
+from .position_stream import PositionStreamManager
+from .services.position_tracker import PositionTracker
+from .workers.order_cleanup_worker import OrderCleanupWorker
 from app.services.session_subscription_manager import SessionSubscriptionManager, init_subscription_manager
 from app.dependencies import set_cache_manager
 from app.routes import marks_asyncpg, labels, indicators, fo, futures, nifty_monitor, label_stream, historical, replay, accounts, order_ws, api_keys, indicators_api, indicator_ws, indicator_ws_session, instruments, strategies, smart_orders
@@ -65,6 +68,9 @@ labels_hub: Optional[RealTimeHub] = None
 backfill_manager: Optional[BackfillManager] = None
 order_hub: Optional[RealTimeHub] = None
 order_stream_manager: Optional[OrderStreamManager] = None
+position_stream_manager: Optional[PositionStreamManager] = None
+position_tracker: Optional[PositionTracker] = None
+order_cleanup_worker: Optional[OrderCleanupWorker] = None
 snapshot_service = None  # Account snapshot service
 indicator_streaming_task = None  # Indicator streaming background task
 session_subscription_manager = None  # Session-isolated indicator subscriptions
@@ -130,6 +136,9 @@ async def lifespan(app: FastAPI):
     global backfill_manager
     global order_hub
     global order_stream_manager
+    global position_stream_manager
+    global position_tracker
+    global order_cleanup_worker
     global snapshot_service
     global indicator_streaming_task
     global session_subscription_manager
@@ -291,6 +300,25 @@ async def lifespan(app: FastAPI):
         await order_stream_manager.start()
         logger.info("Order stream manager started")
 
+        # Housekeeping: Position tracker and order cleanup worker (Phase 6)
+        position_tracker = PositionTracker()
+        order_cleanup_worker = OrderCleanupWorker(
+            dm=data_manager,
+            ticker_url=settings.ticker_service_url,
+            position_tracker=position_tracker
+        )
+        logger.info("Position tracker and order cleanup worker initialized")
+
+        # Position stream manager (Phase 6: Position WebSocket streaming + housekeeping)
+        position_stream_manager = PositionStreamManager(
+            ticker_url=settings.ticker_service_url,
+            realtime_hub=real_time_hub,
+            data_manager=data_manager,
+            position_tracker=position_tracker
+        )
+        await position_stream_manager.start()
+        logger.info("Position stream manager started (housekeeping enabled)")
+
         # Account snapshot service (Historical positions/holdings/funds)
         from app.services.snapshot_service import AccountSnapshotService
         from app.services.account_service import AccountService
@@ -333,6 +361,12 @@ async def lifespan(app: FastAPI):
             await backfill_manager.shutdown()
         if order_stream_manager:
             await order_stream_manager.stop()
+        if position_stream_manager:
+            await position_stream_manager.stop()
+            logger.info("Position stream manager stopped")
+        if order_cleanup_worker:
+            await order_cleanup_worker.close()
+            logger.info("Order cleanup worker stopped")
         if snapshot_service:
             await snapshot_service.stop()
             logger.info("Snapshot service stopped")
